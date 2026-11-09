@@ -1,7 +1,11 @@
-package agent
+// Package keys describes sealed-secrets sealing keys by their public
+// certificates. The agent and the control plane both use it, so they always
+// agree on a key's fingerprint.
+package keys
 
 import (
 	"crypto/rsa"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"time"
@@ -10,8 +14,8 @@ import (
 	"k8s.io/client-go/util/cert"
 )
 
-// minKeyBits is the smallest controller key the agent will accept.
-const minKeyBits = 2048
+// MinBits is the smallest RSA key accepted.
+const MinBits = 2048
 
 // Key describes one sealing key by its public certificate.
 type Key struct {
@@ -24,7 +28,7 @@ type Key struct {
 }
 
 // ParseCert parses the first certificate in pemBytes and returns the key it
-// describes. It accepts only RSA keys of at least minKeyBits.
+// describes. It accepts only RSA keys of at least MinBits.
 func ParseCert(pemBytes []byte) (Key, *rsa.PublicKey, error) {
 	certs, err := cert.ParseCertsPEM(pemBytes)
 	if err != nil {
@@ -33,13 +37,16 @@ func ParseCert(pemBytes []byte) (Key, *rsa.PublicKey, error) {
 	if len(certs) == 0 {
 		return Key{}, nil, errors.New("failed to parse certificate pem: no certificates")
 	}
-	c := certs[0]
+	return describe(certs[0])
+}
+
+func describe(c *x509.Certificate) (Key, *rsa.PublicKey, error) {
 	pub, ok := c.PublicKey.(*rsa.PublicKey)
 	if !ok {
 		return Key{}, nil, fmt.Errorf("failed to use certificate: expected an rsa public key, got %T", c.PublicKey)
 	}
-	if bits := pub.N.BitLen(); bits < minKeyBits {
-		return Key{}, nil, fmt.Errorf("failed to use certificate: rsa key has %d bits, need at least %d", bits, minKeyBits)
+	if bits := pub.N.BitLen(); bits < MinBits {
+		return Key{}, nil, fmt.Errorf("failed to use certificate: rsa key has %d bits, need at least %d", bits, MinBits)
 	}
 	fp, err := sscrypto.PublicKeyFingerprint(pub)
 	if err != nil {
@@ -47,8 +54,8 @@ func ParseCert(pemBytes []byte) (Key, *rsa.PublicKey, error) {
 	}
 	return Key{
 		Fingerprint: fp,
-		NotBefore:   c.NotBefore,
-		NotAfter:    c.NotAfter,
+		NotBefore:   c.NotBefore.UTC(),
+		NotAfter:    c.NotAfter.UTC(),
 		Bits:        pub.N.BitLen(),
 	}, pub, nil
 }

@@ -11,38 +11,62 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/testutil/testcerts"
 )
 
-// fakeCerts returns the queued responses in order, repeating the last one.
-type fakeCerts struct {
-	mu        sync.Mutex
-	responses []fakeResponse
+type fakeInventory struct {
+	report Report
+	err    error
 }
 
-type fakeResponse struct {
-	pem []byte
-	err error
+func (f *fakeInventory) Collect(context.Context) (Report, error) { return f.report, f.err }
+
+type fakeControlPlane struct {
+	mu   sync.Mutex
+	got  []protocol.CheckIn
+	errs []error
 }
 
-func (f *fakeCerts) ActiveCert(context.Context) ([]byte, error) {
+func (f *fakeControlPlane) CheckIn(_ context.Context, in protocol.CheckIn) (*protocol.CheckInResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.responses[0]
-	if len(f.responses) > 1 {
-		f.responses = f.responses[1:]
+	f.got = append(f.got, in)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return nil, err
+		}
 	}
-	return r.pem, r.err
+	return &protocol.CheckInResponse{NextCheckInSeconds: 15}, nil
 }
 
-func newTestAgent(certs CertSource) (*Agent, *bytes.Buffer) {
+func reportWith(t *testing.T) Report {
+	t.Helper()
+	k, err := toProtocolKey(testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now().Add(-time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Report{
+		Controller: protocol.Controller{Namespace: "sealed-secrets", Name: "sealed-secrets-controller", ActiveFingerprint: k.Fingerprint},
+		Keys:       []protocol.Key{k},
+		Complete:   true,
+	}
+}
+
+func newTestAgent(inv Collector, cp CheckInClient, now func() time.Time) (*Agent, *bytes.Buffer) {
 	var logs bytes.Buffer
-	a := New(Options{
-		Certs:    certs,
-		Interval: time.Minute,
-		Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
-		Version:  "test",
-	})
-	return a, &logs
+	return New(Options{
+		Inventory:    inv,
+		ControlPlane: cp,
+		Interval:     15 * time.Second,
+		Capabilities: []string{"seal", "keys"},
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		Version:      "test",
+		Now:          now,
+	}), &logs
 }
 
 func probe(t *testing.T, a *Agent, path string) int {
@@ -52,67 +76,70 @@ func probe(t *testing.T, a *Agent, path string) int {
 	return rec.Code
 }
 
-func TestAgent_ReadyOnlyAfterCertRead(t *testing.T) {
-	good := selfSigned(t, rsaKey(t, 2048), time.Now().Add(-time.Hour))
-	certs := &fakeCerts{responses: []fakeResponse{
-		{err: errors.New("controller not up")},
-		{pem: good},
-	}}
-	a, logs := newTestAgent(certs)
+func TestAgent_ChecksInWithReport(t *testing.T) {
+	cp := &fakeControlPlane{}
+	report := reportWith(t)
+	a, logs := newTestAgent(&fakeInventory{report: report}, cp, nil)
 
-	if got := probe(t, a, "/healthz"); got != http.StatusOK {
-		t.Fatalf("/healthz = %d, want 200", got)
+	a.cycle(context.Background())
+	if len(cp.got) != 1 {
+		t.Fatalf("check-ins = %d", len(cp.got))
 	}
-
-	a.refresh(context.Background())
-	if got := probe(t, a, "/readyz"); got != http.StatusServiceUnavailable {
-		t.Fatalf("/readyz after failed read = %d, want 503", got)
+	in := cp.got[0]
+	if in.Protocol != protocol.Version || in.AgentVersion != "test" || !in.KeysComplete ||
+		in.Controller.ActiveFingerprint != report.Controller.ActiveFingerprint || len(in.Capabilities) != 2 {
+		t.Fatalf("check-in = %+v", in)
 	}
-	if !strings.Contains(logs.String(), "event=controller.cert_failed") {
-		t.Errorf("failed read was not logged:\n%s", logs)
+	if in.Commands == nil {
+		t.Error("commands must be an empty list, not null")
 	}
-
-	a.refresh(context.Background())
-	if got := probe(t, a, "/readyz"); got != http.StatusOK {
-		t.Fatalf("/readyz after good read = %d, want 200", got)
-	}
-	if _, ok := a.ActiveKey(); !ok {
-		t.Fatal("ActiveKey reports nothing after a good read")
+	for _, ev := range []string{"event=controller.key_active", "event=agent.checked_in"} {
+		if !strings.Contains(logs.String(), ev) {
+			t.Errorf("missing %s in logs:\n%s", ev, logs)
+		}
 	}
 }
 
-func TestAgent_LogsOnlyKeyChanges(t *testing.T) {
-	first := selfSigned(t, rsaKey(t, 2048), time.Now().Add(-time.Hour))
-	second := selfSigned(t, rsaKey(t, 2048), time.Now().Add(-time.Minute))
-	certs := &fakeCerts{responses: []fakeResponse{{pem: first}, {pem: first}, {pem: second}}}
-	a, logs := newTestAgent(certs)
+func TestAgent_ReadinessFollowsCheckIns(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cp := &fakeControlPlane{errs: []error{errors.New("down"), nil}}
+	a, logs := newTestAgent(&fakeInventory{report: reportWith(t)}, cp, clock)
 
-	for range 3 {
-		a.refresh(context.Background())
+	if probe(t, a, "/healthz") != http.StatusOK {
+		t.Fatal("/healthz must always answer")
 	}
-	if n := strings.Count(logs.String(), "event=controller.key_active"); n != 2 {
-		t.Errorf("logged %d key changes, want 2:\n%s", n, logs)
+	a.cycle(context.Background())
+	if probe(t, a, "/readyz") != http.StatusServiceUnavailable {
+		t.Fatal("ready before any successful check-in")
+	}
+	if !strings.Contains(logs.String(), "event=agent.checkin_failed") {
+		t.Error("failed check-in not logged")
+	}
+	a.cycle(context.Background())
+	if probe(t, a, "/readyz") != http.StatusOK {
+		t.Fatal("not ready after a successful check-in")
+	}
+	now = now.Add(time.Minute)
+	if probe(t, a, "/readyz") != http.StatusServiceUnavailable {
+		t.Fatal("still ready a minute after the last check-in")
 	}
 }
 
-func TestAgent_KeepsLastKeyWhenReadFails(t *testing.T) {
-	good := selfSigned(t, rsaKey(t, 2048), time.Now().Add(-time.Hour))
-	certs := &fakeCerts{responses: []fakeResponse{{pem: good}, {pem: []byte("junk")}}}
-	a, _ := newTestAgent(certs)
-
-	a.refresh(context.Background())
-	before, _ := a.ActiveKey()
-	a.refresh(context.Background())
-	after, ok := a.ActiveKey()
-	if !ok || after.Fingerprint != before.Fingerprint {
-		t.Fatalf("active key changed after a bad read: %+v -> %+v", before, after)
+func TestAgent_SkipsCheckInWhenControllerUnreadable(t *testing.T) {
+	cp := &fakeControlPlane{}
+	a, logs := newTestAgent(&fakeInventory{err: errors.New("controller down")}, cp, nil)
+	a.cycle(context.Background())
+	if len(cp.got) != 0 {
+		t.Fatal("checked in without a controller report")
+	}
+	if !strings.Contains(logs.String(), "event=controller.read_failed") {
+		t.Error("controller failure not logged")
 	}
 }
 
 func TestAgent_RunStopsWithContext(t *testing.T) {
-	good := selfSigned(t, rsaKey(t, 2048), time.Now().Add(-time.Hour))
-	a, _ := newTestAgent(&fakeCerts{responses: []fakeResponse{{pem: good}}})
-
+	a, _ := newTestAgent(&fakeInventory{report: reportWith(t)}, &fakeControlPlane{}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()

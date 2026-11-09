@@ -3,23 +3,59 @@
 package controlplane
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 )
+
+// AgentVerifier checks the identity an agent logs in with.
+type AgentVerifier interface {
+	Verify(ctx context.Context, token string) (*registry.Agent, error)
+}
 
 // Options configures a Server.
 type Options struct {
-	Logger  *slog.Logger
-	Version string
+	Logger   *slog.Logger
+	Version  string
+	Env      string
+	Registry *registry.Registry
+	Verifier AgentVerifier
+	Sessions *agentauth.Sessions
+	Store    store.Store
+	// AdminToken enables the admin API. Empty disables it.
+	AdminToken string
+	// Now overrides the clock, for tests.
+	Now func() time.Time
 }
 
 // Server is the control plane's HTTP handler. The same handler runs behind
 // the HTTP server and the Lambda adapter.
 type Server struct {
-	logger  *slog.Logger
-	version string
+	logger     *slog.Logger
+	version    string
+	env        string
+	reg        *registry.Registry
+	verifier   AgentVerifier
+	sessions   *agentauth.Sessions
+	store      store.Store
+	adminToken string
+	now        func() time.Time
+
+	// knownKeys caches fingerprints already recorded, so repeated check-ins
+	// do not repeat conditional writes. Losing it only costs writes.
+	knownMu   sync.Mutex
+	knownKeys map[string]bool
 }
 
 // New returns a Server. It makes no network calls.
@@ -28,7 +64,22 @@ func New(opts Options) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{logger: logger, version: opts.Version}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Server{
+		logger:     logger,
+		version:    opts.Version,
+		env:        opts.Env,
+		reg:        opts.Registry,
+		verifier:   opts.Verifier,
+		sessions:   opts.Sessions,
+		store:      opts.Store,
+		adminToken: opts.AdminToken,
+		now:        now,
+		knownKeys:  map[string]bool{},
+	}
 }
 
 // Handler returns the control plane's routes.
@@ -36,12 +87,54 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.health)
+
+	mux.HandleFunc("POST /agent/v1/session", s.agentSession)
+	mux.HandleFunc("POST /agent/v1/checkin", s.requireAgent(s.agentCheckIn))
+
+	if s.adminToken != "" {
+		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.adminFleet))
+	}
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		httpserver.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		writeError(w, http.StatusNotFound, "not found")
 	})
 	return mux
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.version})
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	httpserver.WriteJSON(w, status, protocol.Error{Error: msg})
+}
+
+// decodeJSON reads a JSON body of at most limit bytes with no unknown fields.
+// On failure it writes the error response and returns false.
+func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
+		return false
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
+// bearer returns the token from an "Authorization: Bearer" header.
+func bearer(r *http.Request) string {
+	v := r.Header.Get("Authorization")
+	if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
+		return strings.TrimSpace(v[7:])
+	}
+	return ""
 }

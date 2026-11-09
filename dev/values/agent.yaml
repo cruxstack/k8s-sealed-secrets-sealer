@@ -4,12 +4,22 @@ image:
   repository: local.invalid/sealer-agent
   tag: dev
 
+controlPlane:
+  url: http://sealer-control-plane.sealer-system.svc.cluster.local
+  # in-cluster plain http, local stack only
+  allowInsecure: true
+
+identity:
+  # the control plane's publicURL in dev/values/control-plane.yaml
+  audience: http://localhost:4100
+
 capabilities:
   seal: true
   keys: true
   renewal: true
 
-inventoryInterval: 15s
+# faster than the 15s default, so the local stack settles quickly
+checkinInterval: 5s
 
 log:
   level: debug

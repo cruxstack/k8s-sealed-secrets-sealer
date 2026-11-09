@@ -40,9 +40,8 @@ commands:
               if [[ "${CHECK_WRITE:-}" == "true" ]]; then
                 exec golangci-lint fmt
               fi
-              diff="$(golangci-lint fmt --diff)"
-              if [[ -n "$diff" ]]; then
-                printf '%s\n' "$diff"
+              # --diff prints the changes and exits non-zero when there are any
+              if ! golangci-lint fmt --diff; then
                 echo "Files need formatting; run 'atmos check fmt --write'." >&2
                 exit 1
               fi
@@ -94,8 +93,7 @@ commands:
               echo "+ go mod tidy -diff" >&2
               go mod tidy -diff
               echo "+ golangci-lint fmt --diff" >&2
-              diff="$(golangci-lint fmt --diff)"
-              [[ -z "$diff" ]] || { printf '%s\n' "$diff"; echo "run 'atmos check fmt --write'" >&2; exit 1; }
+              golangci-lint fmt --diff || { echo "Files need formatting; run 'atmos check fmt --write'." >&2; exit 1; }
               echo "+ golangci-lint run" >&2
               golangci-lint run
               bash .atmos/scripts/check/vuln.sh

@@ -1,4 +1,5 @@
-package agent
+// Package testcerts makes throwaway keys and certificates for tests.
+package testcerts
 
 import (
 	"crypto"
@@ -14,8 +15,9 @@ import (
 	"time"
 )
 
-// selfSigned returns a PEM certificate for key, valid from notBefore for a year.
-func selfSigned(t *testing.T, key crypto.Signer, notBefore time.Time) []byte {
+// SelfSigned returns a PEM certificate for key, valid from notBefore for a
+// year.
+func SelfSigned(t testing.TB, key crypto.Signer, notBefore time.Time) []byte {
 	t.Helper()
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
@@ -30,7 +32,13 @@ func selfSigned(t *testing.T, key crypto.Signer, notBefore time.Time) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-func rsaKey(t *testing.T, bits int) *rsa.PrivateKey {
+// PEM encodes a certificate as PEM.
+func PEM(c *x509.Certificate) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+}
+
+// RSA returns a new RSA key of the given size.
+func RSA(t testing.TB, bits int) *rsa.PrivateKey {
 	t.Helper()
 	k, err := rsa.GenerateKey(rand.Reader, bits)
 	if err != nil {
@@ -39,7 +47,8 @@ func rsaKey(t *testing.T, bits int) *rsa.PrivateKey {
 	return k
 }
 
-func ecKey(t *testing.T) *ecdsa.PrivateKey {
+// ECDSA returns a new P-256 key.
+func ECDSA(t testing.TB) *ecdsa.PrivateKey {
 	t.Helper()
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

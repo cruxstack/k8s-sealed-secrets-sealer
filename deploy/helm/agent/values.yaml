@@ -27,8 +27,22 @@ capabilities:
   # turn on the controller's key renewal when no cluster in the env has it
   renewal: false
 
-# how often the agent re-reads the controller
-inventoryInterval: 1m
+# The control plane this agent checks in with (required). It must be https;
+# allowInsecure permits plain http for local stacks only.
+controlPlane:
+  url: ""
+  allowInsecure: false
+
+# The agent logs in with a projected service-account token. Its audience must
+# match the control plane's agent audience, which is the control plane's
+# public URL unless configured otherwise.
+identity:
+  # defaults to controlPlane.url
+  audience: ""
+  expirationSeconds: 600
+
+# how often the agent reads the controller and checks in
+checkinInterval: 15s
 
 log:
   level: info

@@ -1,8 +1,26 @@
 # Local overrides for deploy/helm/control-plane. Tilt swaps the image for the
-# one it builds.
+# one it builds and generates the registry ConfigMap from dev/stack.yaml and
+# the k3d cluster's service-account issuer.
 image:
   repository: local.invalid/sealer-control-plane
   tag: dev
+
+env: dev
+# the local stack's canonical URL; agents' login tokens carry it as audience
+publicURL: http://localhost:4100
+
+registry:
+  configMapName: sealer-registry
+
+existingSecret: sealer-control-plane-local
+
+dynamodb:
+  table: sealer
+  endpoint: http://dynamodb-local.sealer-system.svc.cluster.local:8000
+  createTable: true
+
+aws:
+  region: us-east-1
 
 log:
   level: debug

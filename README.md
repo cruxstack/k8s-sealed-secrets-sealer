@@ -6,9 +6,10 @@ clusters and regions that environment spans. Users pick a repository and a
 file, type a value, and get a pull request. They never pick a cluster, a
 region or a certificate.
 
-> **Status:** early development. This repository currently contains the
-> scaffold: the local k3d stack, the agent reading its controller's key, and
-> the tooling. See [the design](docs/design.md) for where it is going.
+> **Status:** early development. Agents log in to the control plane, check
+> in with their controller's key set, and the control plane computes the
+> env's key state; sealing is next. See [the design](docs/design.md) for
+> where it is going.
 
 ## How it works
 

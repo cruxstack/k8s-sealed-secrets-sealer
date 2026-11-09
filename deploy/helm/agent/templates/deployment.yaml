@@ -43,8 +43,18 @@ spec:
               value: {{ .Values.controller.namespace | quote }}
             - name: APP_CONTROLLER_NAME
               value: {{ .Values.controller.name | quote }}
-            - name: APP_INVENTORY_INTERVAL
-              value: {{ .Values.inventoryInterval | quote }}
+            - name: APP_CONTROLLER_DEPLOYMENT
+              value: {{ include "agent.controllerDeployment" . | quote }}
+            - name: APP_CONTROL_PLANE_URL
+              value: {{ required "controlPlane.url is required" .Values.controlPlane.url | quote }}
+            - name: APP_ALLOW_INSECURE_CONTROL_PLANE
+              value: {{ .Values.controlPlane.allowInsecure | quote }}
+            - name: APP_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/k8s-sealed-secrets-sealer/token
+            - name: APP_CAPABILITIES
+              value: {{ include "agent.capabilities" . | quote }}
+            - name: APP_CHECKIN_INTERVAL
+              value: {{ .Values.checkinInterval | quote }}
             - name: APP_LOG_LEVEL
               value: {{ .Values.log.level | quote }}
             - name: APP_LOG_FORMAT
@@ -52,6 +62,10 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          volumeMounts:
+            - name: identity
+              mountPath: /var/run/secrets/k8s-sealed-secrets-sealer
+              readOnly: true
           ports:
             - name: probes
               containerPort: 8081
@@ -77,6 +91,16 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      volumes:
+        # the token the agent logs in to the control plane with; the kubelet
+        # rotates it before it expires
+        - name: identity
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ default .Values.controlPlane.url .Values.identity.audience | quote }}
+                  expirationSeconds: {{ .Values.identity.expirationSeconds }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
