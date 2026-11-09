@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+commands:
+  - name: test
+    description: Test suites
+    commands:
+      - name: unit
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+        description: |
+          Run the Go unit tests with the race detector. They need no network,
+          cluster or Docker. Extra arguments after `--` go to `go test`.
+
+            atmos test unit
+            atmos test unit -- -run TestParseCert ./internal/agent
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              args=({{ .TrailingArgs }})
+              [[ ${#args[@]} -gt 0 ]] || args=(./...)
+              echo "+ go test -race -count=1 ${args[*]}" >&2
+              exec go test -race -count=1 "${args[@]}"
+
+      - name: e2e
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+            k3d-io/k3d: 5.9.0
+            tilt-dev/tilt: 0.37.8
+            helm/helm: 3.22.1
+            kubernetes/kubectl: 1.36.5
+            jqlang/jq: 1.8.1
+            bitnami/sealed-secrets: 0.41.2
+        description: |
+          Run the whole stack in a throwaway k3d cluster (sealer-e2e, on ports
+          that do not clash with `atmos dev up`), wait until it is ready, check
+          the system end to end, then delete the cluster.
+
+            atmos test e2e
+            atmos test e2e --keep    # leave the cluster up for inspection
+        flags:
+          - name: keep
+            description: Keep the e2e cluster after the run
+            type: bool
+            required: false
+        env:
+          - key: E2E_KEEP
+            value: "{{ .Flags.keep }}"
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/test/e2e.sh

@@ -1,0 +1,631 @@
+# Design
+
+This document describes v1 of k8s-sealed-secrets-sealer: a control plane and a
+set of per-cluster agents that let people seal values into
+[Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) files in
+GitHub, and that keep the sealing keys of every cluster in an environment in
+sync.
+
+## 1. Goals and non-goals
+
+Goals:
+
+- **One domain per environment.** A person sealing a value opens one URL for
+  the environment (for example `sealer.dev.example.com`), picks a repository
+  and a file, and enters a key and a value. They never pick a cluster or a
+  region.
+- **Every cluster in an environment can decrypt every value sealed for that
+  environment.** The system keeps the clusters' sealing keys in sync and only
+  seals with a key that every cluster already holds.
+- **No inbound access to clusters.** Agents make outbound HTTPS calls only.
+- **The control plane can never read a private sealing key,** and stored data
+  never contains plaintext.
+- **Runs serverless on AWS** (API Gateway and Lambda, preferred) or as a
+  container on Kubernetes, from the same code.
+- **Runs and is tested locally** on a single k3d cluster.
+- **Agnostic.** Annotation keys, environment, region and cluster names are all
+  configuration. The project is MIT licensed.
+
+Non-goals for v1:
+
+- Unsealing, viewing or exporting secret values. Nothing in the system returns
+  plaintext to a user.
+- Cluster-wide sealing scope. It is refused everywhere (see section 6).
+- Sharing anything across environments. Each environment has its own control
+  plane, data, KMS keys and agent registry.
+- Resealing existing values or retiring old keys (see section 16).
+- Non-GitHub source control.
+
+## 2. Concepts and terms
+
+| Term          | Meaning                                                        |
+| ------------- | -------------------------------------------------------------- |
+| Env           | A deployment boundary such as `dev` or `prod`. One control     |
+|               | plane, one domain and one set of sealing keys per env.         |
+| Region        | A label for where a cluster runs, such as `use1` or `use2`.    |
+|               | Used only as a preference when choosing an agent.              |
+| Cluster       | A Kubernetes cluster running one sealed-secrets controller and |
+|               | one agent. Named by region and cluster, e.g. `use1/blue`.      |
+| Agent         | The process in each cluster. It reports the controller's keys, |
+|               | seals values and syncs keys. It only makes outbound calls.     |
+| Control plane | The service behind the env's domain. It serves the UI, talks   |
+|               | to GitHub, queues commands for agents and stores state in      |
+|               | DynamoDB. It has no Kubernetes client.                         |
+| Sealing key   | An RSA key pair the controller stores as a Secret labeled      |
+|               | `sealedsecrets.bitnami.com/sealed-secrets-key=active`.         |
+| Fingerprint   | The controller's own key identifier: the SSH-style SHA-256     |
+|               | fingerprint of the public key (`SHA256:<base64>`), computed    |
+|               | with sealed-secrets' `crypto.PublicKeyFingerprint`. It depends |
+|               | only on the key, so a reissued certificate keeps it, and it    |
+|               | matches what the controller logs.                              |
+| Key set       | Every sealing key one controller holds. A controller decrypts  |
+|               | with any key in its set.                                       |
+| Env key       | The newest key (by certificate `NotBefore`) held by every      |
+|               | registered cluster in the env. Every seal uses the env key.    |
+| Escrow        | The KMS-encrypted copy of every sealing key, stored in         |
+|               | DynamoDB. Agents sync keys to each other through it.           |
+
+## 3. Architecture
+
+```
+  Browser ──HTTPS──► sealer.dev.example.com (CloudFront + WAF)
+                                │
+                                ▼
+                     API Gateway (HTTP API)
+                                │
+                                ▼
+                  Lambda: control plane ─────────► GitHub App
+                     │        │                    (read files, open PRs)
+                     │        └──► KMS transit key (GenerateDataKey only)
+                     ▼
+     DynamoDB: agents, keys, escrow, commands, sessions, audit
+                                ▲
+                                │ /agent/v1/*  (HTTPS, outbound from clusters)
+          ┌─────────────────────┼─────────────────────┐
+          │                     │                     │
+   agent use1/blue       agent use1/green      agent use2/blue
+          │                     │                     │
+   sealed-secrets        sealed-secrets        sealed-secrets
+   controller            controller            controller
+
+   agents: KMS transit key (decrypt own commands), escrow key (encrypt+decrypt)
+```
+
+**Control plane.** One Go binary with two entry points that serve the same
+router:
+
+- `cmd/lambda`: the preferred mode. API Gateway HTTP API invokes Lambda.
+  CloudFront and WAF sit in front. The UI is embedded in the binary and
+  CloudFront caches its hashed assets.
+- `cmd/server`: a plain HTTP server for running as a container, for example
+  on Kubernetes. It contains no Kubernetes client and knows nothing about the
+  cluster it runs on. Locally this is the mode that runs in k3d.
+
+One control plane serves one env and every cluster in it, in every region.
+Where it runs is unrelated to which clusters it serves: a control plane in
+`use2` serves clusters in `use1` and `use2`.
+
+**Agent.** One Deployment per cluster (`cmd/agent`), outbound only, with no
+Ingress and no Service. It checks in on a timer, long-polls for commands, and
+talks to its own sealed-secrets controller through the Kubernetes API.
+
+**DynamoDB.** The only data store. It holds agent state, the key inventory,
+escrowed keys, queued commands, user sessions and the audit log (section 11).
+It is the broker for key sync, so its backups also back up the keys.
+
+## 4. Agent identity
+
+Agents are registered ahead of time. The registry is part of the control
+plane's configuration, managed with infrastructure as code. There is no
+enrollment API and no self-registration: an identity that is not in the
+registry is rejected. A registry entry holds the agent ID, region, cluster
+name, enabled capabilities it may use, and exactly one identity:
+
+**AWS mode.** Each agent has its own IAM role, attached to its service account
+with EKS Pod Identity. To log in, the agent signs an `sts:GetCallerIdentity`
+request with SigV4, including a header that names the control plane's URL, and
+sends the signed request (not credentials) to `POST /agent/v1/session`. This is
+the same exchange Vault's AWS auth method uses. The control plane:
+
+1. checks that the request targets an allowed STS endpoint (an allowlist of
+   hostnames, so the control plane can't be made to call anything else);
+2. checks the signed audience header matches its own URL;
+3. rejects a signed request it has already accepted within the signature's
+   validity window (it stores a hash of each accepted request until expiry);
+4. forwards the request to STS and maps the returned role ARN to a registered
+   agent.
+
+The agent needs the same role for KMS anyway, so each agent has one identity.
+
+**k8s-oidc mode.** The agent sends a projected service-account token with the
+control plane's URL as its audience and a 10-minute lifetime (the kubelet
+rotates it). The control plane verifies it against the registered cluster's
+OIDC issuer (signature via the issuer's JWKS, `iss`, `aud`, `exp`) and requires
+`sub` to equal the registered `system:serviceaccount:<namespace>:<name>`. An
+issuer can be registered with an explicit JWKS URL and CA bundle for issuers
+that are not publicly reachable. This mode is used locally and by anyone
+running outside AWS.
+
+In both modes a successful login returns a short-lived agent session token
+(15 minutes), scoped to the agent API and bound to the agent ID. Every other
+agent call carries it.
+
+## 5. Command protocol
+
+The control plane never connects to an agent. Agents call:
+
+| Call                                   | Purpose                             |
+| -------------------------------------- | ----------------------------------- |
+| `POST /agent/v1/session`               | Log in (section 4).                 |
+| `POST /agent/v1/checkin`               | Report state (every 15 seconds).    |
+| `GET  /agent/v1/commands?wait=20`      | Long-poll for queued commands.      |
+| `POST /agent/v1/commands/{id}/result`  | Report a command's outcome.         |
+| `PUT  /agent/v1/escrow/{fingerprint}`  | Upload an escrowed key.             |
+| `GET  /agent/v1/escrow/{fingerprint}`  | Download an escrowed key.           |
+
+A check-in carries the agent version, the protocol versions and command types
+it supports, its capabilities, its controller's settings (namespace, key renew
+period, key order priority) and its key set: fingerprint, `NotBefore`,
+`NotAfter` and certificate for every key.
+
+Commands are typed and versioned: `seal.v1`, `keys.restore.v1`,
+`renewal.enable.v1`. Each has an ID (a ULID), the target agent ID, the env,
+a creation time, an expiry and a typed payload. The rules:
+
+- **Fixed command set.** The agent has a handler per type compiled in. There is
+  no generic exec, apply or proxy command. An unknown type or a payload that
+  fails validation is reported as failed and not acted on.
+- **Only its own commands.** An agent can lease, read and report results only
+  for commands addressed to its own ID.
+- **Single use.** Leasing a command is a conditional write from `queued` to
+  `leased`. A command is delivered at most once. If the agent dies before
+  reporting, the command expires and the user retries. Key commands are
+  idempotent and the control plane re-issues them when it sees the gap again.
+- **Expiry is enforced in code.** DynamoDB TTL deletion is eventual, so the
+  control plane and agent both refuse expired commands; TTL only cleans up.
+- **Results are accepted once,** only from the leasing agent and only before
+  expiry.
+- **Long-poll within API Gateway limits.** The control plane holds a poll for
+  up to 20 seconds, under the API Gateway integration timeout, checking
+  DynamoDB for new commands in the meantime. The cost is roughly one held
+  Lambda invocation per agent. An API Gateway WebSocket API is a possible
+  later optimization; the protocol does not depend on the transport.
+- **Capabilities come from the agent's Helm values,** never from the control
+  plane. Values decide which RBAC is installed and which handlers the agent
+  enables. An agent refuses a command for a capability it does not have, and
+  RBAC would stop it anyway.
+
+| Capability | Commands                               | Default |
+| ---------- | -------------------------------------- | ------- |
+| `seal`     | `seal.v1`                              | on      |
+| `keys`     | `keys.restore.v1`, escrow upload       | off     |
+| `renewal`  | `renewal.enable.v1`                    | off     |
+
+`keys` and `renewal` are off by default because they grant access to the
+sealing keys and to the controller Deployment. Key sync, which most
+multi-cluster envs need, works only on agents where an operator turned them
+on.
+
+v1 has no command that deletes or disables anything.
+
+## 6. Seal flow
+
+1. A signed-in user opens a session for a repository and picks a file. The
+   control plane reads it through the GitHub App at the session's base commit.
+2. The user submits a key and a value. The control plane re-checks the user's
+   write permission on the repository and finds every SealedSecret document in
+   the file whose env annotation equals this env. One seal updates all of them,
+   so a file with documents for `use1` and `use2` is sealed once. Each document
+   contributes a target: namespace, name, scope and region.
+3. Scope comes from each document's own sealed-secrets scope annotations, the
+   same place the controller reads it. `strict` and `namespace-wide` are
+   allowed. `cluster-wide` is refused, because such ciphertext can be decrypted
+   into any namespace by anyone able to create a SealedSecret.
+4. The control plane chooses the env key and an agent (section 7).
+5. It encrypts the value immediately with the **transit** KMS key: a data key
+   from `GenerateDataKey` encrypts the value with AES-256-GCM, and the stored
+   payload is the wrapped data key, nonce and ciphertext. The encryption
+   context is `{env, command_id, agent_id}`. The plaintext value and the data
+   key are then dropped. The value is never logged, and request bodies are
+   never logged.
+6. It writes a `seal.v1` command (targets, secret key name, env key
+   fingerprint, encrypted value) with an expiry of about 2 minutes, and
+   returns `202` with the command ID. The UI polls the command's status.
+7. The agent leases the command and re-validates it itself: known env, valid
+   key name, namespace and name present, scope `strict` or `namespace-wide`
+   (never `cluster-wide`), and the env key fingerprint present in its own
+   controller's key set. It decrypts the value with KMS using the same
+   encryption context, seals each target in process with that key's
+   certificate, and returns only the ciphertexts.
+8. The control plane removes the encrypted value from the command, records
+   each ciphertext as a pending change in the session, and shows which agent
+   and key sealed it. Users never see ciphertext.
+9. When the user creates a pull request, the control plane renders each file
+   from its content at the base commit plus the pending changes, editing only
+   `spec.encryptedData.<key>` in each targeted document. Names, namespaces,
+   scope annotations, comments and other documents are left untouched. The
+   commit and pull request record who requested it.
+
+**Transit key permissions.** The control plane may only call
+`GenerateDataKey` on the transit key; it cannot decrypt. Each agent role may
+call `Decrypt` only when the encryption context's `agent_id` equals the
+agent's own ID, enforced by a key policy condition. The control plane's code
+reflects this: its transit client interface has no decrypt method. So
+DynamoDB, its backups and logs never hold anything the control plane could read
+back, and one agent cannot read another agent's seal payloads.
+
+**Agents seal with certificates from their own cluster.** The certificate comes
+from the agent's own controller key set, never from the command. A control
+plane cannot make an agent encrypt to a certificate the cluster doesn't hold.
+
+**Why not encrypt in the browser.** The control plane serves the UI's
+JavaScript. An attacker who controls the control plane can serve a page that
+sends the value elsewhere, so browser-side encryption would only add protection
+against passive leaks, which encrypt-on-receipt and the no-logging rule already
+cover. This is a choice and can be revisited.
+
+**Value size.** A single value is capped at 64 KiB so a command and its result
+fit DynamoDB's 400 KB item limit. Larger values would need S3 and are out of
+scope for v1.
+
+## 7. Key selection and agent selection
+
+On every check-in, each agent reports its controller's full key set (public
+certificates only). From those reports the control plane computes:
+
+- **Clusters in scope:** every registered, enabled agent in the env. A cluster
+  that is temporarily down still counts, using its last reported key set,
+  because it will still have to decrypt what is sealed now. A registered agent
+  that has never checked in is ignored and flagged in the UI. A cluster leaves
+  scope only when it is removed from the registry.
+- **Env key:** the key with the newest `NotBefore` that is in every in-scope
+  cluster's key set.
+
+To choose the agent for a seal:
+
+1. Candidates are agents that are healthy (checked in within the last 45
+   seconds), have the `seal` capability, support `seal.v1`, and hold the env
+   key.
+2. Prefer an agent in a region named by the target documents' region
+   annotations.
+3. Then prefer the agent with the fewest commands in flight, then the most
+   recent check-in.
+4. If no key is held by every in-scope cluster, refuse with "keys out of sync"
+   and name the clusters missing keys. Sync (section 8) normally closes the gap
+   within a few check-ins.
+
+The agent seals with the env key's certificate, which is not necessarily its
+controller's newest key. This handles the cases that matter:
+
+- A controller that just generated a key keeps advertising it as its newest,
+  but it is not used until every cluster holds it.
+- An agent that is down is skipped; any other agent holding the env key seals.
+- A new cluster joins with its own fresh key. Sync gives it the existing keys,
+  and the env key stays the same until its key has reached every cluster.
+
+An agent without the `keys` capability cannot read key secrets, so it reports
+only its controller's active certificate (from `/v1/cert.pem`) as its key set.
+
+## 8. Key escrow and sync
+
+Agents sync keys to each other through DynamoDB, using a dedicated **escrow**
+KMS key:
+
+| Principal     | Escrow key permissions                                  |
+| ------------- | ------------------------------------------------------- |
+| Agent roles   | `GenerateDataKey`, `Decrypt`                            |
+| Control plane | none                                                    |
+| Admins        | none, except a separate break-glass role                |
+
+The encryption context is `{env, fingerprint}`. Key secrets are larger than
+the 4 KB limit of KMS `Encrypt`, so escrow uses envelope encryption: a data key
+from `GenerateDataKey` encrypts the key secret's `tls.crt` and `tls.key` with
+AES-256-GCM, and the escrow record stores the wrapped data key, nonce and
+ciphertext next to the public certificate.
+
+**Upload.** When an agent finds a key in its controller's key set that the
+control plane has no escrow for, it encrypts and uploads it. The control plane
+parses the public certificate, checks that its fingerprint matches the URL, and
+stores the record with a conditional write (the first upload wins). It can
+check the certificate but cannot read or verify the private key.
+
+**Restore.** When the control plane sees an in-scope cluster missing an
+escrowed key, it queues `keys.restore.v1` for that cluster's agent with the
+missing fingerprints. The agent, for each one:
+
+1. downloads the escrow record and decrypts it with KMS, using the expected
+   `{env, fingerprint}` context;
+2. checks that the private key matches the certificate and the certificate's
+   fingerprint matches the one requested;
+3. creates a `kubernetes.io/tls` Secret in the controller namespace with the
+   controller's key name prefix and the label
+   `sealedsecrets.bitnami.com/sealed-secrets-key=active`, annotated with the
+   fingerprint and `restored-from: escrow`.
+
+After restoring all missing keys, the agent restarts the controller once (by
+patching the Deployment's pod template annotation). This is required: the
+controller lists key secrets only at startup (`initKeyRegistry`) and does not
+watch for new ones.
+
+**Key order.** The controller orders keys by `--key-order-priority`, which
+defaults to `CertNotBefore`. With that default a restored key keeps its place
+in the order, so the newest key is the same in every cluster. With
+`SecretCreationTimestamp`, a restored old key would become a controller's
+newest. Agents report the setting; the control plane flags any cluster not
+using `CertNotBefore` and excludes it from key comparison until fixed.
+
+**Authenticity.** Only agent roles can encrypt under the escrow key, and
+AES-GCM with a bound encryption context detects tampering. The control plane
+can't read keys or forge escrow records. The worst it can do is withhold or
+delete them.
+
+**Restore is automatic,** with alerts through structured log events at `warn`
+level or above:
+
+| Event                   | When                                              |
+| ----------------------- | ------------------------------------------------- |
+| `key.discovered`        | A check-in reports a fingerprint never seen.      |
+| `key.escrowed`          | An agent uploads a key to escrow.                 |
+| `key.restored`          | An agent restores a key into its controller.      |
+| `key.sync_failed`       | An upload or restore fails.                       |
+| `key.order_mismatch`    | A controller does not order keys by NotBefore.    |
+| `keys.out_of_sync`      | A seal was refused because no env key exists.     |
+| `renewal.enabled`       | An agent turned on key renewal.                   |
+| `controller.restarted`  | An agent restarted its controller.                |
+
+Every event names the env, agent, cluster and fingerprint.
+
+**Backups.** The table has point-in-time recovery and a scheduled AWS Backup
+plan. The escrow key is a multi-Region KMS key with a replica in another
+region, so a backup can be restored and decrypted if a region is lost. Losing
+the escrow key loses the escrowed copies, so it has deletion protection
+through its key policy and the longest pending-deletion window.
+
+## 9. Key renewal
+
+The controller generates a new key every `--key-renew-period` (30 days by
+default; `0` turns renewal off). Two postures are supported:
+
+- **Renewal on everywhere.** Each controller generates keys on its own
+  schedule. Sync spreads them, and each becomes the env key once every cluster
+  holds it. The cost is more keys over time, which key retirement will handle
+  (section 16).
+- **Renewal on in at least one cluster.** Agents report their controller's
+  renew period. If no in-scope cluster in the env has renewal on, the control
+  plane sends `renewal.enable.v1` to one healthy agent with the `renewal`
+  capability (chosen deterministically, by agent ID), which patches its
+  controller Deployment's arguments to set the configured period and logs
+  `renewal.enabled`.
+
+## 10. Security model
+
+| Threat                | What it can do                 | Mitigations                    |
+| --------------------- | ------------------------------ | ------------------------------ |
+| Compromised control   | See values submitted while it  | No escrow key access; no       |
+| plane                 | is compromised; queue seals    | transit `Decrypt`; agents      |
+|                       | for any namespace/name in the  | refuse cluster-wide and only   |
+|                       | env; open PRs through the      | use certificates from their    |
+|                       | GitHub App; withhold or delete | own cluster; fixed command set |
+|                       | data; lie in the UI.           | with no delete; no inbound     |
+|                       |                                | path into clusters; branch     |
+|                       |                                | protection on repos.           |
+| Compromised agent or  | Read that cluster's keys (as   | Inherent to cluster access.    |
+| cluster               | can anyone with secret read in | Transit `Decrypt` limited to   |
+|                       | the controller namespace) and  | its own commands. Every        |
+|                       | so decrypt the env's secrets;  | `key.escrowed` names the       |
+|                       | upload a key it generated so   | source cluster. After an       |
+|                       | it becomes the env key;        | incident, rotate and retire    |
+|                       | report false key sets.         | keys.                          |
+| Rogue agent           | Nothing.                       | Registry in IaC, identity      |
+|                       |                                | verified, no self-enrollment.  |
+| Stolen DynamoDB data  | Ciphertext only.               | Transit and escrow need KMS    |
+| or backup             |                                | `Decrypt`, held only by agent  |
+|                       |                                | roles; CMK encryption at rest; |
+|                       |                                | no plaintext stored; seal      |
+|                       |                                | payloads removed after lease.  |
+| Malicious user        | Seal into files in repos they  | Per-repo permission checks;    |
+|                       | can write to; read nothing.    | env allowlist; scope from the  |
+|                       |                                | file; only `encryptedData`     |
+|                       |                                | edited; audit; rate limits.    |
+| Replay or             | Reuse a login, command or      | TLS; STS requests accepted     |
+| interception          | result.                        | once; tokens audience-bound    |
+|                       |                                | and short-lived; commands      |
+|                       |                                | single-use with expiry;        |
+|                       |                                | payloads bound to command and  |
+|                       |                                | agent by encryption context.   |
+
+**In plain terms, a compromised control plane can** read values people submit
+while it is compromised, seal those values into pull requests, and stop the
+system from working. **It cannot** read or forge any private sealing key,
+decrypt anything stored before or after, make an agent produce cluster-wide
+ciphertext or encrypt to a key outside the env, turn on agent capabilities, or
+run anything else on a cluster.
+
+**A compromised cluster** already holds every env key, so injecting a key
+gives it nothing new while it is compromised. An injected key would, however,
+keep being used afterwards, which is why every escrow upload names its source
+and why incident response includes rotating to a new key and retiring the old.
+
+**Controller namespace.** The controller runs in its own namespace, not
+`kube-system`. RBAC cannot limit `list secrets` by label, so an agent with the
+`keys` capability can read every Secret in the controller namespace; that
+namespace must hold only the controller and its keys.
+
+**Agent RBAC.** The Helm chart installs a Role in the controller namespace,
+bound to the agent's ServiceAccount in the agent's own namespace:
+
+| Capability | Rules in the controller namespace                             |
+| ---------- | ------------------------------------------------------------- |
+| base       | `get` the controller Service; `get` `services/proxy` on it    |
+|            | (for `/v1/cert.pem`); `get` the controller Deployment (to     |
+|            | read its flags).                                              |
+| `seal`     | Nothing more: sealing uses public certificates in process.    |
+| `keys`     | `get`, `list`, `watch`, `create` Secrets; `patch` the         |
+|            | controller Deployment (restart).                              |
+| `renewal`  | `patch` the controller Deployment.                            |
+
+`get` and `patch` are limited to the named Service and Deployment with
+`resourceNames`; `list` and `create` cannot be.
+
+## 11. Data model
+
+One DynamoDB table per deployment, encrypted with a customer-managed KMS key,
+with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
+
+| Entity         | PK                 | SK                  | TTL                   |
+| -------------- | ------------------ | ------------------- | --------------------- |
+| Agent state    | `AGENT#<id>`       | `STATE`             | none                  |
+| Command        | `AGENT#<id>`       | `CMD#<ulid>`        | expiry + 1 hour       |
+| Key            | `KEY#<fp>`         | `META`              | none                  |
+| Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
+| Session        | `SESSION#<id>`     | `META`              | idle timeout (1 hour) |
+| Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | same as session       |
+| Login replay   | `REPLAY#<hash>`    | `REPLAY`            | signature expiry      |
+| Audit entry    | `AUDIT#<date>`     | `<ts>#<ulid>`       | configurable          |
+
+- **Agent state:** last check-in, version, supported commands, capabilities,
+  controller settings, key set, commands in flight.
+- **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`,
+  `expired`), lease time, expiry, payload, result. A seal's encrypted value is
+  removed when the command is leased.
+- **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
+  Which clusters hold a key is derived from agent state.
+- **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
+  encryption context, uploading agent and time.
+- **Session:** owner (GitHub user ID), repository, base branch and commit.
+  File content is not stored; it is fetched again at the base commit when the
+  pull request is created. Sessions per user are capped by counting them.
+- **Pending change:** file path, secret key name, scope and one ciphertext per
+  targeted document. Never plaintext, never returned to clients.
+- **Audit entry:** who (user or agent), what (seal, PR, command, key event),
+  where (repo, file, key name, cluster, fingerprint), result. Never values or
+  ciphertext.
+
+## 12. User authentication and authorization
+
+- **Login** is GitHub OAuth. The session cookie is a JWT signed with HS256 and
+  bound to the deployment's external URL as its audience. A CSRF token derived
+  (HMAC) from the session JWT is required on every state-changing request.
+- **Repository access** goes through the GitHub App's installation token, but
+  every operation is first checked against the signed-in user's own permission
+  on that repository: read to list and discover, write to create a session,
+  seal and open a pull request. Write access is re-checked on every seal and
+  PR. Results are cached briefly (per Lambda instance).
+- **Env allowlist.** A deployment can require membership in one or more GitHub
+  teams. Use it for `prod`.
+- **Rate limits** use API Gateway throttling and WAF rate-based rules.
+  In-memory limiters do not hold across Lambda instances, so limits that
+  matter (sessions per user) are enforced with DynamoDB.
+- **Secrets the control plane needs** (GitHub App private key, OAuth client
+  secret, JWT signing key) come from SSM Parameter Store or Secrets Manager on
+  Lambda, or from environment variables in a container.
+
+## 13. Annotations
+
+The control plane decides which SealedSecret documents belong to its env from
+two annotations whose keys are configurable:
+
+| Annotation | Default key                          | Required |
+| ---------- | ------------------------------------ | -------- |
+| Env        | `k8s-sealed-secrets-sealer/env`      | yes      |
+| Region     | `k8s-sealed-secrets-sealer/region`   | no       |
+
+A document belongs to the env when its env annotation equals the deployment's
+env name. The region annotation is a preference hint for choosing an agent and
+is shown in the UI. Files that already use other annotation names keep working
+by configuring the keys to match them.
+
+## 14. Local development
+
+Everything runs on one k3d cluster named `sealer` (context `k3d-sealer`) with
+a local image registry, driven by Tilt through atmos (`atmos dev up`).
+
+| Namespace              | Contents                                           |
+| ---------------------- | -------------------------------------------------- |
+| `sealer-system`        | Control plane (server mode), DynamoDB Local,       |
+|                        | local-kms, and later a GitHub and OAuth mock.      |
+| `<sim>-sealed-secrets` | The simulated cluster's controller and its keys.   |
+|                        | The controller runs with `--all-namespaces=false`  |
+|                        | and `--additional-namespaces=<sim>-apps`.          |
+| `<sim>-sealer`         | That simulated cluster's agent.                    |
+| `<sim>-apps`           | Targets for end-to-end tests.                      |
+
+The simulated clusters are `dev-use1-blue`, `dev-use1-green` and
+`dev-use2-blue`: one env, two regions, two clusters in one region. Agents use
+k8s-oidc identity; all three share the k3d cluster's issuer and are told apart
+by their service account subject. Each simulated cluster gets the same Helm
+chart and RBAC layout as a real one. `atmos dev agent up` runs an isolated
+copy of the stack per Git worktree.
+
+**Why e2e can't apply one sealed file to all three.** Strict-scope ciphertext
+is bound to a namespace and name. Each simulated controller only watches its
+own apps namespace, and one k3d cluster can't hold three namespaces with the
+same name, so one sealed document can't be applied in all three. The
+end-to-end tests prove the same property another way:
+
+- For each simulated cluster, seal a value targeting `<sim>-apps` through the
+  control plane, apply it there and assert the controller produces the Secret
+  with the expected value. Every seal uses the env key the control plane
+  chose, so success in all three proves all three hold that key.
+- Start one controller with `--key-cutoff-time` set to the present so it
+  generates a new key. Assert that seals keep using the previous env key until
+  every agent reports the new one, then switch to it, and that values sealed
+  with it decrypt in every simulated cluster.
+- Stop one agent and assert seals still succeed through another.
+- Turn renewal off in every controller and assert exactly one gets it turned
+  back on.
+
+**Limits of local fidelity.** local-kms implements the KMS API but does not
+enforce key policies, so "the control plane cannot decrypt" and "an agent can
+only decrypt its own commands" are not tested locally. They are tested in the
+Terraform module repository, and the control plane's transit client exposes no
+decrypt method. The Lambda entry point is tested with the AWS Lambda Runtime
+Interface Emulator against the same local services.
+
+## 15. Deployment
+
+This repository releases:
+
+- the control plane Lambda package (`bootstrap` for `provided.al2023`, amd64
+  and arm64);
+- container images for the control plane and the agent;
+- Helm charts for the agent and for the control plane in container mode.
+
+AWS infrastructure lives in a separate repository,
+`terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
+CloudFront and WAF, the DynamoDB table (PITR, TTL, CMK), the transit and
+escrow KMS keys with their policies, the AWS Backup plan and the agent IAM
+roles. Each env is one instance of that module, in whichever region suits.
+
+## 16. Future work (not in v1)
+
+- **Reseal all.** Re-encrypt every sealed value in the env's repositories with
+  the env key, so old keys can eventually be removed. Either the agent calls
+  the controller's `/v1/rotate` (which re-encrypts without exposing plaintext
+  to the agent but uses the controller's newest key) or re-encrypts in its own
+  memory with the env key. Results go through the same session and pull
+  request pipeline. Needs long-running batch commands with progress.
+- **Key usage tracking.** The agent lists SealedSecrets in its cluster and, for
+  each value, decrypts only the RSA-wrapped session key at the head of the
+  ciphertext with each key in turn to learn which key sealed it. It reports
+  only a count per fingerprint, never names or values. The key entity gets
+  per-cluster counts and a last-seen-in-use time.
+- **Key retirement.** A manual action, allowed once a key has had zero use in
+  every cluster for N days, removes it from every controller. The escrow copy
+  is kept until backups that contain it have aged out.
+
+## 17. Build order
+
+Each step is one pull request:
+
+1. **Scaffold:** this document, atmos tooling, the k3d and Tilt stack with
+   simulated clusters and controllers, minimal binaries, CI and the license.
+2. **Agents:** identity, check-in and key inventory, and a fleet page in the
+   UI.
+3. **Sealing:** the manifest editor, GitHub client and user auth, sessions in
+   DynamoDB, transit encryption, key and agent selection, the seal command,
+   and the end-to-end decrypt tests.
+4. **Keys:** escrow, sync, renewal management and the alert events.
+5. **Release:** images, the Lambda package and the Helm charts.
+
+The Terraform module repository follows step 5.

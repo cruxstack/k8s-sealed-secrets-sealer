@@ -1,0 +1,15 @@
+.git
+.github
+.atmos
+.tools
+.worktrees
+.local
+.env
+dist
+release
+tmp
+docs
+deploy
+dev
+coverage.out
+.DS_Store

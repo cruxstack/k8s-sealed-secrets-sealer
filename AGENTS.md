@@ -1,0 +1,65 @@
+# Agent Guidelines
+
+## Architecture Overview
+- **What it is**: one web app per environment for sealing Kubernetes secrets with [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets), backed by an agent in every cluster. Users never pick a cluster or region. The full design is in `docs/design.md`; read it before changing behavior.
+- **Control plane**: serves the UI and API, talks to GitHub, queues commands for agents, stores state in DynamoDB. Runs on AWS Lambda behind API Gateway (preferred) or as a container. It has no Kubernetes client and must never get one.
+- **Agent**: runs beside a sealed-secrets controller, makes only outbound calls, reports the controller's keys, seals values and syncs keys. What it may do is set by its Helm values (capabilities), never by the control plane.
+- **Entry points**:
+  - `cmd/server/` - control plane as an HTTP server (containers, local stack)
+  - `cmd/agent/` - the agent
+  - `cmd/lambda/` - control plane on Lambda (not yet added)
+- **Packages**:
+  - `internal/config/` - reads and validates all configuration; nothing else reads the environment
+  - `internal/controlplane/` - the control plane's HTTP handler, shared by the server and Lambda entry points
+  - `internal/agent/` - controller access (cert via the API service proxy), key parsing, the agent loop and probes
+  - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
+  - `internal/version/` - build version, set at link time
+- **Deploy**: `deploy/helm/agent` and `deploy/helm/control-plane`. AWS infrastructure lives in the separate `terraform-aws-k8s-sealed-secrets-sealer` repository.
+
+## Build & Test
+Atmos is the task runner; every command installs its pinned tools into `.tools/` on first use. Run `atmos list commands` to see them all.
+- **Unit tests**: `atmos test unit` (race detector; no network, cluster or Docker)
+- **Single package or test**: `atmos test unit -- -run TestParseCert ./internal/agent`
+- **Static checks**: `atmos check all` (tidy, fmt, lint, govulncheck, Helm charts); `atmos check fmt --write` formats
+- **End-to-end**: `atmos test e2e` (throwaway k3d cluster `sealer-e2e`; `--keep` leaves it up)
+- **Everything CI runs**: `atmos verify pr` (`--fast` skips e2e)
+- **Binaries / images**: `atmos build bin`, `atmos build image <control-plane|agent>`
+
+## Local Stack
+- `atmos dev up` runs the whole system in the k3d cluster `sealer` with Tilt: control plane, DynamoDB Local, local KMS, and the simulated clusters in `dev/stack.yaml` (each with its own sealed-secrets controller and agent).
+- Coding agents use the worktree-isolated commands instead, from a dedicated Git worktree: `atmos dev agent up`, `atmos dev agent status`, `atmos dev agent down`. Each worktree gets its own k3d cluster and ports.
+- Use `atmos dev agent down` when the work is finished. Do not run `atmos dev agent destroy` or `atmos dev destroy` without an explicit request; they delete clusters and every sealing key in them.
+- `atmos test e2e` is already isolated from the development stacks.
+
+## Code Style
+- **Imports**: stdlib, blank line, third-party, blank line, local (`github.com/cruxstack/k8s-sealed-secrets-sealer/...`); `atmos check fmt --write` enforces it
+- **Naming**: `PascalCase` exports, `camelCase` private
+- **Constructors**: `New(Options)`; constructors make no network calls
+- **Comments**: lowercase inline comments; doc comments are full sentences; explain why, not what
+- **Logging**: `log/slog` with key-value pairs and snake_case keys, `*Context` methods where a context exists. Operational events carry an `event` key (e.g. `controller.key_active`) so they can be alerted on; see `docs/design.md` for the list.
+
+## Configuration
+- All variables are read in `internal/config`; nothing else reads the environment
+- Settings use the `APP_` prefix
+- Validate at load time and report every problem at once; invalid configuration is an error, never a silent default
+
+## Error Handling
+- **Style**: lowercase, action-focused: `"failed to {action} {object}: {context}"`, with identifiers (namespace/name, fingerprint)
+- **Wrapping**: `fmt.Errorf("...: %w", err)`, `errors.Is`, `errors.As`, `errors.Join`; don't log and return the same error
+- The HTTP layer never returns error details to clients
+
+## Security
+- Never log, return or store plaintext secret values or private keys. Ciphertext is returned only where the design says so.
+- The control plane never gets a Kubernetes client or a service account token (`automountServiceAccountToken: false`).
+- Agent RBAC is namespaced to the controller's namespace; nothing cluster-wide. New permissions belong behind a capability that is off by default.
+- Refuse `cluster-wide` sealing scope.
+- Keep the project agnostic: no organization-specific names, domains, account IDs or topology in code, docs, tests or fixtures. Use neutral examples (envs `dev`/`prod`, regions `use1`/`use2`, clusters `blue`/`green`, `example.com`).
+
+## Markdown Style
+- **Line length**: Max 80 characters for prose text
+- **Exceptions**: Code blocks, links, ASCII art, tables
+- **Table alignment**: Align columns in plaintext for readability
+- **Wrapping**: Break at natural boundaries (commas, periods, conjunctions)
+- **Lists**: Indent continuation lines with 2 spaces
+
+NOTE: AGENTS.md itself is exempt from the 80-character line limit.

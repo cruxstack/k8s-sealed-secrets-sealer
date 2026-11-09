@@ -1,0 +1,9 @@
+# Local overrides for deploy/helm/control-plane. Tilt swaps the image for the
+# one it builds.
+image:
+  repository: local.invalid/sealer-control-plane
+  tag: dev
+
+log:
+  level: debug
+  format: json

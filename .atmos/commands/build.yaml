@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+commands:
+  - name: build
+    description: Build release artifacts locally
+    commands:
+      - name: bin
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+        description: |
+          Build the control plane server and the agent into dist/ for the
+          given platform (default: this machine).
+
+            atmos build bin
+            atmos build bin --os linux --arch arm64
+        flags:
+          - name: os
+            description: "Target GOOS (default: this machine's)"
+            required: false
+          - name: arch
+            description: "Target GOARCH (default: this machine's)"
+            required: false
+        env:
+          - key: BUILD_GOOS
+            value: "{{ .Flags.os }}"
+          - key: BUILD_GOARCH
+            value: "{{ .Flags.arch }}"
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+              ldflags="-s -w -X github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version.Version=${version}"
+              export CGO_ENABLED=0 GOOS="${BUILD_GOOS:-$(go env GOOS)}" GOARCH="${BUILD_GOARCH:-$(go env GOARCH)}"
+              mkdir -p dist
+              for bin in server agent; do
+                echo "+ go build -o dist/${bin} ./cmd/${bin} (${GOOS}/${GOARCH}, ${version})" >&2
+                go build -trimpath -ldflags "$ldflags" -o "dist/${bin}" "./cmd/${bin}"
+              done
+
+      - name: image
+        description: |
+          Build a release container image for this machine's platform with the
+          Dockerfile at the repository root.
+
+            atmos build image control-plane
+            atmos build image agent
+        arguments:
+          - name: target
+            description: control-plane or agent
+            required: true
+        env:
+          - key: BUILD_TARGET
+            value: "{{ .Arguments.target }}"
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              case "$BUILD_TARGET" in
+                control-plane|agent) ;;
+                *) echo "Error: target must be control-plane or agent" >&2; exit 1 ;;
+              esac
+              version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+              tag="k8s-sealed-secrets-sealer-${BUILD_TARGET}:dev"
+              echo "+ docker build --target ${BUILD_TARGET} -t ${tag}" >&2
+              exec docker build --target "$BUILD_TARGET" --build-arg VERSION="$version" -t "$tag" .

@@ -1,0 +1,187 @@
+# -*- mode: Python -*-
+# Local stack: one k3d cluster holding the control plane, local AWS emulators
+# and several simulated clusters (see dev/stack.yaml). Start it with
+# `atmos dev up`, which creates the cluster and pulls the controller chart
+# before running Tilt.
+
+# ================================================================== globals ===
+
+STACK = read_yaml("dev/stack.yaml")
+SYSTEM_NAMESPACE = "sealer-system"
+CHART_DIR = os.getenv("SEALED_SECRETS_CHART_DIR", "")
+CONTROL_PLANE_PORT = int(os.getenv("SEALER_CONTROL_PLANE_PORT", "4100"))
+DYNAMODB_PORT = int(os.getenv("SEALER_DYNAMODB_PORT", "4102"))
+KMS_PORT = int(os.getenv("SEALER_KMS_PORT", "4103"))
+
+LABEL_BUILD = "build"
+LABEL_SETUP = "setup"
+LABEL_PLATFORM = "control-plane"
+
+# ====================================================================== fns ===
+
+def validate():
+    context = k8s_context()
+    if not context.startswith("k3d-sealer"):
+        fail("This Tiltfile only runs against the local k3d-sealer* clusters; got '%s'. Run `atmos dev up`." % context)
+    if not CHART_DIR or not os.path.exists(CHART_DIR + "/Chart.yaml"):
+        fail("The sealed-secrets chart is missing. Run `atmos dev up`, which pulls and verifies it.")
+    allow_k8s_contexts(context)
+
+def selector(obj):
+    namespace = obj["metadata"].get("namespace", "")
+    parts = [obj["metadata"]["name"], obj["kind"].lower()]
+    if namespace:
+        parts.append(namespace)
+    return ":".join(parts)
+
+def is_workload(obj):
+    return obj["kind"] in ["Deployment", "Service"]
+
+def namespace(name):
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}}
+
+def controller_own_namespace_rbac(ns):
+    # The chart's Roles cover additionalNamespaces only; the controller also
+    # watches SealedSecrets, and the Secrets it would unseal, in its own
+    # namespace (the same rules the chart grants elsewhere).
+    rules = [
+        {"apiGroups": ["bitnami.com"], "resources": ["sealedsecrets"], "verbs": ["get", "list", "watch"]},
+        {"apiGroups": ["bitnami.com"], "resources": ["sealedsecrets/status"], "verbs": ["update"]},
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "list", "watch", "create", "update", "delete"]},
+        {"apiGroups": [""], "resources": ["events"], "verbs": ["create", "patch"]},
+    ]
+    return [
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "Role",
+            "metadata": {"name": "sealed-secrets-own-namespace", "namespace": ns},
+            "rules": rules,
+        },
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {"name": "sealed-secrets-own-namespace", "namespace": ns},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "sealed-secrets-own-namespace"},
+            "subjects": [{"kind": "ServiceAccount", "name": "sealed-secrets-controller", "namespace": ns}],
+        },
+    ]
+
+# =================================================================== script ===
+
+validate()
+update_settings(max_parallel_updates=6, k8s_upsert_timeout_secs=180)
+
+setup_objects = [namespace(SYSTEM_NAMESPACE)]
+workload_objects = []
+
+def add(objs):
+    for obj in objs:
+        if is_workload(obj):
+            workload_objects.append(obj)
+        else:
+            setup_objects.append(obj)
+
+# ------------------------------------------------------------------- build ---
+
+local_resource(
+    "binaries",
+    cmd="bash .atmos/scripts/dev/build.sh",
+    deps=["cmd", "internal", "go.mod", "go.sum"],
+    labels=[LABEL_BUILD],
+)
+
+for image, binary in [("local.invalid/sealer-control-plane", "server"), ("local.invalid/sealer-agent", "agent")]:
+    docker_build(
+        image,
+        context=".tools/build",
+        dockerfile="dev/docker/Dockerfile",
+        build_args={"BINARY": binary},
+        only=[binary],
+    )
+
+# ----------------------------------------------------------- control plane ---
+
+add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
+add(decode_yaml_stream(helm(
+    "deploy/helm/control-plane",
+    name="sealer-control-plane",
+    namespace=SYSTEM_NAMESPACE,
+    values=["dev/values/control-plane.yaml"],
+)))
+
+# --------------------------------------------------------- simulated clusters ---
+
+setup_objects.extend(decode_yaml_stream(read_file(CHART_DIR + "/crds/bitnami.com_sealedsecrets.yaml")))
+
+for cluster in STACK["clusters"]:
+    name = cluster["name"]
+    controller_ns = name + "-sealed-secrets"
+    agent_ns = name + "-sealer"
+    apps_ns = name + "-apps"
+    setup_objects.extend([namespace(controller_ns), namespace(agent_ns), namespace(apps_ns)])
+    setup_objects.extend(controller_own_namespace_rbac(controller_ns))
+
+    controller = decode_yaml_stream(helm(
+        CHART_DIR,
+        name="sealed-secrets",
+        namespace=controller_ns,
+        values=["dev/values/sealed-secrets.yaml"],
+        set=[
+            "additionalNamespaces={%s}" % apps_ns,
+            # the chart's args value replaces its defaults, so repeat the ones we keep
+            "args={--update-status,--key-prefix,sealed-secrets-key,--all-namespaces=false,--additional-namespaces,%s}" % apps_ns,
+        ],
+    ))
+    add([o for o in controller if o["kind"] != "CustomResourceDefinition"])
+
+    add(decode_yaml_stream(helm(
+        "deploy/helm/agent",
+        name="sealer-agent",
+        namespace=agent_ns,
+        values=["dev/values/agent.yaml"],
+        set=["controller.namespace=" + controller_ns],
+    )))
+
+# --------------------------------------------------------------- resources ---
+
+k8s_yaml(encode_yaml_stream(setup_objects + workload_objects))
+
+k8s_resource(
+    new_name="setup",
+    objects=[selector(o) for o in setup_objects],
+    labels=[LABEL_SETUP],
+)
+
+k8s_resource(
+    "local-kms",
+    port_forwards=["%d:8080" % KMS_PORT],
+    resource_deps=["setup"],
+    labels=[LABEL_PLATFORM],
+)
+k8s_resource(
+    "dynamodb-local",
+    port_forwards=["%d:8000" % DYNAMODB_PORT],
+    resource_deps=["setup"],
+    labels=[LABEL_PLATFORM],
+)
+k8s_resource(
+    "sealer-control-plane",
+    port_forwards=["%d:8080" % CONTROL_PLANE_PORT],
+    resource_deps=["setup", "binaries", "local-kms", "dynamodb-local"],
+    labels=[LABEL_PLATFORM],
+)
+
+for cluster in STACK["clusters"]:
+    name = cluster["name"]
+    k8s_resource(
+        "sealed-secrets-controller:deployment:%s-sealed-secrets" % name,
+        new_name=name + "-controller",
+        resource_deps=["setup"],
+        labels=[name],
+    )
+    k8s_resource(
+        "sealer-agent:deployment:%s-sealer" % name,
+        new_name=name + "-agent",
+        resource_deps=["setup", "binaries", name + "-controller"],
+        labels=[name],
+    )

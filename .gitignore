@@ -1,0 +1,17 @@
+# build output
+dist/
+release/
+coverage.out
+
+# atmos toolchain, pulled charts, local builds and dev-stack state
+.tools/
+
+# local settings and secrets
+.env
+.local/
+tmp/
+
+# worktrees
+.worktrees/
+
+.DS_Store

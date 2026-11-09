@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ATMOS_VERSION: 1.233.2
+
+# Every job runs the same atmos command a developer runs locally; atmos
+# installs the pinned toolchain (Go, linters, k3d, Tilt, Helm) itself.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Atmos
+        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+        with:
+          atmos-version: ${{ env.ATMOS_VERSION }}
+          install-wrapper: false
+          checksum-validation: enforce
+      - name: Static Checks
+        run: atmos check all
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Atmos
+        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+        with:
+          atmos-version: ${{ env.ATMOS_VERSION }}
+          install-wrapper: false
+          checksum-validation: enforce
+      - name: Unit Tests
+        run: atmos test unit
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Atmos
+        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+        with:
+          atmos-version: ${{ env.ATMOS_VERSION }}
+          install-wrapper: false
+          checksum-validation: enforce
+      - name: End-to-End Tests (k3d)
+        run: atmos test e2e
+
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [control-plane, agent]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build Container Image
+        run: docker buildx build --platform linux/amd64,linux/arm64 --target "${{ matrix.target }}" --build-arg VERSION=ci .

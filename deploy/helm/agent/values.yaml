@@ -1,0 +1,58 @@
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/cruxstack/k8s-sealed-secrets-sealer-agent
+  # defaults to the chart's appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The sealed-secrets controller this agent works with. Run the controller in
+# a namespace of its own: RBAC cannot narrow "list secrets" by label, so the
+# keys capability can read every Secret in that namespace.
+controller:
+  namespace: sealed-secrets
+  # the controller's Service name (kubeseal's default)
+  name: sealed-secrets-controller
+  # the controller's Deployment; defaults to controller.name
+  deploymentName: ""
+
+# Capabilities decide which RBAC is installed and which commands the agent
+# accepts. The control plane cannot change them. See docs/design.md.
+capabilities:
+  # seal values with the env key; needs only the controller's public cert
+  seal: true
+  # escrow and restore sealing keys; reads and creates key Secrets and
+  # restarts the controller after a restore
+  keys: false
+  # turn on the controller's key renewal when no cluster in the env has it
+  renewal: false
+
+# how often the agent re-reads the controller
+inventoryInterval: 1m
+
+log:
+  level: info
+  format: json
+
+serviceAccount:
+  create: true
+  # defaults to the release's full name
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# extra environment variables for the agent container
+extraEnv: []

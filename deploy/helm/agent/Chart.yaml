@@ -1,0 +1,11 @@
+apiVersion: v2
+name: k8s-sealed-secrets-sealer-agent
+description: >-
+  Agent for k8s-sealed-secrets-sealer. Runs beside a sealed-secrets controller,
+  reports its keys and seals values for the control plane.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/cruxstack/k8s-sealed-secrets-sealer
+sources:
+  - https://github.com/cruxstack/k8s-sealed-secrets-sealer

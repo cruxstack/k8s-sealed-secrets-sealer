@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+commands:
+  - name: verify
+    description: Prove a change is ready to merge.
+    commands:
+      - name: pr
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+            golangci/golangci-lint: 2.15.0
+            helm/helm: 3.22.1
+            yannh/kubeconform: 0.8.0
+            k3d-io/k3d: 5.9.0
+            tilt-dev/tilt: 0.37.8
+            kubernetes/kubectl: 1.36.5
+            jqlang/jq: 1.8.1
+            bitnami/sealed-secrets: 0.41.2
+        description: |
+          Everything CI requires: static checks, unit tests and, unless
+          --fast, the k3d end-to-end suite. A green run here is a green CI run.
+
+            atmos verify pr
+            atmos verify pr --fast
+        flags:
+          - name: fast
+            description: Skip the end-to-end suite
+            type: bool
+            required: false
+        env:
+          - key: VERIFY_FAST
+            value: "{{ .Flags.fast }}"
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              atmos check all
+              atmos test unit
+              if [[ "${VERIFY_FAST:-}" != "true" ]]; then
+                atmos test e2e
+              fi
+              echo "verify: ready to merge" >&2

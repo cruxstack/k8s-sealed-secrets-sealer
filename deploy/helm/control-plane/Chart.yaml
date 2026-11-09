@@ -1,0 +1,11 @@
+apiVersion: v2
+name: k8s-sealed-secrets-sealer-control-plane
+description: >-
+  Control plane for k8s-sealed-secrets-sealer, for running it as a container on
+  Kubernetes. It has no access to the cluster it runs in.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/cruxstack/k8s-sealed-secrets-sealer
+sources:
+  - https://github.com/cruxstack/k8s-sealed-secrets-sealer

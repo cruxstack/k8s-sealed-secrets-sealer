@@ -1,0 +1,53 @@
+{{- $name := .Values.controller.name }}
+# Everything the agent may do is granted here, in the controller's namespace
+# only. Nothing is cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agent.fullname" . }}
+  namespace: {{ .Values.controller.namespace }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+rules:
+  # read the controller's public certificate through the API service proxy
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames:
+      - {{ printf "http:%s:" $name | quote }}
+      - {{ printf "http:%s:http" $name | quote }}
+      - {{ $name | quote }}
+    verbs: ["get"]
+  {{- if .Values.capabilities.keys }}
+  # read key Secrets for escrow and create restored ones; list cannot be
+  # narrowed by label, which is why the controller needs its own namespace
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create"]
+  {{- end }}
+  {{- if or .Values.capabilities.keys .Values.capabilities.renewal }}
+  # restart the controller after a restore, and turn on key renewal
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ include "agent.controllerDeployment" . | quote }}]
+    verbs: ["get", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agent.fullname" . }}
+  namespace: {{ .Values.controller.namespace }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agent.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

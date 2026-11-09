@@ -1,0 +1,16 @@
+# Local overrides for deploy/helm/agent. Tilt sets controller.namespace per
+# simulated cluster and swaps the image for the one it builds.
+image:
+  repository: local.invalid/sealer-agent
+  tag: dev
+
+capabilities:
+  seal: true
+  keys: true
+  renewal: true
+
+inventoryInterval: 15s
+
+log:
+  level: debug
+  format: json

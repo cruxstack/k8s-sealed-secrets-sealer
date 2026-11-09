@@ -1,0 +1,13 @@
+# The simulated env the local stack runs. Each cluster here becomes three
+# namespaces of one k3d cluster: <name>-sealed-secrets (its own controller and
+# keys), <name>-sealer (its agent) and <name>-apps (where e2e tests apply
+# SealedSecrets). Every controller watches only its own two namespaces, so the
+# clusters are as separate as they can be inside one Kubernetes API.
+env: dev
+clusters:
+  - name: dev-use1-blue
+    region: use1
+  - name: dev-use1-green
+    region: use1
+  - name: dev-use2-blue
+    region: use2

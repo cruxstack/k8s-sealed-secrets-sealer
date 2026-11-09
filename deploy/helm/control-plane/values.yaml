@@ -1,0 +1,42 @@
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/cruxstack/k8s-sealed-secrets-sealer-control-plane
+  # defaults to the chart's appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+log:
+  level: info
+  format: json
+
+service:
+  type: ClusterIP
+  port: 80
+
+serviceAccount:
+  create: true
+  # defaults to the release's full name
+  name: ""
+  # for cloud identity, e.g. an IAM role; the pod never gets a Kubernetes
+  # API token either way
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# extra environment variables for the control plane container
+extraEnv: []

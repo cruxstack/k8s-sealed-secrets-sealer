@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+commands:
+  - name: check
+    description: Static checks (lint, format, modules, vulnerabilities, charts)
+    commands:
+      - name: lint
+        dependencies: &go_lint_tools
+          tools:
+            golang/go: 1.27.3
+            golangci/golangci-lint: 2.15.0
+        description: golangci-lint with the repository's .golangci.yml
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              echo "+ golangci-lint run" >&2
+              exec golangci-lint run {{ .TrailingArgs }}
+
+      - name: fmt
+        dependencies: *go_lint_tools
+        description: |
+          gofmt and goimports through golangci-lint, in check mode. Pass
+          --write to format in place.
+
+            atmos check fmt
+            atmos check fmt --write
+        flags:
+          - name: write
+            description: Format files in place instead of checking
+            type: bool
+            required: false
+        env:
+          - key: CHECK_WRITE
+            value: "{{ .Flags.write }}"
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              if [[ "${CHECK_WRITE:-}" == "true" ]]; then
+                exec golangci-lint fmt
+              fi
+              diff="$(golangci-lint fmt --diff)"
+              if [[ -n "$diff" ]]; then
+                printf '%s\n' "$diff"
+                echo "Files need formatting; run 'atmos check fmt --write'." >&2
+                exit 1
+              fi
+
+      - name: tidy
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+        description: Fail when go.mod or go.sum is not tidy
+        steps:
+          - type: shell
+            command: go mod tidy -diff
+
+      - name: vuln
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+        description: |
+          govulncheck against the Go vulnerability database. It runs through
+          `go run` at a pinned version, verified by the Go checksum database.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/check/vuln.sh
+
+      - name: charts
+        dependencies:
+          tools:
+            helm/helm: 3.22.1
+            yannh/kubeconform: 0.8.0
+        description: |
+          Lint the Helm charts and validate their rendered manifests (default
+          values and every capability turned on) against the Kubernetes schemas.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/check/charts.sh
+
+      - name: all
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+            golangci/golangci-lint: 2.15.0
+            helm/helm: 3.22.1
+            yannh/kubeconform: 0.8.0
+        description: Every static check, as CI runs them
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              echo "+ go mod tidy -diff" >&2
+              go mod tidy -diff
+              echo "+ golangci-lint fmt --diff" >&2
+              diff="$(golangci-lint fmt --diff)"
+              [[ -z "$diff" ]] || { printf '%s\n' "$diff"; echo "run 'atmos check fmt --write'" >&2; exit 1; }
+              echo "+ golangci-lint run" >&2
+              golangci-lint run
+              bash .atmos/scripts/check/vuln.sh
+              bash .atmos/scripts/check/charts.sh

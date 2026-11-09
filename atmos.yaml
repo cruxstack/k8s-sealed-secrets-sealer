@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+# Atmos is this repository's task runner: every command lives under
+# .atmos/commands and declares the exact tool versions it needs, which Atmos
+# installs into .tools/ on first use. Run `atmos list commands` to see them.
+
+import:
+  - ".atmos/commands/**/*"
+
+base_path: ""
+
+toolchain:
+  install_path: ".tools"
+
+version:
+  constraint:
+    require: ">=1.233.0"
+    enforcement: warn
+    message: "Upgrade Atmos (e.g., brew upgrade atmos)."
+
+logs:
+  file: "/dev/stderr"
+  level: Info
+
+settings:
+  experimental: silence

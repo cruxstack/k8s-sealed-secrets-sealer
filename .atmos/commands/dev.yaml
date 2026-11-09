@@ -1,0 +1,190 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+commands:
+  - name: dev
+    description: Run the whole system locally in a k3d cluster, with Tilt.
+    commands:
+      - name: up
+        dependencies: &stack_tools
+          tools:
+            golang/go: 1.27.3
+            k3d-io/k3d: 5.9.0
+            tilt-dev/tilt: 0.37.8
+            helm/helm: 3.22.1
+            kubernetes/kubectl: 1.36.5
+            jqlang/jq: 1.8.1
+        description: |
+          Start the local stack and keep Tilt in the foreground (dashboard at
+          http://localhost:10350). Creates the k3d cluster "sealer" with a
+          local image registry on first use; the cluster persists until
+          `atmos dev destroy`.
+
+          The stack: the control plane, DynamoDB Local and local KMS in
+          sealer-system, plus the simulated clusters in dev/stack.yaml, each
+          with its own sealed-secrets controller and agent.
+
+          Pass Tilt arguments after `--`:
+            atmos dev up
+            atmos dev up -- --stream
+        steps:
+          - type: shell
+            interactive: true
+            command: bash .atmos/scripts/dev/tilt.sh up {{ .TrailingArgs }}
+
+      - name: ci
+        dependencies: *stack_tools
+        description: |
+          Bring the stack up once, wait until every resource is ready, then
+          exit (tilt ci). Leaves the workloads running.
+
+            atmos dev ci
+            atmos dev ci -- --timeout 15m
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/dev/tilt.sh ci {{ .TrailingArgs }}
+
+      - name: down
+        dependencies: *stack_tools
+        description: Remove the stack's workloads (tilt down). Keeps the cluster, its registry and image cache.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/dev/down.sh {{ .TrailingArgs }}
+
+      - name: destroy
+        dependencies: *stack_tools
+        description: Delete the k3d cluster and its registry, including every sealing key in it.
+        flags:
+          - name: "yes"
+            description: Do not prompt for confirmation
+            type: bool
+            required: false
+        env:
+          - key: DEV_YES
+            value: '{{ index .Flags "yes" }}'
+        steps:
+          - type: shell
+            interactive: true
+            command: bash .atmos/scripts/dev/destroy.sh
+
+      - name: status
+        dependencies: *stack_tools
+        description: Show the stack's pods, each agent's active controller key, and the local endpoints.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/dev/status.sh
+
+      - name: logs
+        dependencies: *stack_tools
+        description: |
+          Print Tilt logs, optionally for one resource.
+
+            atmos dev logs
+            atmos dev logs dev-use1-blue-agent -f
+        flags:
+          - name: follow
+            shorthand: "f"
+            description: Stream logs until interrupted
+            type: bool
+            required: false
+        arguments:
+          - name: resource
+            description: Optional Tilt resource, e.g. sealer-control-plane or dev-use1-blue-agent
+            required: false
+        env:
+          - key: DEV_FOLLOW
+            value: "{{ .Flags.follow }}"
+          - key: DEV_RESOURCE
+            value: "{{ .Arguments.resource }}"
+        steps:
+          - type: shell
+            interactive: true
+            command: |
+              set -euo pipefail
+              source .atmos/scripts/lib/dev.sh
+              args=(logs --port "$SEALER_TILT_PORT")
+              [[ "${DEV_FOLLOW:-}" == "true" ]] && args+=(--follow)
+              [[ -n "${DEV_RESOURCE:-}" ]] && args+=("$DEV_RESOURCE")
+              exec tilt "${args[@]}"
+
+      - name: agent
+        description: |
+          Worktree-isolated stacks for coding agents. Each worktree gets its
+          own k3d cluster and ports, so several can run beside `atmos dev up`.
+        commands:
+          - name: up
+            dependencies: *stack_tools
+            description: |
+              Start this worktree's stack in the background and wait until it
+              is ready. Pass Tilt arguments after `--`.
+            flags:
+              - name: timeout
+                description: "Seconds to wait for the stack to become ready (default: 600)"
+                required: false
+            env:
+              - key: DEV_TIMEOUT
+                value: "{{ .Flags.timeout }}"
+            steps:
+              - type: shell
+                command: bash .atmos/scripts/dev/agent.sh up {{ .TrailingArgs }}
+
+          - name: down
+            dependencies: *stack_tools
+            description: Stop this worktree's Tilt and remove its workloads. Keeps its cluster and ports.
+            steps:
+              - type: shell
+                command: bash .atmos/scripts/dev/agent.sh down
+
+          - name: destroy
+            dependencies: *stack_tools
+            description: Delete this worktree's cluster, data and saved ports.
+            flags:
+              - name: "yes"
+                description: Do not prompt for confirmation
+                type: bool
+                required: false
+            env:
+              - key: DEV_YES
+                value: '{{ index .Flags "yes" }}'
+            steps:
+              - type: shell
+                interactive: true
+                command: bash .atmos/scripts/dev/agent.sh destroy
+
+          - name: status
+            dependencies: *stack_tools
+            description: Show this worktree's Tilt resources and endpoints.
+            steps:
+              - type: shell
+                command: bash .atmos/scripts/dev/agent.sh status
+
+          - name: env
+            description: |
+              Print shell exports for this worktree's stack, for running other
+              atmos dev commands or host processes against it:
+                eval "$(atmos dev agent env)" && atmos dev status
+            steps:
+              - type: shell
+                command: bash .atmos/scripts/dev/agent.sh env
+
+          - name: logs
+            dependencies: *stack_tools
+            description: Print this worktree's Tilt logs, optionally for one resource.
+            flags:
+              - name: follow
+                shorthand: "f"
+                description: Stream logs until interrupted
+                type: bool
+                required: false
+            arguments:
+              - name: resource
+                description: Optional Tilt resource
+                required: false
+            env:
+              - key: DEV_FOLLOW
+                value: "{{ .Flags.follow }}"
+              - key: DEV_RESOURCE
+                value: "{{ .Arguments.resource }}"
+            steps:
+              - type: shell
+                interactive: true
+                command: bash .atmos/scripts/dev/agent.sh logs

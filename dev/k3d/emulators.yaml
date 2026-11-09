@@ -1,0 +1,166 @@
+# Local stand-ins for AWS services, in namespace sealer-system. The control
+# plane and agents use the real AWS SDK with their endpoints pointed here.
+#
+# The KMS seed keys below are throwaway values for this local stack only.
+# They are public, protect nothing, and must never be used anywhere else.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-kms-seed
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: kms
+data:
+  seed.yaml: |
+    Keys:
+      Symmetric:
+        Aes:
+          - Metadata:
+              KeyId: 2ee47573-3fd6-4204-a872-018797d24a3e
+              Description: transit key (local only)
+            BackingKeys:
+              - cc256fa3bba1f05d9e566bc2281ed5f01f0d123d54a22d980671d6144b81e969
+          - Metadata:
+              KeyId: c32aaf1d-d72d-490d-b529-e4cf4d67cc79
+              Description: escrow key (local only)
+            BackingKeys:
+              - 24f1e4a5d1280d15ab8d502e905b1ca57fd90a4ed2e977f890f9b92f524252c4
+    Aliases:
+      - AliasName: alias/sealer-transit
+        TargetKeyId: 2ee47573-3fd6-4204-a872-018797d24a3e
+      - AliasName: alias/sealer-escrow
+        TargetKeyId: c32aaf1d-d72d-490d-b529-e4cf4d67cc79
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-kms
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: kms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealer-emulator
+      app.kubernetes.io/component: kms
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sealer-emulator
+        app.kubernetes.io/component: kms
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: local-kms
+          image: nsmithuk/local-kms:3.11.7@sha256:360d7377b6f3687c89a622236791e4fa3f7316366267b437829edbdfa8a5fc60
+          env:
+            - name: PORT
+              value: "8080"
+            - name: KMS_REGION
+              value: us-east-1
+            - name: KMS_ACCOUNT_ID
+              value: "000000000000"
+            - name: KMS_SEED_PATH
+              value: /init/seed.yaml
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: seed
+              mountPath: /init
+              readOnly: true
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: seed
+          configMap:
+            name: local-kms-seed
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-kms
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: kms
+spec:
+  selector:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: kms
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamodb-local
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: dynamodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealer-emulator
+      app.kubernetes.io/component: dynamodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sealer-emulator
+        app.kubernetes.io/component: dynamodb
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: dynamodb-local
+          image: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+          # in memory: a restart starts from empty tables, like a fresh env
+          args: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb", "-port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamodb-local
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: dynamodb
+spec:
+  selector:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: dynamodb
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
