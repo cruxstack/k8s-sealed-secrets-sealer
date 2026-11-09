@@ -55,8 +55,8 @@ var knownSTSRegions = []string{
 var knownChinaSTSRegions = []string{"cn-north-1", "cn-northwest-1"}
 
 var (
-	sigV4Auth       = regexp.MustCompile(`^AWS4-HMAC-SHA256 Credential=([^/,\s]+)/([0-9]{8})/([a-z0-9-]+)/sts/aws4_request, ?SignedHeaders=([a-z0-9;-]+), ?Signature=([0-9a-f]{64})$`)
-	assumedRoleARN  = regexp.MustCompile(`^arn:(aws|aws-us-gov|aws-cn):sts::([0-9]{12}):assumed-role/([\w+=,.@-]{1,64})/[\w+=,.@-]+$`)
+	sigV4Auth      = regexp.MustCompile(`^AWS4-HMAC-SHA256 Credential=([^/,\s]+)/([0-9]{8})/([a-z0-9-]+)/sts/aws4_request, ?SignedHeaders=([a-z0-9;-]+), ?Signature=([0-9a-f]{64})$`)
+	assumedRoleARN = regexp.MustCompile(`^arn:(aws|aws-us-gov|aws-cn):sts::([0-9]{12}):assumed-role/([\w+=,.@-]{1,64})/[\w+=,.@-]+$`)
 )
 
 // ReplayStore remembers one-time keys.
