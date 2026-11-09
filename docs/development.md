@@ -33,6 +33,10 @@ flowchart LR
       cp["control plane"]
       ddb[("DynamoDB Local")]
       kms["local KMS"]
+      reg["sealer-registry ConfigMap<br/>agents, k3d issuer JWKS"]
+      cp --> ddb
+      cp --> kms
+      cp -.->|reads at startup| reg
     end
     subgraph blue["simulated cluster dev-use1-blue"]
       ab["agent<br/>dev-use1-blue-sealer"] -->|API service proxy| cb["controller and keys<br/>dev-use1-blue-sealed-secrets"]
@@ -44,6 +48,7 @@ flowchart LR
     subgraph use2["simulated cluster dev-use2-blue"]
       au["agent"] --> cu["controller and keys"] --> apu["apps"]
     end
+    ab & ag & au -->|"log in, check in (/agent/v1)"| cp
   end
   dev -->|"localhost:4100 and Tilt on :10350"| cp
 ```
