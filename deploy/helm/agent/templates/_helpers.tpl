@@ -25,3 +25,11 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
+
+{{- define "agent.capabilities" -}}
+{{- $caps := list -}}
+{{- range $name, $on := .Values.capabilities -}}
+{{- if $on }}{{ $caps = append $caps $name }}{{ end -}}
+{{- end -}}
+{{- join "," $caps -}}
+{{- end -}}

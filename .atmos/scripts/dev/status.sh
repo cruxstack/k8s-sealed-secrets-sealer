@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shows the stack's pods, each agent's active controller key, and endpoints.
+# Shows the stack's pods, the fleet as the control plane sees it, and the
+# local endpoints.
 set -euo pipefail
 source .atmos/scripts/lib/dev.sh
 
@@ -13,15 +14,21 @@ kubectl --context "$KUBE_CONTEXT" get pods -A \
   -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase'
 
 echo >&2
-echo "Active controller keys (from agent logs):" >&2
-kubectl --context "$KUBE_CONTEXT" get deploy -A -l app.kubernetes.io/name=k8s-sealed-secrets-sealer-agent \
-  -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
-  | while read -r namespace deployment; do
-      fingerprint="$(log_events "$namespace" "$deployment" controller.key_active | tail -n 1 | jq -r '.fingerprint // empty')"
-      printf '  %-28s %s\n' "$namespace" "${fingerprint:-(none yet)}" >&2
-    done
+# the fleet comes from the control plane's admin API, through Tilt's port forward
+if fleet="$(curl -sf -H "Authorization: Bearer ${LOCAL_ADMIN_TOKEN}" \
+  "http://localhost:${SEALER_CONTROL_PLANE_PORT}/api/v1/admin/fleet" 2>/dev/null)"; then
+  jq -r '
+    "Fleet (env " + .env + "): env key " + (if .env_key then .env_key.fingerprint else "none, keys out of sync" end),
+    "",
+    (["AGENT", "REGION", "HEALTHY", "KEYS", "MISSING", "ACTIVE KEY"] | @tsv),
+    (.agents[] | [.id, .region, (.healthy | tostring), (.keys // [] | length | tostring),
+      (.missing_keys // [] | length | tostring), (.controller.active_fingerprint // "-")] | @tsv)
+  ' <<<"$fleet" | column -t -s $'\t' >&2
+else
+  echo "Fleet: the control plane is not reachable on localhost:${SEALER_CONTROL_PLANE_PORT} (is Tilt running?)" >&2
+fi
 
-cat >&2 <<EOF
+/bin/cat >&2 <<EOF
 
   Cluster:        ${SEALER_CLUSTER} (context ${KUBE_CONTEXT})
   Tilt:           http://localhost:${SEALER_TILT_PORT}

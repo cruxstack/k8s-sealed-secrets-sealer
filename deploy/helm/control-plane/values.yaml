@@ -8,6 +8,34 @@ image:
 
 replicaCount: 1
 
+# the env this control plane serves, e.g. "dev" (required)
+env: ""
+# the control plane's external URL (required); also the audience agent login
+# tokens must carry unless agentAudience is set
+publicURL: ""
+agentAudience: ""
+
+# ConfigMap holding registry.yaml (the agents allowed to log in) and any JWKS
+# or CA files it references, mounted at /etc/k8s-sealed-secrets-sealer
+# (required)
+registry:
+  configMapName: ""
+
+# Secret with APP_AGENT_SESSION_KEY (at least 32 bytes) and, to enable the
+# admin API, APP_ADMIN_TOKEN (required)
+existingSecret: ""
+
+dynamodb:
+  # (required)
+  table: ""
+  # local emulators only
+  endpoint: ""
+  createTable: false
+
+aws:
+  # AWS_REGION for the SDK; empty uses the SDK's own lookup
+  region: ""
+
 log:
   level: info
   format: json

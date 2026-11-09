@@ -23,6 +23,19 @@ commands:
               echo "+ go test -race -count=1 ${args[*]}" >&2
               exec go test -race -count=1 "${args[@]}"
 
+      - name: integration
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+        description: |
+          Run the tests that need AWS service emulators but no cluster: the
+          DynamoDB store against DynamoDB Local in Docker.
+
+            atmos test integration
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/test/integration.sh {{ .TrailingArgs }}
+
       - name: e2e
         dependencies:
           tools:

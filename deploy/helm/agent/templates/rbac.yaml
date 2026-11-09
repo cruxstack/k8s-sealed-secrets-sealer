@@ -1,6 +1,7 @@
 {{- $name := .Values.controller.name }}
+{{- $deployment := include "agent.controllerDeployment" . }}
 # Everything the agent may do is granted here, in the controller's namespace
-# only. Nothing is cluster-wide.
+# only. Nothing is cluster-wide. See docs/design.md, "Agent RBAC".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -21,19 +22,25 @@ rules:
       - {{ printf "http:%s:http" $name | quote }}
       - {{ $name | quote }}
     verbs: ["get"]
+  # read the controller's flags (key renewal period and key order)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ $deployment | quote }}]
+    verbs: ["get"]
   {{- if .Values.capabilities.keys }}
-  # read key Secrets for escrow and create restored ones; list cannot be
-  # narrowed by label, which is why the controller needs its own namespace
+  # read key Secrets for the key set and escrow, and create restored ones;
+  # list cannot be narrowed by label, which is why the controller needs a
+  # namespace of its own
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create"]
   {{- end }}
   {{- if or .Values.capabilities.keys .Values.capabilities.renewal }}
   # restart the controller after a restore, and turn on key renewal
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: [{{ include "agent.controllerDeployment" . | quote }}]
-    verbs: ["get", "patch"]
+    resourceNames: [{{ $deployment | quote }}]
+    verbs: ["patch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

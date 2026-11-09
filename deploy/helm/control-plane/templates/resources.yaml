@@ -74,9 +74,40 @@ spec:
               value: {{ .Values.log.level | quote }}
             - name: APP_LOG_FORMAT
               value: {{ .Values.log.format | quote }}
+            - name: APP_ENV_NAME
+              value: {{ required "env is required" .Values.env | quote }}
+            - name: APP_PUBLIC_URL
+              value: {{ required "publicURL is required" .Values.publicURL | quote }}
+            {{- with .Values.agentAudience }}
+            - name: APP_AGENT_AUDIENCE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: APP_REGISTRY_FILE
+              value: /etc/k8s-sealed-secrets-sealer/registry.yaml
+            - name: APP_DYNAMODB_TABLE
+              value: {{ required "dynamodb.table is required" .Values.dynamodb.table | quote }}
+            {{- with .Values.dynamodb.endpoint }}
+            - name: APP_DYNAMODB_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.dynamodb.createTable }}
+            - name: APP_DYNAMODB_CREATE_TABLE
+              value: "true"
+            {{- end }}
+            {{- with .Values.aws.region }}
+            - name: AWS_REGION
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ required "existingSecret is required" .Values.existingSecret }}
+          volumeMounts:
+            - name: registry
+              mountPath: /etc/k8s-sealed-secrets-sealer
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
@@ -102,6 +133,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      volumes:
+        - name: registry
+          configMap:
+            name: {{ required "registry.configMapName is required" .Values.registry.configMapName }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

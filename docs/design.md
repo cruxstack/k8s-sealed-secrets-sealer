@@ -616,15 +616,20 @@ roles. Each env is one instance of that module, in whichever region suits.
 
 ## 17. Build order
 
-Each step is one pull request:
+Each step is one pull request or a few:
 
 1. **Scaffold:** this document, atmos tooling, the k3d and Tilt stack with
    simulated clusters and controllers, minimal binaries, CI and the license.
-2. **Agents:** identity, check-in and key inventory, and a fleet page in the
-   UI.
-3. **Sealing:** the manifest editor, GitHub client and user auth, sessions in
-   DynamoDB, transit encryption, key and agent selection, the seal command,
-   and the end-to-end decrypt tests.
+2. **Agents:** k8s-oidc identity, sessions, check-in, key inventory, the
+   agent registry, and the fleet view (env key, missing keys) through an
+   admin API that exists only when an admin token is configured. The AWS
+   identity mode follows in its own pull request, tested against a fake STS,
+   because it cannot run in the local stack.
+3. **Sealing:** the web UI and user auth, then the manifest editor, GitHub
+   client, sessions in DynamoDB, transit encryption, key and agent selection,
+   the seal command, and the end-to-end decrypt tests. The fleet page
+   arrives with the UI; until users can sign in, fleet data stays behind the
+   admin API rather than on an unauthenticated page.
 4. **Keys:** escrow, sync, renewal management and the alert events.
 5. **Release:** images, the Lambda package and the Helm charts.
 

@@ -36,6 +36,7 @@ commands:
               set -euo pipefail
               atmos check all
               atmos test unit
+              atmos test integration
               if [[ "${VERIFY_FAST:-}" != "true" ]]; then
                 atmos test e2e
               fi

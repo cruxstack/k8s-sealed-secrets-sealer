@@ -1,7 +1,6 @@
-// Package agent runs beside a sealed-secrets controller. In this version it
-// reads the controller's active sealing certificate on an interval and
-// reports readiness once it has one; check-in, sealing and key sync build on
-// this loop.
+// Package agent runs beside a sealed-secrets controller. On every interval
+// it reads the controller's keys and settings and checks in with the control
+// plane; sealing and key sync build on this loop.
 package agent
 
 import (
@@ -12,28 +11,47 @@ import (
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
-// refreshTimeout bounds one read of the controller.
-const refreshTimeout = 15 * time.Second
+// cycleTimeout bounds one inventory and check-in.
+const cycleTimeout = 30 * time.Second
+
+// Collector reads the controller.
+type Collector interface {
+	Collect(ctx context.Context) (Report, error)
+}
+
+// CheckInClient reports to the control plane.
+type CheckInClient interface {
+	CheckIn(ctx context.Context, in protocol.CheckIn) (*protocol.CheckInResponse, error)
+}
 
 // Options configures an Agent.
 type Options struct {
-	Certs    CertSource
-	Interval time.Duration
-	Logger   *slog.Logger
-	Version  string
+	Inventory    Collector
+	ControlPlane CheckInClient
+	Interval     time.Duration
+	Capabilities []string
+	Logger       *slog.Logger
+	Version      string
+	// Now overrides the clock, for tests.
+	Now func() time.Time
 }
 
-// Agent tracks the controller's active sealing key.
+// Agent reports its controller to the control plane on an interval.
 type Agent struct {
-	certs    CertSource
-	interval time.Duration
-	logger   *slog.Logger
-	version  string
+	inventory    Collector
+	controlPlane CheckInClient
+	interval     time.Duration
+	capabilities []string
+	logger       *slog.Logger
+	version      string
+	now          func() time.Time
 
-	mu     sync.RWMutex
-	active *Key
+	mu          sync.RWMutex
+	active      string
+	lastCheckIn time.Time
 }
 
 // New returns an Agent. It makes no network calls.
@@ -42,18 +60,25 @@ func New(opts Options) *Agent {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Agent{
-		certs:    opts.Certs,
-		interval: opts.Interval,
-		logger:   logger,
-		version:  opts.Version,
+		inventory:    opts.Inventory,
+		controlPlane: opts.ControlPlane,
+		interval:     opts.Interval,
+		capabilities: opts.Capabilities,
+		logger:       logger,
+		version:      opts.Version,
+		now:          now,
 	}
 }
 
-// Run reads the controller now and then every interval until ctx ends.
-// Failed reads are logged and retried on the next tick.
+// Run checks in now and then every interval until ctx ends. Failures are
+// logged and retried on the next tick.
 func (a *Agent) Run(ctx context.Context) error {
-	a.refresh(ctx)
+	a.cycle(ctx)
 	t := time.NewTicker(a.interval)
 	defer t.Stop()
 	for {
@@ -61,73 +86,95 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			a.refresh(ctx)
+			a.cycle(ctx)
 		}
 	}
 }
 
-// ActiveKey returns the controller's active key, if one has been read.
-func (a *Agent) ActiveKey() (Key, bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.active == nil {
-		return Key{}, false
-	}
-	return *a.active, true
-}
-
-func (a *Agent) refresh(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+func (a *Agent) cycle(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, cycleTimeout)
 	defer cancel()
 
-	pemBytes, err := a.certs.ActiveCert(ctx)
+	report, err := a.inventory.Collect(ctx)
 	if err != nil {
-		a.logger.WarnContext(ctx, "failed to read controller certificate",
-			"event", "controller.cert_failed", "error", err)
+		a.logger.WarnContext(ctx, "failed to read controller",
+			"event", "controller.read_failed", "error", err)
 		return
 	}
-	key, _, err := ParseCert(pemBytes)
-	if err != nil {
-		a.logger.WarnContext(ctx, "controller returned an unusable certificate",
-			"event", "controller.cert_failed", "error", err)
-		return
-	}
+	a.noteActiveKey(ctx, report)
 
+	_, err = a.controlPlane.CheckIn(ctx, protocol.CheckIn{
+		Protocol:     protocol.Version,
+		AgentVersion: a.version,
+		Capabilities: a.capabilities,
+		Commands:     []string{},
+		Controller:   report.Controller,
+		Keys:         report.Keys,
+		KeysComplete: report.Complete,
+	})
+	if err != nil {
+		a.logger.WarnContext(ctx, "failed to check in with the control plane",
+			"event", "agent.checkin_failed", "error", err)
+		return
+	}
 	a.mu.Lock()
-	prev := a.active
-	a.active = &key
+	first := a.lastCheckIn.IsZero()
+	a.lastCheckIn = a.now()
 	a.mu.Unlock()
+	if first {
+		a.logger.InfoContext(ctx, "checked in with the control plane",
+			"event", "agent.checked_in", "keys", len(report.Keys), "keys_complete", report.Complete)
+	}
+}
 
-	if prev == nil || prev.Fingerprint != key.Fingerprint {
+func (a *Agent) noteActiveKey(ctx context.Context, r Report) {
+	fp := r.Controller.ActiveFingerprint
+	a.mu.Lock()
+	changed := a.active != fp
+	a.active = fp
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	for _, k := range r.Keys {
+		if k.Fingerprint != fp {
+			continue
+		}
 		a.logger.InfoContext(ctx, "controller sealing key is active",
 			"event", "controller.key_active",
-			"fingerprint", key.Fingerprint,
-			"not_before", key.NotBefore,
-			"not_after", key.NotAfter,
-			"bits", key.Bits)
+			"fingerprint", k.Fingerprint, "not_before", k.NotBefore, "not_after", k.NotAfter)
+		if a.now().After(k.NotAfter) {
+			a.logger.WarnContext(ctx, "controller sealing certificate has expired",
+				"event", "controller.cert_expired", "fingerprint", k.Fingerprint, "not_after", k.NotAfter)
+		}
 	}
-	if time.Now().After(key.NotAfter) {
-		a.logger.WarnContext(ctx, "controller sealing certificate has expired",
-			"event", "controller.cert_expired",
-			"fingerprint", key.Fingerprint,
-			"not_after", key.NotAfter)
-	}
+}
+
+// ready reports whether the agent checked in recently: within three
+// intervals, so one slow or failed check-in does not flip it.
+func (a *Agent) ready() (bool, time.Time, string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ok := !a.lastCheckIn.IsZero() && a.now().Sub(a.lastCheckIn) <= 3*a.interval
+	return ok, a.lastCheckIn, a.active
 }
 
 // Handler serves the agent's probes: /healthz answers while the process runs
-// and /readyz once the controller's certificate has been read.
+// and /readyz while check-ins succeed.
 func (a *Agent) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": a.version})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		key, ok := a.ActiveKey()
+		ok, last, active := a.ready()
 		if !ok {
-			httpserver.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "waiting for controller certificate"})
+			httpserver.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not checked in recently"})
 			return
 		}
-		httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "fingerprint": key.Fingerprint})
+		httpserver.WriteJSON(w, http.StatusOK, map[string]string{
+			"status": "ok", "last_checkin": last.UTC().Format(time.RFC3339), "active_fingerprint": active,
+		})
 	})
 	return mux
 }

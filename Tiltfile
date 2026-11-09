@@ -101,6 +101,39 @@ for image, binary in [("local.invalid/sealer-control-plane", "server"), ("local.
 
 # ----------------------------------------------------------- control plane ---
 
+def agent_registry():
+    # The registry lists one agent per simulated cluster, logging in with its
+    # service account. All of them share the k3d cluster's token issuer, whose
+    # signing keys are read once here so the control plane needs no access to
+    # the Kubernetes API.
+    context = k8s_context()
+    discovery = decode_json(str(local("kubectl --context %s get --raw /.well-known/openid-configuration" % shlex.quote(context), quiet=True)))
+    jwks = str(local("kubectl --context %s get --raw /openid/v1/jwks" % shlex.quote(context), quiet=True))
+    registry = {
+        "issuers": [{"name": "local", "url": discovery["issuer"], "jwksFile": "local-jwks.json"}],
+        "agents": [
+            {
+                "id": c["name"],
+                "cluster": c["name"],
+                "region": c["region"],
+                "capabilities": ["seal", "keys", "renewal"],
+                "identity": {"k8s": {
+                    "issuer": "local",
+                    "subject": "system:serviceaccount:%s-sealer:sealer-agent" % c["name"],
+                }},
+            }
+            for c in STACK["clusters"]
+        ],
+    }
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "sealer-registry", "namespace": SYSTEM_NAMESPACE},
+        "data": {"registry.yaml": str(encode_yaml(registry)), "local-jwks.json": jwks},
+    }
+
+setup_objects.append(agent_registry())
+setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
 add(decode_yaml_stream(helm(
     "deploy/helm/control-plane",
@@ -182,6 +215,6 @@ for cluster in STACK["clusters"]:
     k8s_resource(
         "sealer-agent:deployment:%s-sealer" % name,
         new_name=name + "-agent",
-        resource_deps=["setup", "binaries", name + "-controller"],
+        resource_deps=["setup", "binaries", name + "-controller", "sealer-control-plane"],
         labels=[name],
     )

@@ -10,15 +10,23 @@
   - `cmd/lambda/` - control plane on Lambda (not yet added)
 - **Packages**:
   - `internal/config/` - reads and validates all configuration; nothing else reads the environment
-  - `internal/controlplane/` - the control plane's HTTP handler, shared by the server and Lambda entry points
-  - `internal/agent/` - controller access (cert via the API service proxy), key parsing, the agent loop and probes
+  - `internal/protocol/` - the agent API's messages and capabilities; a change here is a protocol change
+  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API), shared by the server and Lambda entry points
+  - `internal/agentauth/` - agent login (projected service-account tokens via go-oidc) and agent session tokens
+  - `internal/registry/` - the agent registry file: who may log in, with which identity and capabilities
+  - `internal/fleet/` - pure computation of agent health, the env key and missing keys (design section 7)
+  - `internal/store/` - persistence: DynamoDB, plus an in-memory store for tests
+  - `internal/keys/` - sealing key fingerprints (the controller's own format) from certificates
+  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), the control plane client, the agent loop and probes
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
+  - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time
 - **Deploy**: `deploy/helm/agent` and `deploy/helm/control-plane`. AWS infrastructure lives in the separate `terraform-aws-k8s-sealed-secrets-sealer` repository.
 
 ## Build & Test
 Atmos is the task runner; every command installs its pinned tools into `.tools/` on first use. Run `atmos list commands` to see them all.
 - **Unit tests**: `atmos test unit` (race detector; no network, cluster or Docker)
+- **Integration tests**: `atmos test integration` (DynamoDB store against DynamoDB Local in Docker)
 - **Single package or test**: `atmos test unit -- -run TestParseCert ./internal/agent`
 - **Static checks**: `atmos check all` (tidy, fmt, lint, govulncheck, Helm charts); `atmos check fmt --write` formats
 - **End-to-end**: `atmos test e2e` (throwaway k3d cluster `sealer-e2e`; `--keep` leaves it up)

@@ -56,6 +56,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos test unit
+      - name: Integration Tests (DynamoDB Local)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: atmos test integration
 
   e2e:
     runs-on: ubuntu-latest

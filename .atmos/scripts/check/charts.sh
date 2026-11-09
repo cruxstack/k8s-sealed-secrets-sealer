@@ -16,6 +16,23 @@ validate() {
     | kubeconform -strict -summary -cache "$schemas" -kubernetes-version 1.35.0 -
 }
 
-validate deploy/helm/control-plane
-validate deploy/helm/agent
-validate deploy/helm/agent --set capabilities.keys=true --set capabilities.renewal=true
+# the minimum each chart requires
+control_plane=(--set env=dev --set publicURL=https://sealer.dev.example.com
+  --set registry.configMapName=sealer-registry --set existingSecret=sealer
+  --set dynamodb.table=sealer)
+agent=(--set controlPlane.url=https://sealer.dev.example.com)
+
+validate deploy/helm/control-plane "${control_plane[@]}"
+validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-east-1 \
+  --set agentAudience=https://agents.example.com --set dynamodb.endpoint=http://dynamodb:8000 \
+  --set dynamodb.createTable=true
+validate deploy/helm/agent "${agent[@]}"
+validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true
+
+# without their required values, the charts must refuse to render
+for chart in deploy/helm/control-plane deploy/helm/agent; do
+  if helm template check "$chart" >/dev/null 2>&1; then
+    echo "Error: ${chart} renders without its required values" >&2
+    exit 1
+  fi
+done

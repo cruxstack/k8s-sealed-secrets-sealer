@@ -1,4 +1,4 @@
-package agent
+package keys
 
 import (
 	"strings"
@@ -6,13 +6,15 @@ import (
 	"time"
 
 	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
+
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/testutil/testcerts"
 )
 
 func TestParseCert_UsesControllerFingerprint(t *testing.T) {
-	priv := rsaKey(t, 2048)
+	priv := testcerts.RSA(t, 2048)
 	notBefore := time.Now().Add(-time.Hour).Truncate(time.Second).UTC()
 
-	key, pub, err := ParseCert(selfSigned(t, priv, notBefore))
+	key, pub, err := ParseCert(testcerts.SelfSigned(t, priv, notBefore))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,8 +43,8 @@ func TestParseCert_Rejects(t *testing.T) {
 		want string
 	}{
 		"garbage":   {[]byte("not a certificate"), "failed to parse certificate pem"},
-		"ecdsa key": {selfSigned(t, ecKey(t), now), "expected an rsa public key"},
-		"small key": {selfSigned(t, rsaKey(t, 1024), now), "need at least 2048"},
+		"ecdsa key": {testcerts.SelfSigned(t, testcerts.ECDSA(t), now), "expected an rsa public key"},
+		"small key": {testcerts.SelfSigned(t, testcerts.RSA(t, 1024), now), "need at least 2048"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
