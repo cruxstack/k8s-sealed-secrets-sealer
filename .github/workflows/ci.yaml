@@ -17,7 +17,9 @@ env:
   ATMOS_VERSION: 1.233.2
 
 # Every job runs the same atmos command a developer runs locally; atmos
-# installs the pinned toolchain (Go, linters, k3d, Tilt, Helm) itself.
+# installs the pinned toolchain (Go, linters, k3d, Tilt, Helm) itself and
+# checks each download's build provenance with `gh attestation verify`, which
+# needs a token (the job's read-only GITHUB_TOKEN is enough).
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -33,6 +35,8 @@ jobs:
           install-wrapper: false
           checksum-validation: enforce
       - name: Static Checks
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: atmos check all
 
   test:
@@ -49,6 +53,8 @@ jobs:
           install-wrapper: false
           checksum-validation: enforce
       - name: Unit Tests
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: atmos test unit
 
   e2e:
@@ -66,6 +72,8 @@ jobs:
           install-wrapper: false
           checksum-validation: enforce
       - name: End-to-End Tests (k3d)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: atmos test e2e
 
   image:
