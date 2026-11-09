@@ -36,8 +36,9 @@ aws:
   # AWS_REGION for the SDK; empty uses the SDK's own lookup
   region: ""
   # STS hosts agents' signed login requests may target (aws-sts agents).
-  # Empty allows sts.amazonaws.com and sts.<region>.amazonaws.com; set it
-  # only for other endpoints, such as VPC endpoint host names.
+  # Empty allows sts.amazonaws.com and the regional hosts of known AWS
+  # regions; set it for newer regions or other endpoints, such as VPC
+  # endpoint host names.
   stsHosts: []
 
 log:

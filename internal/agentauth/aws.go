@@ -38,8 +38,23 @@ var allowedSTSHeaders = []string{
 	http.CanonicalHeaderKey(protocol.AWSAudienceHeader),
 }
 
+// knownSTSRegions are the regions whose public STS endpoints agents may sign
+// for unless AllowedHosts replaces them. An agent in a region missing here,
+// or behind a VPC endpoint, needs AllowedHosts.
+var knownSTSRegions = []string{
+	"af-south-1", "ap-east-1", "ap-east-2", "ap-northeast-1", "ap-northeast-2",
+	"ap-northeast-3", "ap-south-1", "ap-south-2", "ap-southeast-1",
+	"ap-southeast-2", "ap-southeast-3", "ap-southeast-4", "ap-southeast-5",
+	"ap-southeast-6", "ap-southeast-7", "ca-central-1", "ca-west-1",
+	"eu-central-1", "eu-central-2", "eu-north-1", "eu-south-1", "eu-south-2",
+	"eu-west-1", "eu-west-2", "eu-west-3", "il-central-1", "me-central-1",
+	"me-south-1", "mx-central-1", "sa-east-1", "us-east-1", "us-east-2",
+	"us-gov-east-1", "us-gov-west-1", "us-west-1", "us-west-2",
+}
+
+var knownChinaSTSRegions = []string{"cn-north-1", "cn-northwest-1"}
+
 var (
-	regionalSTSHost = regexp.MustCompile(`^sts\.[a-z]{2}(-gov)?-[a-z]+-[0-9]+\.amazonaws\.com$`)
 	sigV4Auth       = regexp.MustCompile(`^AWS4-HMAC-SHA256 Credential=([^/,\s]+)/([0-9]{8})/([a-z0-9-]+)/sts/aws4_request, ?SignedHeaders=([a-z0-9;-]+), ?Signature=([0-9a-f]{64})$`)
 	assumedRoleARN  = regexp.MustCompile(`^arn:(aws|aws-us-gov|aws-cn):sts::([0-9]{12}):assumed-role/([\w+=,.@-]{1,64})/[\w+=,.@-]+$`)
 )
@@ -52,9 +67,12 @@ type ReplayStore interface {
 // AWSVerifier verifies agents that log in with a signed
 // sts:GetCallerIdentity request (the scheme Vault's AWS auth method uses).
 type AWSVerifier struct {
-	reg       *registry.Registry
-	audience  string
-	allowHost func(string) bool
+	reg      *registry.Registry
+	audience string
+	// endpoints maps each allowed STS host to the URL requests go to. The
+	// URL comes from this table, built from trusted values, never from the
+	// agent's request.
+	endpoints map[string]string
 	http      *http.Client
 	replays   ReplayStore
 	now       func() time.Time
@@ -67,7 +85,7 @@ type AWSOptions struct {
 	// URL.
 	Audience string
 	// AllowedHosts lists the only STS hosts requests may target. Empty allows
-	// sts.amazonaws.com and the regional sts.<region>.amazonaws.com hosts.
+	// sts.amazonaws.com and the regional hosts of known AWS regions.
 	AllowedHosts []string
 	// HTTPClient calls STS. It must not follow redirects; the default does
 	// not.
@@ -81,10 +99,21 @@ func NewAWSVerifier(opts AWSOptions) (*AWSVerifier, error) {
 	if opts.Audience == "" || opts.Replays == nil || opts.Registry == nil {
 		return nil, errors.New("failed to create aws verifier: registry, audience and replay store are required")
 	}
-	allow := func(host string) bool { return host == "sts.amazonaws.com" || regionalSTSHost.MatchString(host) }
+	endpoints := map[string]string{}
 	if len(opts.AllowedHosts) > 0 {
-		hosts := slices.Clone(opts.AllowedHosts)
-		allow = func(host string) bool { return slices.Contains(hosts, host) }
+		for _, h := range opts.AllowedHosts {
+			endpoints[h] = "https://" + h + "/"
+		}
+	} else {
+		endpoints["sts.amazonaws.com"] = "https://sts.amazonaws.com/"
+		for _, r := range knownSTSRegions {
+			h := "sts." + r + ".amazonaws.com"
+			endpoints[h] = "https://" + h + "/"
+		}
+		for _, r := range knownChinaSTSRegions {
+			h := "sts." + r + ".amazonaws.com.cn"
+			endpoints[h] = "https://" + h + "/"
+		}
 	}
 	client := opts.HTTPClient
 	if client == nil {
@@ -100,7 +129,7 @@ func NewAWSVerifier(opts AWSOptions) (*AWSVerifier, error) {
 	return &AWSVerifier{
 		reg:       opts.Registry,
 		audience:  opts.Audience,
-		allowHost: allow,
+		endpoints: endpoints,
 		http:      &noRedirects,
 		replays:   opts.Replays,
 		now:       now,
@@ -153,17 +182,22 @@ func (v *AWSVerifier) VerifyLogin(ctx context.Context, req protocol.SessionReque
 }
 
 // checkTarget allows only a POST of the exact GetCallerIdentity call to an
-// allowed STS host, so the control plane can't be made to call anything else.
-func (v *AWSVerifier) checkTarget(sr *protocol.SignedRequest) (*url.URL, error) {
+// allowed STS host, so the control plane can't be made to call anything
+// else. It returns the URL to call, taken from the endpoint table.
+func (v *AWSVerifier) checkTarget(sr *protocol.SignedRequest) (string, error) {
 	u, err := url.Parse(sr.URL)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		(u.Path != "" && u.Path != "/") || !v.allowHost(u.Host) {
-		return nil, fmt.Errorf("sts url %q is not allowed", sr.URL)
+		(u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("sts url %q is not allowed", sr.URL)
+	}
+	endpoint, ok := v.endpoints[u.Host]
+	if !ok {
+		return "", fmt.Errorf("sts host %q is not allowed", u.Host)
 	}
 	if sr.Body != protocol.AWSGetCallerIdentityBody {
-		return nil, errors.New("signed request is not sts:GetCallerIdentity")
+		return "", errors.New("signed request is not sts:GetCallerIdentity")
 	}
-	return u, nil
+	return endpoint, nil
 }
 
 // checkSignatureShape checks the headers before anything is sent to STS: only
@@ -214,8 +248,8 @@ type callerIdentity struct {
 	UserID string `xml:"GetCallerIdentityResult>UserId"`
 }
 
-func (v *AWSVerifier) callSTS(ctx context.Context, target *url.URL, sr *protocol.SignedRequest) (*callerIdentity, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(sr.Body))
+func (v *AWSVerifier) callSTS(ctx context.Context, endpoint string, sr *protocol.SignedRequest) (*callerIdentity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(protocol.AWSGetCallerIdentityBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build sts request: %w", err)
 	}

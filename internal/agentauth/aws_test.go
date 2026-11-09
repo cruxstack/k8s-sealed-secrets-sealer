@@ -227,6 +227,8 @@ func TestAWSVerifier_DefaultHosts(t *testing.T) {
 		"sts.amazonaws.com":                  true,
 		"sts.us-east-1.amazonaws.com":        true,
 		"sts.us-gov-west-1.amazonaws.com":    true,
+		"sts.cn-north-1.amazonaws.com.cn":    true,
+		"sts.xx-nowhere-9.amazonaws.com":     false,
 		"sts.amazonaws.com:8443":             false,
 		"sts.us-east-1.amazonaws.com.evil.x": false,
 		"evilsts.us-east-1.amazonaws.com":    false,

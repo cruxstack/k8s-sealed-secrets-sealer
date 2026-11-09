@@ -174,9 +174,10 @@ the same exchange Vault's AWS auth method uses. The header is
 1. checks that the request is a POST of exactly
    `Action=GetCallerIdentity&Version=2011-06-15` over https to an allowed STS
    host, with no query string: by default `sts.amazonaws.com` and the
-   regional `sts.<region>.amazonaws.com` hosts, or an explicit list (for
-   example VPC endpoint host names), so the control plane can't be made to
-   call anything else;
+   regional hosts of known AWS regions, or an explicit list (for example VPC
+   endpoint host names). The request goes to the URL the control plane holds
+   for that host, never to the URL as sent, so it can't be made to call
+   anything else;
 2. accepts only the headers a signed STS call needs (`Authorization`,
    `X-Amz-Date`, `X-Amz-Security-Token`, `Content-Type` and the audience
    header), requires the audience header to equal its own URL and to be
