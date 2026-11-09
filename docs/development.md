@@ -25,6 +25,29 @@ The stack is one k3d cluster that stands in for a whole environment:
 | `<cluster>-sealer`         | That cluster's agent                              |
 | `<cluster>-apps`           | Where tests apply SealedSecrets for that cluster  |
 
+```mermaid
+flowchart LR
+  dev(["Developer"])
+  subgraph k3d["k3d cluster: sealer"]
+    subgraph sys["sealer-system"]
+      cp["control plane"]
+      ddb[("DynamoDB Local")]
+      kms["local KMS"]
+    end
+    subgraph blue["simulated cluster dev-use1-blue"]
+      ab["agent<br/>dev-use1-blue-sealer"] -->|API service proxy| cb["controller and keys<br/>dev-use1-blue-sealed-secrets"]
+      cb -->|unseals into| apb["dev-use1-blue-apps"]
+    end
+    subgraph green["simulated cluster dev-use1-green"]
+      ag["agent"] --> cg["controller and keys"] --> apg["apps"]
+    end
+    subgraph use2["simulated cluster dev-use2-blue"]
+      au["agent"] --> cu["controller and keys"] --> apu["apps"]
+    end
+  end
+  dev -->|"localhost:4100 and Tilt on :10350"| cp
+```
+
 The simulated clusters come from `dev/stack.yaml`: `dev-use1-blue`,
 `dev-use1-green` and `dev-use2-blue`. Each controller runs with
 `--all-namespaces=false` and watches only its own two namespaces, with no

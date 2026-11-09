@@ -68,27 +68,70 @@ Non-goals for v1:
 ## 3. Architecture
 
 ```
-  Browser ──HTTPS──► sealer.dev.example.com (CloudFront + WAF)
-                                │
-                                ▼
-                     API Gateway (HTTP API)
-                                │
-                                ▼
-                  Lambda: control plane ─────────► GitHub App
-                     │        │                    (read files, open PRs)
-                     │        └──► KMS transit key (GenerateDataKey only)
-                     ▼
-     DynamoDB: agents, keys, escrow, commands, sessions, audit
-                                ▲
-                                │ /agent/v1/*  (HTTPS, outbound from clusters)
-          ┌─────────────────────┼─────────────────────┐
-          │                     │                     │
-   agent use1/blue       agent use1/green      agent use2/blue
-          │                     │                     │
-   sealed-secrets        sealed-secrets        sealed-secrets
-   controller            controller            controller
+  Browser
+     │ HTTPS
+     ▼
+  CloudFront + WAF (sealer.dev.example.com)
+     │
+     ▼
+  API Gateway (HTTP API) ◄─────────────── agents (below)
+     │
+     ▼
+  Lambda: control plane ────────────────► GitHub App (read files, open PRs)
+     │        │
+     │        └─────────────────────────► KMS transit key (GenerateDataKey)
+     ▼
+  DynamoDB: agents, keys, escrow, commands, sessions, audit
 
-   agents: KMS transit key (decrypt own commands), escrow key (encrypt+decrypt)
+          HTTPS to /agent/v1/*, always opened by the agent
+     ┌───────────────────────┬───────────────────────┬──────► API Gateway
+     │                       │                       │
+┌────┴─ use1/blue ──┐   ┌────┴─ use1/green ─┐   ┌────┴─ use2/blue ──┐
+│  agent            │   │  agent            │   │  agent            │
+│    │ Kubernetes   │   │    │ Kubernetes   │   │    │ Kubernetes   │
+│    │ API          │   │    │ API          │   │    │ API          │
+│    ▼              │   │    ▼              │   │    ▼              │
+│  sealed-secrets   │   │  sealed-secrets   │   │  sealed-secrets   │
+│  controller       │   │  controller       │   │  controller       │
+└───────────────────┘   └───────────────────┘   └───────────────────┘
+
+  Agents also call KMS directly: transit Decrypt (their own commands only)
+  and the escrow key. Controllers never talk to the control plane.
+```
+
+The same picture, rendered:
+
+```mermaid
+flowchart TB
+  user(["Browser"])
+  github["GitHub App<br/>read files, open PRs"]
+
+  subgraph cp_env["Control plane: one per env"]
+    edge["CloudFront + WAF<br/>sealer.dev.example.com"]
+    apigw["API Gateway (HTTP API)"]
+    cp["Control plane<br/>Lambda or container"]
+    ddb[("DynamoDB<br/>agents, keys, escrow,<br/>commands, sessions, audit")]
+    transit["KMS transit key"]
+    escrow["KMS escrow key"]
+  end
+
+  subgraph c1["Cluster use1/blue"]
+    a1["agent"] -->|Kubernetes API| s1["sealed-secrets controller"]
+  end
+  subgraph c2["Cluster use1/green"]
+    a2["agent"] -->|Kubernetes API| s2["sealed-secrets controller"]
+  end
+  subgraph c3["Cluster use2/blue"]
+    a3["agent"] -->|Kubernetes API| s3["sealed-secrets controller"]
+  end
+
+  user -->|HTTPS| edge --> apigw --> cp
+  cp --> ddb
+  cp -->|GenerateDataKey only| transit
+  cp --> github
+  a1 & a2 & a3 -->|"HTTPS /agent/v1/*, outbound only"| apigw
+  a1 & a2 & a3 -.->|"Decrypt, own commands only"| transit
+  a1 & a2 & a3 -.->|"encrypt and decrypt"| escrow
 ```
 
 **Control plane.** One Go binary with two entry points that serve the same
@@ -149,6 +192,34 @@ running outside AWS.
 In both modes a successful login returns a short-lived agent session token
 (15 minutes), scoped to the agent API and bound to the agent ID. Every other
 agent call carries it.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent
+  participant CP as Control plane
+  participant I as Cluster OIDC issuer
+  participant STS as AWS STS
+
+  alt k8s-oidc mode
+    Note over A: kubelet mounts a projected token<br/>aud = control plane URL, 10 minutes
+    A->>CP: POST /agent/v1/session (projected token)
+    CP->>I: JWKS (cached)
+    CP->>CP: verify signature, iss, aud, exp<br/>sub must be the registered service account
+  else AWS mode
+    A->>A: sign sts:GetCallerIdentity (SigV4)<br/>with the control plane URL header
+    A->>CP: POST /agent/v1/session (signed request)
+    CP->>CP: STS host allowed, URL header matches,<br/>request not seen before
+    CP->>STS: forward the signed request
+    STS-->>CP: role ARN
+    CP->>CP: role ARN must be registered
+  end
+  CP-->>A: agent session token (15 minutes)
+  loop every 15 seconds
+    A->>CP: POST /agent/v1/checkin (session token, key set)
+    CP-->>A: 200
+  end
+```
 
 ## 5. Command protocol
 
@@ -246,6 +317,37 @@ v1 has no command that deletes or disables anything.
    scope annotations, comments and other documents are left untouched. The
    commit and pull request record who requested it.
 
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant CP as Control plane
+  participant GH as GitHub
+  participant KMS as KMS transit key
+  participant DB as DynamoDB
+  participant A as Chosen agent
+
+  U->>CP: seal a key and value into a file
+  CP->>GH: check write permission, read the file
+  CP->>CP: targets = the file's documents for this env<br/>choose the env key and an agent
+  CP->>KMS: GenerateDataKey {env, command_id, agent_id}
+  CP->>CP: encrypt the value, drop the plaintext
+  CP->>DB: queue seal.v1 (expires in about 2 minutes)
+  CP-->>U: 202 with the command ID
+  A->>CP: GET /agent/v1/commands (long poll)
+  CP->>DB: lease the command (queued to leased)
+  CP-->>A: seal.v1
+  A->>A: re-check targets, scope and env key
+  A->>KMS: Decrypt (context must name this agent)
+  A->>A: seal each target with the env key's certificate
+  A->>CP: result: ciphertexts only
+  CP->>DB: pending changes in the session, payload removed
+  U->>CP: poll the command
+  CP-->>U: sealed, by which agent and key
+  U->>CP: create pull request
+  CP->>GH: commit the edited files, open the PR
+```
+
 **Transit key permissions.** The control plane may only call
 `GenerateDataKey` on the transit key; it cannot decrypt. Each agent role may
 call `Decrypt` only when the encryption context's `agent_id` equals the
@@ -293,6 +395,19 @@ To choose the agent for a seal:
 4. If no key is held by every in-scope cluster, refuse with "keys out of sync"
    and name the clusters missing keys. Sync (section 8) normally closes the gap
    within a few check-ins.
+
+```mermaid
+flowchart TD
+  start(["Seal request"]) --> scope["In-scope clusters: every registered agent<br/>that has checked in at least once"]
+  scope --> held{"Is any key held by<br/>every in-scope cluster?"}
+  held -- no --> outofsync["Refuse: keys out of sync<br/>name the clusters missing keys"]
+  held -- yes --> envkey["Env key: the newest NotBefore<br/>among keys held everywhere"]
+  envkey --> cands{"Healthy agents with seal,<br/>seal.v1 and the env key?"}
+  cands -- none --> noagent["Refuse: no agent available"]
+  cands -- some --> region["Prefer the target documents' region"]
+  region --> load["Then fewest commands in flight,<br/>then most recent check-in"]
+  load --> queue(["Queue seal.v1 for that agent"])
+```
 
 The agent seals with the env key's certificate, which is not necessarily its
 controller's newest key. This handles the cases that matter:
@@ -346,6 +461,34 @@ After restoring all missing keys, the agent restarts the controller once (by
 patching the Deployment's pod template annotation). This is required: the
 controller lists key secrets only at startup (`initKeyRegistry`) and does not
 watch for new ones.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant H as Agent holding key K
+  participant CP as Control plane
+  participant DB as DynamoDB
+  participant KMS as KMS escrow key
+  participant M as Agent missing key K
+  participant C as Its controller
+
+  H->>CP: check-in reports K
+  CP-->>H: K has no escrow record
+  H->>KMS: GenerateDataKey {env, fingerprint K}
+  H->>H: encrypt tls.crt and tls.key
+  H->>CP: PUT /agent/v1/escrow/K
+  CP->>CP: certificate fingerprint matches K
+  CP->>DB: store if absent (first upload wins)
+  M->>CP: check-in without K
+  CP->>DB: queue keys.restore.v1 [K] for M
+  M->>CP: lease keys.restore.v1
+  M->>CP: GET /agent/v1/escrow/K
+  M->>KMS: Decrypt {env, fingerprint K}
+  M->>M: private key matches certificate,<br/>certificate matches K
+  M->>C: create the key Secret (label active)
+  M->>C: restart (keys load only at startup)
+  M->>CP: result, then check-ins report K
+```
 
 **Key order.** The controller orders keys by `--key-order-priority`, which
 defaults to `CertNotBefore`. With that default a restored key keeps its place
