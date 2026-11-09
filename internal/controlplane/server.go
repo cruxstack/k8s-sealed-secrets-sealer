@@ -19,9 +19,9 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 )
 
-// AgentVerifier checks the identity an agent logs in with.
-type AgentVerifier interface {
-	Verify(ctx context.Context, token string) (*registry.Agent, error)
+// LoginVerifier checks the identity in an agent's login request.
+type LoginVerifier interface {
+	VerifyLogin(ctx context.Context, req protocol.SessionRequest) (*registry.Agent, error)
 }
 
 // Options configures a Server.
@@ -30,7 +30,8 @@ type Options struct {
 	Version  string
 	Env      string
 	Registry *registry.Registry
-	Verifier AgentVerifier
+	// Logins verifies login requests, by login method.
+	Logins   map[string]LoginVerifier
 	Sessions *agentauth.Sessions
 	Store    store.Store
 	// AdminToken enables the admin API. Empty disables it.
@@ -46,7 +47,7 @@ type Server struct {
 	version    string
 	env        string
 	reg        *registry.Registry
-	verifier   AgentVerifier
+	logins     map[string]LoginVerifier
 	sessions   *agentauth.Sessions
 	store      store.Store
 	adminToken string
@@ -73,7 +74,7 @@ func New(opts Options) *Server {
 		version:    opts.Version,
 		env:        opts.Env,
 		reg:        opts.Registry,
-		verifier:   opts.Verifier,
+		logins:     opts.Logins,
 		sessions:   opts.Sessions,
 		store:      opts.Store,
 		adminToken: opts.AdminToken,

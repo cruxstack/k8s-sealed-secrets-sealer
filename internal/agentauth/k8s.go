@@ -20,6 +20,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 )
 
@@ -98,6 +99,14 @@ func (v *K8sVerifier) Verify(ctx context.Context, token string) (*registry.Agent
 		return nil, fmt.Errorf("%w: subject %q is not a registered agent", ErrUnauthorized, idToken.Subject)
 	}
 	return agent, nil
+}
+
+// VerifyLogin checks a k8s-oidc login request.
+func (v *K8sVerifier) VerifyLogin(ctx context.Context, req protocol.SessionRequest) (*registry.Agent, error) {
+	if req.AWS != nil {
+		return nil, fmt.Errorf("%w: k8s-oidc login needs a token and nothing else", ErrUnauthorized)
+	}
+	return v.Verify(ctx, req.Token)
 }
 
 func unverifiedIssuer(token string) (string, error) {

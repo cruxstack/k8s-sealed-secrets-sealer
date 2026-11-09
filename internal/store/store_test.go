@@ -96,3 +96,20 @@ func TestStore_PutKeyIfAbsent(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_PutReplayIfAbsent(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			key := "sig-" + name + "-" + time.Now().Format("150405.000000")
+			first, err := s.PutReplayIfAbsent(ctx, key, time.Now().Add(20*time.Minute))
+			if err != nil || !first {
+				t.Fatalf("first use: recorded=%v err=%v", first, err)
+			}
+			again, err := s.PutReplayIfAbsent(ctx, key, time.Now().Add(20*time.Minute))
+			if err != nil || again {
+				t.Fatalf("second use: recorded=%v err=%v", again, err)
+			}
+		})
+	}
+}

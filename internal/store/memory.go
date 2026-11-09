@@ -3,18 +3,20 @@ package store
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Memory is an in-memory Store for tests.
 type Memory struct {
-	mu     sync.Mutex
-	agents map[string]AgentState
-	keys   map[string]KeyRecord
+	mu      sync.Mutex
+	agents  map[string]AgentState
+	keys    map[string]KeyRecord
+	replays map[string]time.Time
 }
 
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
-	return &Memory{agents: map[string]AgentState{}, keys: map[string]KeyRecord{}}
+	return &Memory{agents: map[string]AgentState{}, keys: map[string]KeyRecord{}, replays: map[string]time.Time{}}
 }
 
 func (m *Memory) PutAgentState(_ context.Context, s AgentState) error {
@@ -43,6 +45,22 @@ func (m *Memory) PutKeyIfAbsent(_ context.Context, k KeyRecord) (bool, error) {
 		return false, nil
 	}
 	m.keys[k.Fingerprint] = k
+	return true, nil
+}
+
+func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for k, exp := range m.replays {
+		if now.After(exp) {
+			delete(m.replays, k)
+		}
+	}
+	if _, ok := m.replays[key]; ok {
+		return false, nil
+	}
+	m.replays[key] = expires
 	return true, nil
 }
 

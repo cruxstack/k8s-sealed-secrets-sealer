@@ -28,7 +28,11 @@ type fakeVerifier struct {
 	tokens map[string]string
 }
 
-func (f fakeVerifier) Verify(_ context.Context, token string) (*registry.Agent, error) {
+func (f fakeVerifier) VerifyLogin(_ context.Context, req protocol.SessionRequest) (*registry.Agent, error) {
+	token := req.Token
+	if req.AWS != nil {
+		token = req.AWS.Body
+	}
 	if id, ok := f.tokens[token]; ok {
 		a, _ := f.reg.Agent(id)
 		return a, nil
@@ -61,11 +65,14 @@ agents:
 	logs := &bytes.Buffer{}
 	mem := store.NewMemory()
 	srv := New(Options{
-		Logger:     slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Version:    "test",
-		Env:        "dev",
-		Registry:   reg,
-		Verifier:   fakeVerifier{reg: reg, tokens: map[string]string{"blue-sa-token": "use1-blue"}},
+		Logger:   slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Version:  "test",
+		Env:      "dev",
+		Registry: reg,
+		Logins: map[string]LoginVerifier{
+			protocol.MethodK8sOIDC: fakeVerifier{reg: reg, tokens: map[string]string{"blue-sa-token": "use1-blue"}},
+			protocol.MethodAWSSTS:  fakeVerifier{reg: reg, tokens: map[string]string{"signed-by-use2": "use2-blue"}},
+		},
 		Sessions:   sessions,
 		Store:      mem,
 		AdminToken: admin,
@@ -316,4 +323,20 @@ func TestAdminFleet(t *testing.T) {
 	}
 }
 
-var _ AgentVerifier = fakeVerifier{}
+var _ LoginVerifier = fakeVerifier{}
+
+func TestSession_RoutesByMethod(t *testing.T) {
+	h := newHarness(t, "")
+	rec := h.do(http.MethodPost, "/agent/v1/session", "", protocol.SessionRequest{
+		Method: protocol.MethodAWSSTS,
+		AWS:    &protocol.SignedRequest{URL: "https://sts.us-east-2.amazonaws.com/", Body: "signed-by-use2"},
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"agent_id":"use2-blue"`) {
+		t.Fatalf("aws login = %d %s", rec.Code, rec.Body)
+	}
+	// a k8s token sent under the aws method goes to the aws verifier, which rejects it
+	rec = h.do(http.MethodPost, "/agent/v1/session", "", protocol.SessionRequest{Method: protocol.MethodAWSSTS, Token: "blue-sa-token"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-method login = %d", rec.Code)
+	}
+}

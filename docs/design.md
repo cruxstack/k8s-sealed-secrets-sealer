@@ -168,15 +168,31 @@ name, enabled capabilities it may use, and exactly one identity:
 with EKS Pod Identity. To log in, the agent signs an `sts:GetCallerIdentity`
 request with SigV4, including a header that names the control plane's URL, and
 sends the signed request (not credentials) to `POST /agent/v1/session`. This is
-the same exchange Vault's AWS auth method uses. The control plane:
+the same exchange Vault's AWS auth method uses. The header is
+`X-K8s-Sealed-Secrets-Sealer-Audience`. The control plane:
 
-1. checks that the request targets an allowed STS endpoint (an allowlist of
-   hostnames, so the control plane can't be made to call anything else);
-2. checks the signed audience header matches its own URL;
-3. rejects a signed request it has already accepted within the signature's
-   validity window (it stores a hash of each accepted request until expiry);
-4. forwards the request to STS and maps the returned role ARN to a registered
-   agent.
+1. checks that the request is a POST of exactly
+   `Action=GetCallerIdentity&Version=2011-06-15` over https to an allowed STS
+   host, with no query string: by default `sts.amazonaws.com` and the
+   regional `sts.<region>.amazonaws.com` hosts, or an explicit list (for
+   example VPC endpoint host names), so the control plane can't be made to
+   call anything else;
+2. accepts only the headers a signed STS call needs (`Authorization`,
+   `X-Amz-Date`, `X-Amz-Security-Token`, `Content-Type` and the audience
+   header), requires the audience header to equal its own URL and to be
+   among the signed headers, and requires the signature date to be within
+   15 minutes of now;
+3. forwards the request to STS, never following a redirect, and maps the
+   returned assumed-role ARN to a registered agent;
+4. records a hash of the signature only after STS accepted it (so forged
+   requests can't fill the table) and rejects any later use of it; the
+   record outlives the signature's validity window.
+
+STS reports an assumed role without the role's path, so a role is matched by
+partition, account and name, which IAM keeps unique per account. A registry
+entry can also pin the role's unique ID (`AROA...`), so a role that is deleted
+and recreated with the same name is not accepted. Every check except STS's
+signature verification happens before anything is sent to STS.
 
 The agent needs the same role for KMS anyway, so each agent has one identity.
 
@@ -766,8 +782,8 @@ Each step is one pull request or a few:
 2. **Agents:** k8s-oidc identity, sessions, check-in, key inventory, the
    agent registry, and the fleet view (env key, missing keys) through an
    admin API that exists only when an admin token is configured. The AWS
-   identity mode follows in its own pull request, tested against a fake STS,
-   because it cannot run in the local stack.
+   identity mode followed in its own pull request, tested against a fake STS
+   that verifies SigV4 signatures, because it cannot run in the local stack.
 3. **Sealing:** the web UI and user auth, then the manifest editor, GitHub
    client, sessions in DynamoDB, transit encryption, key and agent selection,
    the seal command, and the end-to-end decrypt tests. The fleet page

@@ -145,3 +145,30 @@ func TestLoadAgent_Capabilities(t *testing.T) {
 		t.Errorf("Capabilities = %q", got)
 	}
 }
+
+func TestLoadAgent_IdentityMode(t *testing.T) {
+	cfg, err := loadAgent(env(agentEnv(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IdentityMode != "k8s-oidc" || cfg.IdentityAudience != "https://sealer.dev.example.com" {
+		t.Errorf("defaults: mode=%q audience=%q", cfg.IdentityMode, cfg.IdentityAudience)
+	}
+	cfg, err = loadAgent(env(agentEnv(map[string]string{"APP_IDENTITY_MODE": "aws-sts", "APP_AWS_STS_REGION": "us-east-2"})))
+	if err != nil || cfg.IdentityMode != "aws-sts" || cfg.AWSSTSRegion != "us-east-2" {
+		t.Fatalf("aws mode: %+v %v", cfg, err)
+	}
+	if _, err := loadAgent(env(agentEnv(map[string]string{"APP_IDENTITY_MODE": "password"}))); err == nil || !strings.Contains(err.Error(), "APP_IDENTITY_MODE") {
+		t.Fatalf("unknown mode: %v", err)
+	}
+}
+
+func TestLoadControlPlane_STSHosts(t *testing.T) {
+	cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_AWS_STS_HOSTS": "sts.us-east-1.amazonaws.com, sts.vpce.example.com:443"})))
+	if err != nil || len(cfg.AWSSTSHosts) != 2 || cfg.AWSSTSHosts[1] != "sts.vpce.example.com:443" {
+		t.Fatalf("hosts = %v, %v", cfg.AWSSTSHosts, err)
+	}
+	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_AWS_STS_HOSTS": "https://sts.amazonaws.com/"}))); err == nil {
+		t.Fatal("a URL was accepted as a host")
+	}
+}

@@ -25,9 +25,21 @@ agent=(--set controlPlane.url=https://sealer.dev.example.com)
 validate deploy/helm/control-plane "${control_plane[@]}"
 validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-east-1 \
   --set agentAudience=https://agents.example.com --set dynamodb.endpoint=http://dynamodb:8000 \
-  --set dynamodb.createTable=true
+  --set dynamodb.createTable=true --set 'aws.stsHosts={sts.us-east-1.amazonaws.com}'
 validate deploy/helm/agent "${agent[@]}"
 validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true
+validate deploy/helm/agent "${agent[@]}" --set identity.mode=aws-sts --set aws.region=us-east-1 \
+  --set 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/agent'
+
+# aws-sts mounts no projected token; an unknown identity mode is refused
+if helm template check deploy/helm/agent "${agent[@]}" --set identity.mode=aws-sts | grep -q serviceAccountToken; then
+  echo "Error: the agent chart mounts a projected token in aws-sts mode" >&2
+  exit 1
+fi
+if helm template check deploy/helm/agent "${agent[@]}" --set identity.mode=password >/dev/null 2>&1; then
+  echo "Error: the agent chart accepts an unknown identity mode" >&2
+  exit 1
+fi
 
 # without their required values, the charts must refuse to render
 for chart in deploy/helm/control-plane deploy/helm/agent; do

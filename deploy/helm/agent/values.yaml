@@ -33,13 +33,25 @@ controlPlane:
   url: ""
   allowInsecure: false
 
-# The agent logs in with a projected service-account token. Its audience must
-# match the control plane's agent audience, which is the control plane's
-# public URL unless configured otherwise.
+# How the agent logs in to the control plane:
+#   k8s-oidc  a projected service-account token, verified against this
+#             cluster's OIDC issuer
+#   aws-sts   the pod's IAM role (EKS Pod Identity or IRSA, set up through
+#             serviceAccount.annotations or a Pod Identity association),
+#             proven with a signed sts:GetCallerIdentity request
+# Either way the audience must match the control plane's agent audience,
+# which is its public URL unless configured otherwise.
 identity:
+  mode: k8s-oidc
   # defaults to controlPlane.url
   audience: ""
+  # lifetime of the projected token (k8s-oidc)
   expirationSeconds: 600
+
+aws:
+  # region of the STS endpoint the agent signs for (aws-sts); empty uses the
+  # AWS SDK's region (AWS_REGION)
+  region: ""
 
 # how often the agent reads the controller and checks in
 checkinInterval: 15s

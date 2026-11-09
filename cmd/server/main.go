@@ -19,6 +19,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/controlplane"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version"
@@ -46,10 +47,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	verifier, err := agentauth.NewK8sVerifier(agentauth.K8sOptions{Registry: reg, Audience: cfg.AgentAudience})
-	if err != nil {
-		return err
-	}
 	sessions, err := agentauth.NewSessions(cfg.AgentSessionKey, cfg.PublicURL, cfg.EnvName, nil)
 	if err != nil {
 		return err
@@ -58,15 +55,31 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	k8sLogins, err := agentauth.NewK8sVerifier(agentauth.K8sOptions{Registry: reg, Audience: cfg.AgentAudience})
+	if err != nil {
+		return err
+	}
+	awsLogins, err := agentauth.NewAWSVerifier(agentauth.AWSOptions{
+		Registry:     reg,
+		Audience:     cfg.AgentAudience,
+		AllowedHosts: cfg.AWSSTSHosts,
+		Replays:      st,
+	})
+	if err != nil {
+		return err
+	}
 
 	logger.InfoContext(ctx, "starting control plane",
 		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "")
 	srv := controlplane.New(controlplane.Options{
-		Logger:     logger,
-		Version:    version.Version,
-		Env:        cfg.EnvName,
-		Registry:   reg,
-		Verifier:   verifier,
+		Logger:   logger,
+		Version:  version.Version,
+		Env:      cfg.EnvName,
+		Registry: reg,
+		Logins: map[string]controlplane.LoginVerifier{
+			protocol.MethodK8sOIDC: k8sLogins,
+			protocol.MethodAWSSTS:  awsLogins,
+		},
 		Sessions:   sessions,
 		Store:      st,
 		AdminToken: cfg.AdminToken,

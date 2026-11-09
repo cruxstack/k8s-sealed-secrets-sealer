@@ -51,4 +51,8 @@ type Store interface {
 	// PutKeyIfAbsent records a key the first time any agent reports it and
 	// reports whether this call created the record.
 	PutKeyIfAbsent(ctx context.Context, k KeyRecord) (bool, error)
+	// PutReplayIfAbsent records a one-time key (such as a signed login
+	// request's signature) until expires, and reports whether this call
+	// recorded it. A false result means the key was already used.
+	PutReplayIfAbsent(ctx context.Context, key string, expires time.Time) (bool, error)
 }

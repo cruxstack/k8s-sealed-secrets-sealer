@@ -3,12 +3,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 
@@ -58,10 +60,14 @@ func run() error {
 		ListKeys:   cfg.HasCapability(protocol.CapabilityKeys),
 		Logger:     logger,
 	})
+	identity, err := newIdentity(cfg)
+	if err != nil {
+		return err
+	}
 	client := agent.NewClient(agent.ClientOptions{
-		BaseURL:   cfg.ControlPlaneURL,
-		TokenFile: cfg.TokenFile,
-		Version:   version.Version,
+		BaseURL:  cfg.ControlPlaneURL,
+		Identity: identity,
+		Version:  version.Version,
 	})
 	a := agent.New(agent.Options{
 		Inventory:    inventory,
@@ -76,9 +82,34 @@ func run() error {
 	defer stop()
 
 	logger.InfoContext(ctx, "starting agent",
-		"version", version.Version, "control_plane", cfg.ControlPlaneURL, "capabilities", cfg.Capabilities)
+		"version", version.Version, "control_plane", cfg.ControlPlaneURL, "identity", cfg.IdentityMode,
+		"capabilities", cfg.Capabilities)
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return a.Run(ctx) })
 	g.Go(func() error { return httpserver.Serve(ctx, cfg.HTTPAddr, a.Handler(), logger) })
 	return g.Wait()
+}
+
+// newIdentity returns how the agent logs in. In AWS mode the credentials
+// come from the SDK's default chain: EKS Pod Identity or IRSA in a cluster.
+func newIdentity(cfg *config.Agent) (agent.Identity, error) {
+	if cfg.IdentityMode != protocol.MethodAWSSTS {
+		return agent.K8sTokenIdentity{TokenFile: cfg.TokenFile}, nil
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
+	}
+	region := cfg.AWSSTSRegion
+	if region == "" {
+		region = awsCfg.Region
+	}
+	if region == "" {
+		return nil, errors.New("aws-sts identity needs a region: set APP_AWS_STS_REGION or AWS_REGION")
+	}
+	return agent.NewAWSIdentity(agent.AWSIdentityOptions{
+		Credentials: awsCfg.Credentials,
+		Region:      region,
+		Audience:    cfg.IdentityAudience,
+	})
 }

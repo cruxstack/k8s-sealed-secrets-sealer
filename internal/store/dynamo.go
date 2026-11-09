@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,10 +18,16 @@ const (
 	attrPK = "pk"
 	attrSK = "sk"
 
-	agentPrefix = "AGENT#"
-	keyPrefix   = "KEY#"
-	skState     = "STATE"
-	skMeta      = "META"
+	agentPrefix  = "AGENT#"
+	keyPrefix    = "KEY#"
+	replayPrefix = "REPLAY#"
+	skState      = "STATE"
+	skMeta       = "META"
+	skReplay     = "REPLAY"
+
+	// attrExpiresAt is the table's TTL attribute (epoch seconds). TTL only
+	// cleans up; code never trusts an item to be gone after it expires.
+	attrExpiresAt = "expires_at"
 
 	// batchGetLimit is DynamoDB's BatchGetItem maximum.
 	batchGetLimit = 100
@@ -128,6 +135,26 @@ func (d *Dynamo) PutKeyIfAbsent(ctx context.Context, k KeyRecord) (bool, error) 
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("failed to record key %s: %w", k.Fingerprint, err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) PutReplayIfAbsent(ctx context.Context, key string, expires time.Time) (bool, error) {
+	_, err := d.api.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &d.table,
+		Item: map[string]types.AttributeValue{
+			attrPK:        &types.AttributeValueMemberS{Value: replayPrefix + key},
+			attrSK:        &types.AttributeValueMemberS{Value: skReplay},
+			attrExpiresAt: &types.AttributeValueMemberN{Value: strconv.FormatInt(expires.Unix(), 10)},
+		},
+		ConditionExpression: aws.String("attribute_not_exists(pk)"),
+	})
+	var exists *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &exists):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to record one-time key: %w", err)
 	}
 	return true, nil
 }
