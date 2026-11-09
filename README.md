@@ -12,16 +12,36 @@ region or a certificate.
 
 ## How it works
 
+```mermaid
+flowchart TB
+  user(["Browser"])
+  github["GitHub App<br/>read files, open PRs"]
+
+  subgraph env["One control plane per env: sealer.dev.example.com"]
+    cp["Control plane<br/>Lambda or container"]
+    ddb[("DynamoDB<br/>agents, keys, commands, sessions")]
+    kms["KMS keys<br/>transit, escrow"]
+  end
+
+  subgraph c1["Cluster use1/blue"]
+    a1["agent"] -->|Kubernetes API| s1["sealed-secrets controller"]
+  end
+  subgraph c2["Cluster use1/green"]
+    a2["agent"] -->|Kubernetes API| s2["sealed-secrets controller"]
+  end
+  subgraph c3["Cluster use2/blue"]
+    a3["agent"] -->|Kubernetes API| s3["sealed-secrets controller"]
+  end
+
+  user -->|HTTPS| cp
+  cp --> ddb
+  cp --> kms
+  cp --> github
+  a1 & a2 & a3 -->|"HTTPS, outbound only"| cp
 ```
-Browser ─► sealer.dev.example.com ─► control plane (Lambda or container)
-                                        │  DynamoDB: sessions, agents, keys, commands
-                                        │  GitHub App: read files, open pull requests
-                                        ▲
-                       outbound HTTPS only (agents poll)
-                                        │
-        agent in each cluster ─► sealed-secrets controller
-        (use1/blue, use1/green, use2/blue, ...)
-```
+
+Agents always open the connection; nothing calls into a cluster, and the
+controllers never talk to the control plane.
 
 - **Control plane:** serves the UI and API for one environment. Runs on AWS
   Lambda behind API Gateway, or as a container. It has no Kubernetes client
