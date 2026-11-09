@@ -90,7 +90,7 @@ agents:
 		"id must be a DNS-1123 label",
 		`duplicate capability "seal"`,
 		`unknown capability "root"`,
-		"identity.k8s is required",
+		"set exactly one of identity.k8s and identity.aws",
 		`unknown issuer "missing"`,
 		"subject must be system:serviceaccount",
 		"duplicate id",
@@ -132,5 +132,69 @@ func TestLoad_ResolvesAgainstFileDir(t *testing.T) {
 	}
 	if got := r.Issuers[0].JWKSFile; got != filepath.Join(dir, "jwks/local.json") {
 		t.Errorf("jwksFile = %q", got)
+	}
+}
+
+func TestParse_AWSIdentities(t *testing.T) {
+	r, err := Parse([]byte(`
+agents:
+  - id: use1-blue
+    cluster: blue
+    region: use1
+    capabilities: [seal]
+    identity:
+      aws: {roleArn: "arn:aws:iam::123456789012:role/sealer/use1-blue", roleId: AROA1234567890ABCDEFG}
+  - id: gov-blue
+    cluster: blue
+    region: usgw1
+    identity:
+      aws: {roleArn: "arn:aws-us-gov:iam::210987654321:role/use1-blue"}
+`), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// STS reports assumed roles without their path
+	a, ok := r.AgentByAWSRole(AWSRole{Partition: "aws", Account: "123456789012", Name: "use1-blue"})
+	if !ok || a.ID != "use1-blue" || a.Identity.AWS.RoleID != "AROA1234567890ABCDEFG" {
+		t.Fatalf("AgentByAWSRole = %v, %v", a, ok)
+	}
+	if _, ok := r.AgentByAWSRole(AWSRole{Partition: "aws", Account: "999999999999", Name: "use1-blue"}); ok {
+		t.Fatal("a role in another account was found")
+	}
+	if a, ok := r.AgentByAWSRole(AWSRole{Partition: "aws-us-gov", Account: "210987654321", Name: "use1-blue"}); !ok || a.ID != "gov-blue" {
+		t.Fatalf("gov partition: %v, %v", a, ok)
+	}
+}
+
+func TestParse_RejectsBadAWSIdentities(t *testing.T) {
+	bad := `
+issuers: [{name: local, url: "https://i.example.com", jwksFile: k.json}]
+agents:
+  - {id: a, cluster: a, region: r, identity: {aws: {roleArn: "arn:aws:iam::123:role/short-account"}}}
+  - {id: b, cluster: b, region: r, identity: {aws: {roleArn: "arn:aws:iam::123456789012:user/alice"}}}
+  - {id: c, cluster: c, region: r, identity: {aws: {roleArn: "arn:aws:iam::123456789012:role/x", roleId: "AIDAUSERID"}}}
+  - {id: d, cluster: d, region: r, identity: {aws: {roleArn: "arn:aws:iam::123456789012:role/p1/same"}}}
+  - {id: e, cluster: e, region: r, identity: {aws: {roleArn: "arn:aws:iam::123456789012:role/p2/same"}}}
+  - id: f
+    cluster: f
+    region: r
+    identity:
+      aws: {roleArn: "arn:aws:iam::123456789012:role/f"}
+      k8s: {issuer: local, subject: "system:serviceaccount:ns:sa"}
+`
+	_, err := Parse([]byte(bad), "")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{
+		`agent "a": roleArn must be an IAM role ARN`,
+		`agent "b": roleArn must be an IAM role ARN`,
+		`agent "c": roleId must be`,
+		`agent "e": role already registered for agent "d"`,
+		`agent "f": set exactly one of identity.k8s and identity.aws`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
 	}
 }

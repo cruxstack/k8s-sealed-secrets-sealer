@@ -73,6 +73,10 @@ type ControlPlane struct {
 	DynamoDBEndpoint string
 	// DynamoDBCreateTable creates the table at startup. Local emulators only.
 	DynamoDBCreateTable bool
+
+	// AWSSTSHosts, when set, replaces the default STS hosts agents' signed
+	// login requests may target.
+	AWSSTSHosts []string
 }
 
 // Agent is the agent's configuration.
@@ -94,6 +98,15 @@ type Agent struct {
 	// AllowInsecureControlPlane is set, which is for local stacks only.
 	ControlPlaneURL           string
 	AllowInsecureControlPlane bool
+	// IdentityMode is how the agent logs in: protocol.MethodK8sOIDC (a
+	// projected service-account token) or protocol.MethodAWSSTS (its IAM
+	// role, via a signed sts:GetCallerIdentity request).
+	IdentityMode string
+	// IdentityAudience names the control plane in the signed AWS request.
+	IdentityAudience string
+	// AWSSTSRegion selects the regional STS endpoint to sign for; empty uses
+	// the AWS SDK's region.
+	AWSSTSRegion string
 	// TokenFile holds the projected service-account token to log in with.
 	TokenFile string
 	// Capabilities are the capabilities this agent's Helm values enabled.
@@ -132,6 +145,16 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		DynamoDBCreateTable: r.boolean("APP_DYNAMODB_CREATE_TABLE", false),
 	}
 	cfg.AgentAudience = r.str("APP_AGENT_AUDIENCE", cfg.PublicURL)
+	for _, h := range strings.Split(r.str("APP_AWS_STS_HOSTS", ""), ",") {
+		if h = strings.TrimSpace(h); h == "" {
+			continue
+		}
+		if strings.ContainsAny(h, "/?#@ ") {
+			r.fail("APP_AWS_STS_HOSTS: %q must be a host name, optionally with a port", h)
+			continue
+		}
+		cfg.AWSSTSHosts = append(cfg.AWSSTSHosts, h)
+	}
 	if cfg.DynamoDBCreateTable && cfg.DynamoDBEndpoint == "" {
 		r.fail("APP_DYNAMODB_CREATE_TABLE is only for local emulators and requires APP_DYNAMODB_ENDPOINT")
 	}
@@ -152,6 +175,13 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 	}
 	cfg.ControllerDeployment = r.dnsLabel("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
 	cfg.ControlPlaneURL = r.required(r.url("APP_CONTROL_PLANE_URL", cfg.AllowInsecureControlPlane), "APP_CONTROL_PLANE_URL")
+	cfg.IdentityAudience = r.str("APP_IDENTITY_AUDIENCE", cfg.ControlPlaneURL)
+	cfg.AWSSTSRegion = r.str("APP_AWS_STS_REGION", "")
+	switch cfg.IdentityMode = r.str("APP_IDENTITY_MODE", protocol.MethodK8sOIDC); cfg.IdentityMode {
+	case protocol.MethodK8sOIDC, protocol.MethodAWSSTS:
+	default:
+		r.fail("APP_IDENTITY_MODE must be %s or %s: %q", protocol.MethodK8sOIDC, protocol.MethodAWSSTS, cfg.IdentityMode)
+	}
 	for _, c := range strings.Split(r.str("APP_CAPABILITIES", protocol.CapabilitySeal), ",") {
 		c = strings.TrimSpace(c)
 		switch {

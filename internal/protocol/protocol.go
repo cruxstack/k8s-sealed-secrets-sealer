@@ -37,12 +37,33 @@ const (
 const (
 	// MethodK8sOIDC logs in with a projected service-account token.
 	MethodK8sOIDC = "k8s-oidc"
+	// MethodAWSSTS logs in with a signed sts:GetCallerIdentity request,
+	// proving the agent's IAM role without sending its credentials.
+	MethodAWSSTS = "aws-sts"
 )
 
-// SessionRequest asks for an agent session token.
+// AWS login: the only request an agent may sign, and the signed header that
+// names the control plane it is meant for, so a request signed for one
+// control plane cannot be replayed against another.
+const (
+	AWSGetCallerIdentityBody = "Action=GetCallerIdentity&Version=2011-06-15"
+	AWSAudienceHeader        = "X-K8s-Sealed-Secrets-Sealer-Audience"
+)
+
+// SessionRequest asks for an agent session token. Token is set for
+// MethodK8sOIDC and AWS for MethodAWSSTS.
 type SessionRequest struct {
-	Method string `json:"method"`
-	Token  string `json:"token"`
+	Method string         `json:"method"`
+	Token  string         `json:"token,omitempty"`
+	AWS    *SignedRequest `json:"aws,omitempty"`
+}
+
+// SignedRequest is a SigV4-signed sts:GetCallerIdentity request. The control
+// plane checks it and forwards it to STS unchanged.
+type SignedRequest struct {
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
 }
 
 // SessionResponse carries an agent session token, valid for the agent API

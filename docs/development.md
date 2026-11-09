@@ -120,6 +120,11 @@ the run for inspection. Besides bringing the stack up, it checks that:
 
 ## Local agent identity
 
+The local stack uses the `k8s-oidc` login. The `aws-sts` login (an agent's
+IAM role, proven with a signed `sts:GetCallerIdentity` request) needs real
+AWS, so it is covered by unit tests against a fake STS that verifies SigV4
+signatures the way STS does.
+
 Locally, agents log in with their projected service-account tokens, issued
 by the k3d cluster. The Tiltfile reads the cluster's token issuer and signing
 keys (`/openid/v1/jwks`) once and writes them, with an agent registry built
@@ -147,9 +152,13 @@ Invalid or missing settings are reported together at startup.
 | `APP_DYNAMODB_TABLE`               | control plane | required                      |
 | `APP_DYNAMODB_ENDPOINT`            | control plane | AWS (set for emulators)       |
 | `APP_DYNAMODB_CREATE_TABLE`        | control plane | `false` (emulators only)      |
+| `APP_AWS_STS_HOSTS`                | control plane | AWS's public STS hosts        |
 | `APP_CONTROL_PLANE_URL`            | agent         | required, https               |
 | `APP_ALLOW_INSECURE_CONTROL_PLANE` | agent         | `false` (local stacks only)   |
+| `APP_IDENTITY_MODE`                | agent         | `k8s-oidc` (or `aws-sts`)     |
+| `APP_IDENTITY_AUDIENCE`            | agent         | `APP_CONTROL_PLANE_URL`       |
 | `APP_IDENTITY_TOKEN_FILE`          | agent         | the chart's projected token   |
+| `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region          |
 | `APP_CAPABILITIES`                 | agent         | `seal`                        |
 | `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)              |
 | `APP_CONTROLLER_NAMESPACE`         | agent         | required                      |

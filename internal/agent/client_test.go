@@ -62,7 +62,7 @@ func newClient(t *testing.T, srv *httptest.Server, token string) *Client {
 	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return NewClient(ClientOptions{BaseURL: srv.URL + "/", TokenFile: path, Version: "test"})
+	return NewClient(ClientOptions{BaseURL: srv.URL + "/", Identity: K8sTokenIdentity{TokenFile: path}, Version: "test"})
 }
 
 func TestClient_LogsInOnceAndReusesSession(t *testing.T) {
@@ -130,7 +130,7 @@ func TestClient_Errors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 
-	missing := NewClient(ClientOptions{BaseURL: srv.URL, TokenFile: filepath.Join(t.TempDir(), "absent")})
+	missing := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: filepath.Join(t.TempDir(), "absent")}})
 	if _, err := missing.CheckIn(context.Background(), protocol.CheckIn{}); err == nil || !strings.Contains(err.Error(), "identity token") {
 		t.Fatalf("err = %v", err)
 	}

@@ -49,8 +49,18 @@ spec:
               value: {{ required "controlPlane.url is required" .Values.controlPlane.url | quote }}
             - name: APP_ALLOW_INSECURE_CONTROL_PLANE
               value: {{ .Values.controlPlane.allowInsecure | quote }}
+            - name: APP_IDENTITY_MODE
+              value: {{ include "agent.identityMode" . | quote }}
+            - name: APP_IDENTITY_AUDIENCE
+              value: {{ default .Values.controlPlane.url .Values.identity.audience | quote }}
+            {{- if eq .Values.identity.mode "k8s-oidc" }}
             - name: APP_IDENTITY_TOKEN_FILE
               value: /var/run/secrets/k8s-sealed-secrets-sealer/token
+            {{- end }}
+            {{- with .Values.aws.region }}
+            - name: APP_AWS_STS_REGION
+              value: {{ . | quote }}
+            {{- end }}
             - name: APP_CAPABILITIES
               value: {{ include "agent.capabilities" . | quote }}
             - name: APP_CHECKIN_INTERVAL
@@ -62,10 +72,12 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if eq .Values.identity.mode "k8s-oidc" }}
           volumeMounts:
             - name: identity
               mountPath: /var/run/secrets/k8s-sealed-secrets-sealer
               readOnly: true
+          {{- end }}
           ports:
             - name: probes
               containerPort: 8081
@@ -91,6 +103,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if eq .Values.identity.mode "k8s-oidc" }}
       volumes:
         # the token the agent logs in to the control plane with; the kubelet
         # rotates it before it expires
@@ -101,6 +114,7 @@ spec:
                   path: token
                   audience: {{ default .Values.controlPlane.url .Values.identity.audience | quote }}
                   expirationSeconds: {{ .Values.identity.expirationSeconds }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

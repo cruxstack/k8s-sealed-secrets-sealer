@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,21 +15,18 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
-// maxTokenFileBytes bounds the projected token file.
-const maxTokenFileBytes = 16 << 10
-
 // sessionRefreshBefore renews a session this long before it expires.
 const sessionRefreshBefore = time.Minute
 
 // errUnauthorized marks a 401 from the control plane.
 var errUnauthorized = errors.New("control plane rejected the agent's credentials")
 
-// Client talks to the control plane's agent API. It logs in with the
-// projected service-account token and keeps the session token it gets back.
+// Client talks to the control plane's agent API. It logs in with its
+// Identity and keeps the session token it gets back.
 type Client struct {
 	base      string
 	http      *http.Client
-	tokenFile string
+	identity  Identity
 	userAgent string
 	now       func() time.Time
 
@@ -43,9 +39,9 @@ type Client struct {
 // ClientOptions configures a Client.
 type ClientOptions struct {
 	// BaseURL is the control plane's URL.
-	BaseURL   string
-	TokenFile string
-	Version   string
+	BaseURL  string
+	Identity Identity
+	Version  string
 	// HTTPClient defaults to one with a 30-second timeout.
 	HTTPClient *http.Client
 	Now        func() time.Time
@@ -64,7 +60,7 @@ func NewClient(opts ClientOptions) *Client {
 	return &Client{
 		base:      strings.TrimSuffix(opts.BaseURL, "/"),
 		http:      hc,
-		tokenFile: opts.TokenFile,
+		identity:  opts.Identity,
 		userAgent: "k8s-sealed-secrets-sealer-agent/" + opts.Version,
 		now:       now,
 	}
@@ -107,12 +103,12 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 	}
 	c.mu.Unlock()
 
-	token, err := readTokenFile(c.tokenFile)
+	login, err := c.identity.LoginRequest(ctx)
 	if err != nil {
 		return "", err
 	}
 	var resp protocol.SessionResponse
-	if err := c.post(ctx, "/agent/v1/session", "", protocol.SessionRequest{Method: protocol.MethodK8sOIDC, Token: token}, &resp); err != nil {
+	if err := c.post(ctx, "/agent/v1/session", "", login, &resp); err != nil {
 		return "", fmt.Errorf("failed to log in to the control plane: %w", err)
 	}
 	if resp.Token == "" {
@@ -167,26 +163,4 @@ func (c *Client) post(ctx context.Context, path, session string, in, out any) er
 		return fmt.Errorf("failed to decode control plane response from %s: %w", path, err)
 	}
 	return nil
-}
-
-// readTokenFile reads the projected token on every login: the kubelet
-// rotates it, so it must not be cached.
-func readTokenFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to open identity token %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("failed to read identity token %s: %w", path, err)
-	}
-	if len(data) > maxTokenFileBytes {
-		return "", fmt.Errorf("failed to read identity token %s: file is too large", path)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("failed to read identity token %s: file is empty", path)
-	}
-	return token, nil
 }

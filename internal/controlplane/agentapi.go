@@ -34,11 +34,12 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxSessionBody, &req) {
 		return
 	}
-	if req.Method != protocol.MethodK8sOIDC {
+	verifier, ok := s.logins[req.Method]
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported login method")
 		return
 	}
-	agent, err := s.verifier.Verify(r.Context(), req.Token)
+	agent, err := verifier.VerifyLogin(r.Context(), req)
 	if err != nil {
 		s.logger.WarnContext(r.Context(), "agent login rejected",
 			"event", "agent.login_rejected", "env", s.env, "method", req.Method, "error", err)
@@ -52,7 +53,7 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.InfoContext(r.Context(), "agent logged in",
-		"event", "agent.login", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster)
+		"event", "agent.login", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "method", req.Method)
 	httpserver.WriteJSON(w, http.StatusOK, protocol.SessionResponse{
 		Token: token, ExpiresAt: exp, AgentID: agent.ID, Env: s.env,
 	})

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -35,6 +36,13 @@ import (
 //	      k8s:
 //	        issuer: use1-blue
 //	        subject: system:serviceaccount:sealer:sealer-agent
+//	  - id: use2-blue
+//	    cluster: blue
+//	    region: use2
+//	    capabilities: [seal]
+//	    identity:
+//	      aws:
+//	        roleArn: arn:aws:iam::123456789012:role/sealer/use2-blue
 type File struct {
 	Issuers []Issuer `json:"issuers"`
 	Agents  []Agent  `json:"agents"`
@@ -65,6 +73,17 @@ type Agent struct {
 // Identity is how an agent logs in. Exactly one field is set.
 type Identity struct {
 	K8s *K8sIdentity `json:"k8s,omitempty"`
+	AWS *AWSIdentity `json:"aws,omitempty"`
+}
+
+// AWSIdentity is the IAM role an agent's pods run as (EKS Pod Identity or
+// IRSA). STS reports an assumed role without its path, so the role is
+// matched by partition, account and name.
+type AWSIdentity struct {
+	RoleARN string `json:"roleArn"`
+	// RoleID optionally pins the role's unique ID (AROA...), so a deleted and
+	// recreated role with the same name is not accepted.
+	RoleID string `json:"roleId,omitempty"`
 }
 
 // K8sIdentity is a Kubernetes service account behind a registered issuer.
@@ -84,9 +103,17 @@ type Registry struct {
 
 	byID  map[string]*Agent
 	byK8s map[k8sKey]*Agent
+	byAWS map[AWSRole]*Agent
 }
 
 type k8sKey struct{ issuer, subject string }
+
+// AWSRole identifies an IAM role as STS reports it.
+type AWSRole struct {
+	Partition string
+	Account   string
+	Name      string
+}
 
 // Agent returns the agent registered with id.
 func (r *Registry) Agent(id string) (*Agent, bool) {
@@ -99,6 +126,26 @@ func (r *Registry) Agent(id string) (*Agent, bool) {
 func (r *Registry) AgentByK8s(issuer, subject string) (*Agent, bool) {
 	a, ok := r.byK8s[k8sKey{issuer, subject}]
 	return a, ok
+}
+
+// AgentByAWSRole returns the agent registered for an IAM role.
+func (r *Registry) AgentByAWSRole(role AWSRole) (*Agent, bool) {
+	a, ok := r.byAWS[role]
+	return a, ok
+}
+
+var (
+	roleARNPattern = regexp.MustCompile(`^arn:(aws|aws-us-gov|aws-cn):iam::([0-9]{12}):role/(?:[\x21-\x7e]*/)?([\w+=,.@-]{1,64})$`)
+	roleIDPattern  = regexp.MustCompile(`^AROA[A-Z0-9]{12,124}$`)
+)
+
+// ParseRoleARN splits an IAM role ARN into the parts STS reports.
+func ParseRoleARN(arn string) (AWSRole, bool) {
+	m := roleARNPattern.FindStringSubmatch(arn)
+	if m == nil {
+		return AWSRole{}, false
+	}
+	return AWSRole{Partition: m[1], Account: m[2], Name: m[3]}, true
 }
 
 // Load reads and validates a registry file. Relative JWKS and CA paths are
@@ -156,6 +203,7 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 		Issuers: f.Issuers,
 		byID:    map[string]*Agent{},
 		byK8s:   map[k8sKey]*Agent{},
+		byAWS:   map[AWSRole]*Agent{},
 	}
 	agents := append([]Agent(nil), f.Agents...)
 	sort.Slice(agents, func(i, j int) bool { return agents[i].ID < agents[j].ID })
@@ -187,8 +235,23 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 		}
 		r.byID[a.ID] = a
 
-		if a.Identity.K8s == nil {
-			fail("%s: identity.k8s is required", where)
+		if (a.Identity.K8s == nil) == (a.Identity.AWS == nil) {
+			fail("%s: set exactly one of identity.k8s and identity.aws", where)
+			continue
+		}
+		if aws := a.Identity.AWS; aws != nil {
+			role, ok := ParseRoleARN(aws.RoleARN)
+			if !ok {
+				fail("%s: roleArn must be an IAM role ARN (arn:aws:iam::<account>:role/<name>)", where)
+				continue
+			}
+			if aws.RoleID != "" && !roleIDPattern.MatchString(aws.RoleID) {
+				fail("%s: roleId must be a role's unique ID (AROA...)", where)
+			}
+			if other, dup := r.byAWS[role]; dup {
+				fail("%s: role already registered for agent %q", where, other.ID)
+			}
+			r.byAWS[role] = a
 			continue
 		}
 		k := a.Identity.K8s

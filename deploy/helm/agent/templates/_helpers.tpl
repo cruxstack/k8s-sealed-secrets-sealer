@@ -33,3 +33,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 {{- join "," $caps -}}
 {{- end -}}
+
+{{- define "agent.identityMode" -}}
+{{- $mode := .Values.identity.mode -}}
+{{- if not (has $mode (list "k8s-oidc" "aws-sts")) -}}
+{{- fail (printf "identity.mode must be k8s-oidc or aws-sts, not %q" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}

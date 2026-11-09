@@ -158,3 +158,8 @@ func TestK8sVerifier_RemoteJWKS(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 }
+
+func testRSA(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	return testcerts.RSA(t, 2048)
+}
