@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -106,6 +107,10 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if sess.Locked(s.now()) {
+		writeError(w, http.StatusConflict, store.ErrSessionBusy.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), sessionRequestTimeout)
 	defer cancel()
 	user := userauth.UserFrom(ctx)
@@ -142,6 +147,18 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("value is too large to seal for %d documents", len(targets)))
 		return
 	}
+	changes, err := s.store.Changes(ctx, sess.ID, false)
+	if err != nil {
+		s.internalError(w, r, "failed to read pending changes", err)
+		return
+	}
+	if len(changes) >= maxChangesPerSession && !slices.ContainsFunc(changes, func(c store.Change) bool {
+		return c.ID == changeID(file.Path, in.Key)
+	}) {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"this session holds %d pending changes, the most it can; open a pull request with them first", maxChangesPerSession))
+		return
+	}
 
 	now := s.now().UTC()
 	agent, envKey, err := s.chooseSealer(ctx, regions, now)
@@ -172,14 +189,9 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ok, err := s.touch(ctx, sess, now); err != nil || !ok {
-		if err != nil {
-			s.internalError(w, r, "failed to mark session used", err)
-			return
-		}
-		writeError(w, http.StatusNotFound, "session not found; it may have expired or been discarded")
-		return
-	}
+	// The command is queued before the session is marked used: a pull
+	// request locks the session and then waits for queued seals, so a seal
+	// is either in the pull request or refused here.
 	seal := store.Seal{
 		SessionID:   sess.ID,
 		CommandID:   commandID,
@@ -219,6 +231,17 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.internalError(w, r, "failed to queue seal", err)
+		return
+	}
+	switch ok, err := s.touch(ctx, sess, now); {
+	case errors.Is(err, store.ErrSessionBusy):
+		writeError(w, http.StatusConflict, err.Error()+"; seal the value again once it is open")
+		return
+	case err != nil:
+		s.internalError(w, r, "failed to mark session used", err)
+		return
+	case !ok:
+		writeError(w, http.StatusNotFound, "session not found; it may have expired or been discarded")
 		return
 	}
 	s.logger.InfoContext(ctx, "seal requested",

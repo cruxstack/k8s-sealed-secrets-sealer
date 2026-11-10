@@ -61,6 +61,7 @@ type GitHub interface {
 	BranchHead(ctx context.Context, owner, repo, branch string) (string, error)
 	Tree(ctx context.Context, owner, repo, commit string) (githubapp.Tree, error)
 	Blob(ctx context.Context, owner, repo, sha string) ([]byte, error)
+	CreatePullRequest(ctx context.Context, owner, repo string, pr githubapp.NewPullRequest) (githubapp.PullRequest, error)
 }
 
 // Options configures a Service.

@@ -172,6 +172,17 @@ export interface SessionList {
   sessions: SealSession[];
 }
 
+/** POST /api/v1/repos/{owner}/{repo}/session/{id}/pull-request */
+export interface PullRequest {
+  number: number;
+  /** The pull request on GitHub. */
+  url: string;
+  branch: string;
+  title: string;
+  files: number;
+  changes: number;
+}
+
 export type SealStatus = "queued" | "sealing" | "sealed" | "failed" | "expired";
 
 /** A seal's progress. */

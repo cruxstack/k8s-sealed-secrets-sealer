@@ -87,3 +87,15 @@ func TestInstallationTokens_CarryTheirPermissions(t *testing.T) {
 		t.Errorf("installation lookup with a token = %d, want 401", rec.Code)
 	}
 }
+
+func TestDiff_KeepsThreeLinesOfContext(t *testing.T) {
+	got := diff("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nb\nc\nd\nX\nf\ng\nh\n")
+	var lines []string
+	for _, l := range got {
+		lines = append(lines, l.Class+":"+l.Text)
+	}
+	want := []string{"gap:  …", ":  b", ":  c", ":  d", "del:- e", "add:+ X", ":  f", ":  g", ":  h"}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("diff = %q", lines)
+	}
+}

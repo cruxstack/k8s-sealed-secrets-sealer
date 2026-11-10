@@ -342,11 +342,28 @@ v1 has no command that deletes or disables anything.
    key into the same file again replaces it, and a seal that finishes late
    never replaces a newer one. The UI shows which agent and key sealed it.
    Users never see ciphertext.
-9. When the user creates a pull request, the control plane renders each file
-   from its content at the base commit plus the pending changes, editing only
-   `spec.encryptedData.<key>` in each targeted document. Names, namespaces,
-   scope annotations, comments and other documents are left untouched. The
-   commit and pull request record who requested it.
+9. When the user opens a pull request, the control plane locks the session,
+   so nothing is sealed into it or removed from it meanwhile and it opens one
+   pull request at most. It refuses while one of the session's seals is still
+   running, and re-checks the user's write access.
+10. It reads each file again at the session's base commit, checks that the
+    file's documents for the env are still exactly the targets each value
+    was sealed for, and writes the values in, editing only
+    `spec.encryptedData.<key>` in each targeted document. Values are replaced
+    where they are written and new keys get a line of their own, so names,
+    namespaces, annotations, comments, formatting and other documents stay
+    byte for byte as they were. The result is checked by decoding it: it
+    must equal the original with exactly those values set. A file that
+    cannot be edited that precisely (YAML anchors in `spec.encryptedData`,
+    say) is refused rather than reformatted.
+11. One commit on a new branch from the base commit,
+    `sealer/<env>/<login>-<session id>`, carries every file, and a pull
+    request into the default branch proposes it. The branch name is unique
+    to the session, so GitHub itself would refuse a second pull request from
+    it. The App makes the commit without an author, so GitHub signs it. The
+    commit (a `Requested-by:` trailer) and the pull request (a mention)
+    record who requested it; they name files, keys and documents, never
+    values or ciphertexts. The session then ends.
 
 ```mermaid
 sequenceDiagram
@@ -375,8 +392,12 @@ sequenceDiagram
   CP->>DB: pending change in the session, then the command done
   U->>CP: poll the command
   CP-->>U: sealed, by which agent and key
-  U->>CP: create pull request
-  CP->>GH: commit the edited files, open the PR
+  U->>CP: open a pull request
+  CP->>DB: lock the session, read its changes
+  CP->>GH: re-check write access, read each file at the base commit
+  CP->>CP: write each value into spec.encryptedData, check the result
+  CP->>GH: one commit on a new branch, open the pull request
+  CP->>DB: end the session
 ```
 
 **Transit key permissions.** The control plane may only call
@@ -420,6 +441,8 @@ token (section 12). `.../session` is `/api/v1/repos/{owner}/{repo}/session`.
 |                                        | at `path`; answers `202`.           |
 | `GET .../session/{id}/seals/{seal}`    | A seal's progress.                  |
 | `DELETE .../session/{id}/changes/{id}` | Remove one pending change.          |
+| `POST .../session/{id}/pull-request`   | Open a pull request with the        |
+|                                        | pending changes; ends the session.  |
 
 The repository's files at a session's base commit come from
 `GET /api/v1/repos/{owner}/{repo}/files?commit=<sha>`.
@@ -733,8 +756,13 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   moves its idle expiry an hour on, but never past its maximum age of 8
   hours. Keying sessions by user makes ownership structural: a user can only
   ever address their own. Live sessions per user are capped at 10 by
-  counting them with a query. File content is not stored; it is fetched
-  again at the base commit when the pull request is created.
+  counting them with a query, and a session holds at most 50 pending
+  changes. While a pull request is opened from it, the session is locked
+  (`submit_deadline`, epoch milliseconds, 2 minutes at most): sealing,
+  removing a change and discarding are refused, and a seal queues its
+  command before it marks the session used, so a seal is either in the pull
+  request or refused. File content is not stored; it is fetched again at the
+  base commit when the pull request is opened.
 - **Seal:** the command carrying a requested seal and the agent it went to,
   with the file, key, targets and requesting user, so the UI can follow its
   progress.
@@ -783,7 +811,7 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
 - **Least-privilege tokens.** The control plane mints each installation
   token with only the permissions its use needs: `contents: read` and
   `metadata: read` to list repositories, read files and look up permissions;
-  write permissions only to open a pull request. The App itself needs
+  `contents: write` and `pull_requests: write` only to open a pull request. The App itself needs
   repository permissions Contents (read and write), Metadata (read) and Pull
   requests (read and write), and, when it also signs users in, organization
   permission Members (read). One GitHub App can provide both: its client ID

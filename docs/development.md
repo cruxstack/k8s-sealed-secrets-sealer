@@ -126,7 +126,13 @@ document the dev stack ignores; the other files cover namespace-wide and
 cluster-wide scope and a prod-only file.
 
 Its installation tokens carry the permissions they were minted with, and every
-repository call checks them, as GitHub does. Tilt generates the App's key pair
+repository call checks them, as GitHub does: writes need a token minted with
+write permissions. Pull requests the control plane opens get a page on the
+mock, which the UI links to (`http://localhost:4104/<owner>/<repo>/pull/<n>`
+by default), showing the description, the commit message and each file's
+diff. The end-to-end tests read the same pull request as JSON from
+`/_mock/repos/<owner>/<repo>/pulls/<n>`. Pull requests live in the mock's
+memory, so they are gone when it restarts. Tilt generates the App's key pair
 for each stack (`.tools/dev/<context>/github-app.pem`, never committed): the
 control plane signs App JWTs with the private key and the mock checks them
 with the public key.
@@ -182,7 +188,12 @@ the run for inspection. Besides bringing the stack up, it checks that:
   billing file: one agent seals it with the env key for all three dev
   documents, the session lists the pending change without its ciphertexts,
   and the value appears in no log; sealing into a cluster-wide document, or
-  into a repository she cannot write, is refused.
+  into a repository she cannot write, is refused;
+- alice opens a pull request with the change, which ends her session: its
+  file differs from the original only in the dev documents' `encryptedData`
+  lines, its description and commit message hold nothing secret, and with
+  its dev documents applied, every simulated cluster's controller unseals
+  the value.
 
 ## Local agent identity
 

@@ -49,6 +49,8 @@ type sealHarness struct {
 	key      testKey
 	keyPriv  *rsa.PrivateKey
 	sessions map[string]string // login -> session cookie
+	github   *mockgithub.Server
+	app      *githubapp.Client
 
 	mu  sync.Mutex
 	now time.Time
@@ -61,12 +63,13 @@ func newSealHarness(t *testing.T) *sealHarness {
 		t.Fatal(err)
 	}
 	appKey := testcerts.RSA(t, 2048)
-	mock := httptest.NewServer(mockgithub.New(mockgithub.Options{
+	github := mockgithub.New(mockgithub.Options{
 		Org:   "example-org",
 		Users: mockgithub.DefaultUsers(),
 		App:   mockgithub.App{ID: "1", PublicKey: &appKey.PublicKey, InstallationID: 1},
 		Repos: fixtures,
-	}).Handler())
+	})
+	mock := httptest.NewServer(github.Handler())
 	t.Cleanup(mock.Close)
 	gh, err := githubapp.New(githubapp.Options{
 		APIURL: mock.URL, AppID: "1", Org: "example-org",
@@ -101,7 +104,7 @@ agents:
 
 	sh := &sealHarness{
 		t: t, store: store.NewMemory(), kms: envelope.NewFakeKMS("transit"), logs: &bytes.Buffer{},
-		agents: map[string]string{}, users: userSessions, sessions: map[string]string{},
+		agents: map[string]string{}, users: userSessions, sessions: map[string]string{}, github: github, app: gh,
 		now: time.Now().UTC(), key: newTestKey(t, time.Now().Add(-time.Hour)),
 	}
 	block, _ := pem.Decode(sh.key.PrivatePEM)

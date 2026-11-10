@@ -8,11 +8,12 @@ region or a certificate.
 
 > **Status:** early development. People sign in with GitHub, see the fleet
 > (every agent, its controller's keys and the env's key state), browse the
-> SealedSecrets for their env in the repositories they can read, and seal
-> values into them as pending changes; an agent seals each value with the
-> env key. Agents keep every cluster holding the same keys. Opening pull
-> requests from pending changes is next. See [the design](docs/design.md)
-> for where it is going.
+> SealedSecrets for their env in the repositories they can read, seal values
+> into them as pending changes, and open a pull request with those changes;
+> an agent seals each value with the env key, and only `spec.encryptedData`
+> changes in the files. Agents keep every cluster holding the same keys.
+> Packaging a release is next. See [the design](docs/design.md) for where it
+> is going.
 
 ## How it works
 

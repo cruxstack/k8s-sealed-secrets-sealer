@@ -156,6 +156,9 @@ func (d *Dynamo) Sessions(ctx context.Context, userID int64, now time.Time) ([]S
 	return out, nil
 }
 
+// unlocked is a condition: the session is not locked for a pull request.
+const unlocked = "(attribute_not_exists(submit_deadline) OR submit_deadline <= :now)"
+
 func (d *Dynamo) TouchSession(ctx context.Context, userID int64, repoKey, id string, expires, now time.Time) (bool, error) {
 	usedAt, err := attributevalue.Marshal(now)
 	if err != nil {
@@ -170,7 +173,7 @@ func (d *Dynamo) TouchSession(ctx context.Context, userID int64, repoKey, id str
 		Key:       itemKey(userPK(userID), sessionPrefix+repoKey),
 		UpdateExpression: aws.String("SET used_at = :used, session_expires_at = :expires, " +
 			attrDeadline + " = :deadline, " + attrExpiresAt + " = :ttl"),
-		ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now"),
+		ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now AND " + unlocked),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":used":     usedAt,
 			":expires":  expiresAt,
@@ -183,11 +186,53 @@ func (d *Dynamo) TouchSession(ctx context.Context, userID int64, repoKey, id str
 	var failed *types.ConditionalCheckFailedException
 	switch {
 	case errors.As(err, &failed):
-		return false, nil
+		// gone, or locked
+		s, ok, err := d.Session(ctx, userID, repoKey, now)
+		if err == nil && ok && s.ID == id && s.Locked(now) {
+			err = ErrSessionBusy
+		}
+		return false, err
 	case err != nil:
 		return false, fmt.Errorf("failed to update session %s: %w", id, err)
 	}
 	return true, nil
+}
+
+func (d *Dynamo) LockSession(ctx context.Context, userID int64, repoKey, id string, until, now time.Time) (bool, error) {
+	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           &d.table,
+		Key:                 itemKey(userPK(userID), sessionPrefix+repoKey),
+		UpdateExpression:    aws.String("SET submit_deadline = :until"),
+		ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now AND " + unlocked),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":until": millis(until),
+			":id":    &types.AttributeValueMemberS{Value: id},
+			":now":   millis(now),
+		},
+	})
+	var failed *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &failed):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to lock session %s: %w", id, err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) UnlockSession(ctx context.Context, userID int64, repoKey, id string) error {
+	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &d.table,
+		Key:                       itemKey(userPK(userID), sessionPrefix+repoKey),
+		UpdateExpression:          aws.String("REMOVE submit_deadline"),
+		ConditionExpression:       aws.String("session_id = :id"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":id": &types.AttributeValueMemberS{Value: id}},
+	})
+	var failed *types.ConditionalCheckFailedException
+	if err != nil && !errors.As(err, &failed) {
+		return fmt.Errorf("failed to unlock session %s: %w", id, err)
+	}
+	return nil
 }
 
 func (d *Dynamo) DeleteSession(ctx context.Context, userID int64, repoKey, id string) (bool, error) {

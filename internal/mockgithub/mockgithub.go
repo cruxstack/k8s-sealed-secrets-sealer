@@ -46,6 +46,9 @@ type Options struct {
 	App App
 	// Repos are the repositories the App is installed on.
 	Repos []Repo
+	// WebURL is where browsers reach the mock, for the html_url of pull
+	// requests. Empty means the request's host.
+	WebURL string
 }
 
 // DefaultUsers are the local stack's users: alice may sign in, bob is in the
@@ -96,12 +99,25 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /orgs/{org}/installation", s.withApp(s.orgInstallation))
 	mux.HandleFunc("POST /app/installations/{id}/access_tokens", s.withApp(s.accessTokens))
-	mux.HandleFunc("GET /installation/repositories", s.withInstallation("metadata", s.installationRepositories))
-	mux.HandleFunc("GET /repos/{owner}/{repo}", s.withInstallation("metadata", s.getRepo))
-	mux.HandleFunc("GET /repos/{owner}/{repo}/collaborators/{username}/permission", s.withInstallation("metadata", s.collaboratorPermission))
-	mux.HandleFunc("GET /repos/{owner}/{repo}/git/ref/{ref...}", s.withInstallation("contents", s.gitRef))
-	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{sha}", s.withInstallation("contents", s.gitTree))
-	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", s.withInstallation("contents", s.gitBlob))
+	mux.HandleFunc("GET /installation/repositories", s.withInstallation("metadata", "read", s.installationRepositories))
+	mux.HandleFunc("GET /repos/{owner}/{repo}", s.withInstallation("metadata", "read", s.getRepo))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/collaborators/{username}/permission", s.withInstallation("metadata", "read", s.collaboratorPermission))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/ref/{ref...}", s.withInstallation("contents", "read", s.gitRef))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{sha}", s.withInstallation("contents", "read", s.gitTree))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", s.withInstallation("contents", "read", s.gitBlob))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/commits/{sha}", s.withInstallation("contents", "read", s.getCommit))
+
+	mux.HandleFunc("POST /repos/{owner}/{repo}/git/blobs", s.withInstallation("contents", "write", s.createBlob))
+	mux.HandleFunc("POST /repos/{owner}/{repo}/git/trees", s.withInstallation("contents", "write", s.createTree))
+	mux.HandleFunc("POST /repos/{owner}/{repo}/git/commits", s.withInstallation("contents", "write", s.createCommit))
+	mux.HandleFunc("POST /repos/{owner}/{repo}/git/refs", s.withInstallation("contents", "write", s.createRef))
+	mux.HandleFunc("DELETE /repos/{owner}/{repo}/git/refs/{ref...}", s.withInstallation("contents", "write", s.deleteRef))
+	mux.HandleFunc("POST /repos/{owner}/{repo}/pulls", s.withInstallation("pull_requests", "write", s.createPull))
+
+	// not GitHub APIs: the page a pull request's html_url opens, and its
+	// data for the end-to-end tests
+	mux.HandleFunc("GET /{owner}/{repo}/pull/{number}", s.pullHTML)
+	mux.HandleFunc("GET /_mock/repos/{owner}/{repo}/pulls/{number}", s.pullJSON)
 	return mux
 }
 

@@ -33,6 +33,7 @@ type counting struct {
 	trees       atomic.Int32
 	// answerFor, when set, makes permission answers claim another user
 	answerFor int64
+	mock      *mockgithub.Server
 }
 
 func (c *counting) Permission(ctx context.Context, owner, repo, login string) (githubapp.Permission, error) {
@@ -80,7 +81,7 @@ func newService(t *testing.T, repos []mockgithub.Repo) (*Service, *counting, *ti
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &counting{GitHub: gh}
+	c := &counting{GitHub: gh, mock: mock}
 	now := time.Now()
 	s, err := New(Options{
 		GitHub:      c,

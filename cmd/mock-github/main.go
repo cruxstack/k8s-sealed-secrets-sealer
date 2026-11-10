@@ -46,6 +46,7 @@ func run() error {
 		Users:        mockgithub.DefaultUsers(),
 		App:          app,
 		Repos:        repos,
+		WebURL:       os.Getenv("MOCK_GITHUB_WEB_URL"),
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

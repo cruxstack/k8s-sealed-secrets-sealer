@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { GitPullRequest, Loader2, Trash2 } from "lucide-react";
 import { extractApiError } from "@/api/client";
 import {
   discardSession,
+  openPullRequest,
   removeChange,
   sessionQueryKey,
 } from "@/api/queries/sessions";
-import type { PendingChange, SealSession } from "@/api/types";
+import type { PendingChange, PullRequest, SealSession } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -87,19 +88,36 @@ function ChangeRow({
   );
 }
 
-/** The user's pending changes to a repository, with discard and remove. */
+/** The files a session changes, each with its keys, in order. */
+function filesOf(changes: PendingChange[]): [string, string[]][] {
+  const files = new Map<string, string[]>();
+  for (const c of changes)
+    files.set(c.path, [...(files.get(c.path) ?? []), c.key]);
+  return [...files];
+}
+
+/**
+ * The user's pending changes to a repository: open a pull request with
+ * them, remove one, or discard them all.
+ */
 export function PendingChanges({
   owner,
   repo,
   session,
+  sealing = false,
+  onOpened,
 }: {
   owner: string;
   repo: string;
   session: SealSession;
+  /** A seal is in progress on the page; its change is not listed yet. */
+  sealing?: boolean;
+  onOpened: (pr: PullRequest) => void;
 }) {
   const queryClient = useQueryClient();
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<"discard" | "open" | null>(null);
   const changes = session.changes ?? [];
+  const files = filesOf(changes);
   const refresh = () => {
     void queryClient.invalidateQueries({
       queryKey: sessionQueryKey(owner, repo),
@@ -109,11 +127,26 @@ export function PendingChanges({
   const discard = useMutation({
     mutationFn: () => discardSession(owner, repo, session.id),
     onSuccess: () => {
-      setConfirming(false);
+      setConfirming(null);
       queryClient.setQueryData(sessionQueryKey(owner, repo), null);
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
+  const open = useMutation({
+    mutationFn: () => openPullRequest(owner, repo, session.id),
+    onSuccess: (pr) => {
+      setConfirming(null);
+      onOpened(pr);
+      // the session ended with the pull request
+      queryClient.setQueryData(sessionQueryKey(owner, repo), null);
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+  const openBlocked = sealing
+    ? "Wait for the seal in progress to finish."
+    : changes.length === 0
+      ? "Seal a value first."
+      : null;
   const remove = useMutation({
     mutationFn: (changeId: string) =>
       removeChange(owner, repo, session.id, changeId),
@@ -155,9 +188,27 @@ export function PendingChanges({
             ; sealing again extends that.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => setConfirming(true)}>
-          Discard
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirming("discard")}
+          >
+            Discard
+          </Button>
+          <Button
+            size="sm"
+            disabled={openBlocked !== null}
+            title={openBlocked ?? undefined}
+            onClick={() => {
+              open.reset();
+              setConfirming("open");
+            }}
+          >
+            <GitPullRequest className="mr-1.5 h-4 w-4" aria-hidden="true" />
+            Open pull request
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -215,7 +266,79 @@ export function PendingChanges({
         </div>
       )}
 
-      <Dialog open={confirming} onOpenChange={setConfirming}>
+      <Dialog
+        open={confirming === "open"}
+        onOpenChange={(o) =>
+          !open.isPending && setConfirming(o ? "open" : null)
+        }
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Open a pull request?</DialogTitle>
+            <DialogDescription>
+              One commit on a new branch from{" "}
+              <code className="font-mono">{session.branch}</code> at{" "}
+              <code className="font-mono">{session.commit.slice(0, 7)}</code>{" "}
+              writes {plural(changes.length, "sealed value", "sealed values")}{" "}
+              into {plural(files.length, "file", "files")}, changing only{" "}
+              <code className="font-mono">spec.encryptedData</code>. The GitHub
+              App opens the pull request into{" "}
+              <code className="font-mono">{session.branch}</code> and names you
+              as its requester; your pending changes are then cleared.
+            </DialogDescription>
+          </DialogHeader>
+          <ul
+            aria-label="Files in the pull request"
+            className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-border bg-muted/40 p-3 text-sm"
+          >
+            {files.map(([path, keys]) => (
+              <li key={path} className="space-y-1">
+                <div
+                  className="truncate font-mono text-xs font-medium"
+                  title={path}
+                >
+                  {path}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {keys.map((k) => (
+                    <code
+                      key={k}
+                      className="rounded bg-background px-1.5 py-0.5 font-mono text-xs"
+                    >
+                      {k}
+                    </code>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+          {open.error && (
+            <p role="alert" className="text-sm text-destructive">
+              Could not open the pull request: {extractApiError(open.error)}
+            </p>
+          )}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={open.isPending}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button disabled={open.isPending} onClick={() => open.mutate()}>
+              {open.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <GitPullRequest className="mr-2 h-4 w-4" aria-hidden />
+              )}
+              {open.isPending ? "Opening…" : "Open pull request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={confirming === "discard"}
+        onOpenChange={(o) => setConfirming(o ? "discard" : null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Discard pending changes?</DialogTitle>

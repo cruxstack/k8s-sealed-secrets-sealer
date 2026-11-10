@@ -347,4 +347,57 @@ code="$(as_alice POST /api/v1/repos/example-org/restricted/session '{}' | cut -d
 [[ "$code" == 404 ]] || die "a session on a repository alice cannot read answered ${code}"
 check "sealing refuses cluster-wide documents and repositories alice cannot write"
 
+# --- pull request: alice opens one with the pending change. Only the dev
+# documents' encryptedData changes, and applied to the clusters, every
+# controller decrypts the value. ---
+out="$(as_alice POST "${apps}/session/${session}/pull-request")"
+[[ "${out%% *}" == 201 ]] || die "alice could not open a pull request: ${out}"
+pr="$(jq -r .pull_request.number <<<"${out#* }")"
+branch="$(jq -r .pull_request.branch <<<"${out#* }")"
+[[ "$(as_alice GET "${apps}/session" | cut -d' ' -f2-)" == '{"session":null}' ]] || die "the session outlived its pull request"
+check "alice opens pull request #${pr} from ${branch}, which ends the session"
+
+pull="$(curl -sSf "http://localhost:${SEALER_GITHUB_PORT}/_mock/repos/example-org/apps/pulls/${pr}")"
+jq -e --arg b "$branch" '
+  .head == $b and .base == "main" and (.commits | length) == 1
+  and (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml"]
+  and (.message | test("Requested-by: alice <1001\\+alice@users.noreply.github.com>"))
+  and (.body | test("@alice"))
+' <<<"$pull" >/dev/null || die "pull request in GitHub: $(jq -c 'del(.files)' <<<"$pull")"
+jq -r '.files[0].before' <<<"$pull" >"${work}/before.yaml"
+jq -r '.files[0].after' <<<"$pull" >"${work}/after.yaml"
+# the file with the new lines taken out is the file before, with its three
+# empty mappings written as block mappings
+[[ "$(grep -c '^    api-token: Ag' "${work}/after.yaml")" == 3 ]] || die "the pull request does not seal api-token for three documents"
+diff <(sed 's/^  encryptedData: {}$/  encryptedData:/' "${work}/before.yaml") \
+  <(grep -v '^    api-token: ' "${work}/after.yaml") >&2 || die "the pull request changes more than encryptedData"
+if grep -qF -- "$(grep -m1 '^    api-token: ' "${work}/after.yaml" | cut -c 16-80)" <<<"$(jq -r '.body + .message + .title' <<<"$pull")"; then
+  die "a ciphertext is in the pull request's text"
+fi
+check "the pull request changes only the dev documents' encryptedData, with nothing secret in its text"
+
+# kubectl prints the file's documents as JSON objects; apply the dev ones
+kubectl --context "$KUBE_CONTEXT" create --dry-run=client -o json -f "${work}/after.yaml" \
+  | jq -s '{apiVersion: "v1", kind: "List", items: [.[] | if .kind == "List" then .items[] else . end
+      | select(.metadata.annotations["k8s-sealed-secrets-sealer/env"] == "dev")]}' \
+  | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
+for name in $(stack_clusters); do
+  got=""
+  for _ in $(seq 1 30); do
+    got="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" get secret billing \
+      -o jsonpath='{.data.api-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    [[ -n "$got" ]] && break
+    sleep 2
+  done
+  [[ "$got" == "$value" ]] || die "controller ${name} did not unseal the pull request's billing secret"
+done
+check "applied to the clusters, the pull request's file unseals to the value in all $(stack_clusters | wc -l | tr -d ' ')"
+
+[[ "$(log_events sealer-system sealer-control-plane pr.opened | wc -l | tr -d ' ')" == 1 ]] \
+  || die "the control plane did not log pr.opened once"
+if kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null | grep -qF -- "$value"; then
+  die "the value appears in the control plane's log"
+fi
+check "the pull request is logged, and the value is not"
+
 echo "e2e: ${passed} checks passed" >&2

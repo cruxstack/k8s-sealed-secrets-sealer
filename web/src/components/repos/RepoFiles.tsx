@@ -1,11 +1,20 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { FileSearch, FileWarning, Lock, LockKeyhole } from "lucide-react";
+import {
+  CheckCircle2,
+  ExternalLink,
+  FileSearch,
+  FileWarning,
+  Lock,
+  LockKeyhole,
+  X,
+} from "lucide-react";
 import { repoFilesQueryOptions } from "@/api/queries/repos";
 import { sessionQueryOptions } from "@/api/queries/sessions";
 import { extractApiError } from "@/api/client";
 import type {
+  PullRequest,
   RepositoryFile,
   SealSession,
   SealedSecretDocument,
@@ -99,6 +108,7 @@ interface SealProps {
   session: SealSession | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onBusyChange: (busy: boolean) => void;
 }
 
 function FileCard({
@@ -197,9 +207,58 @@ function FileCard({
           commit={seal.commit}
           session={seal.session}
           onClose={() => seal.onOpenChange(false)}
+          onBusyChange={seal.onBusyChange}
         />
       )}
     </section>
+  );
+}
+
+/** Says a pull request was opened, with a link to it. */
+function OpenedBanner({
+  pr,
+  onDismiss,
+}: {
+  pr: PullRequest;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      role="status"
+      aria-label="Pull request opened"
+      className="flex flex-col gap-3 rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+    >
+      <p className="flex items-start gap-2">
+        <CheckCircle2
+          className="mt-0.5 h-4 w-4 shrink-0 text-success"
+          aria-hidden="true"
+        />
+        <span>
+          Opened pull request{" "}
+          <span className="font-semibold">#{pr.number}</span>: {pr.title}.{" "}
+          <span className="text-muted-foreground">
+            Branch <code className="font-mono text-xs">{pr.branch}</code>.
+          </span>
+        </span>
+      </p>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button asChild variant="outline" size="sm">
+          <a href={pr.url} target="_blank" rel="noopener noreferrer">
+            View pull request
+            <ExternalLink className="ml-1.5 h-3.5 w-3.5" aria-hidden="true" />
+          </a>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          aria-label="Dismiss"
+          onClick={onDismiss}
+        >
+          <X className="h-4 w-4" aria-hidden="true" />
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -217,6 +276,8 @@ export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
     enabled: !sessionQuery.isPending,
   });
   const [sealing, setSealing] = useState<string | null>(null);
+  const [sealBusy, setSealBusy] = useState(false);
+  const [opened, setOpened] = useState<PullRequest | null>(null);
   const canWrite = data?.repository.access === "write";
 
   return (
@@ -268,8 +329,20 @@ export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
             </p>
           </header>
 
+          {opened && (
+            <OpenedBanner pr={opened} onDismiss={() => setOpened(null)} />
+          )}
           {canWrite && session && (
-            <PendingChanges owner={owner} repo={repo} session={session} />
+            <PendingChanges
+              owner={owner}
+              repo={repo}
+              session={session}
+              sealing={sealBusy}
+              onOpened={(pr) => {
+                setOpened(pr);
+                setSealing(null);
+              }}
+            />
           )}
 
           {!canWrite && (
@@ -326,6 +399,7 @@ export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
                           open: sealing === f.path,
                           onOpenChange: (open) =>
                             setSealing(open ? f.path : null),
+                          onBusyChange: setSealBusy,
                         }
                       : undefined
                   }

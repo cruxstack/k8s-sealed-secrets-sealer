@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.requestSeal))
 			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
 			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
+			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.createPullRequest))
 		}
 	}
 

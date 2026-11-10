@@ -119,9 +119,9 @@ func granted(name, level string) bool {
 	return false
 }
 
-// withInstallation requires an installation token holding permission
-// (read or write).
-func (s *Server) withInstallation(permission string, next http.HandlerFunc) http.HandlerFunc {
+// withInstallation requires an installation token holding permission at
+// level: read accepts read or write, write only write.
+func (s *Server) withInstallation(permission, level string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		s.mu.Lock()
@@ -131,7 +131,7 @@ func (s *Server) withInstallation(permission string, next http.HandlerFunc) http
 			writeError(w, http.StatusUnauthorized, "Bad credentials")
 			return
 		}
-		if tok.permissions[permission] == "" {
+		if held := tok.permissions[permission]; held == "" || (level == "write" && held != "write") {
 			writeError(w, http.StatusForbidden, "Resource not accessible by integration")
 			return
 		}

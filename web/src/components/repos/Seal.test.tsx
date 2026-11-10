@@ -257,4 +257,143 @@ describe("sealing", () => {
       await within(apps).findByText("2 pending changes"),
     ).toBeInTheDocument();
   });
+
+  it("opens a pull request with the pending changes, then links to it", async () => {
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 3,
+          changes: [
+            changeFor(SEAL),
+            changeFor({ ...SEAL, key: "password" }),
+            changeFor({ ...SEAL, path: "deploy/search/sealed-secret.yaml" }),
+          ],
+        },
+      },
+    });
+    renderAt(APPS, api);
+    const pending = await screen.findByRole("region", {
+      name: /pending changes/i,
+    });
+    fireEvent.click(
+      within(pending).getByRole("button", { name: "Open pull request" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Open a pull request?",
+    });
+    expect(dialog).toHaveTextContent(
+      "writes 3 sealed values into 2 files, changing only spec.encryptedData",
+    );
+    const files = within(dialog).getByRole("list", {
+      name: "Files in the pull request",
+    });
+    expect(within(files).getAllByRole("listitem")).toHaveLength(2);
+    expect(files).toHaveTextContent(`${BILLING}api-tokenpassword`);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Open pull request" }),
+    );
+    const banner = await screen.findByRole("status", {
+      name: "Pull request opened",
+    });
+    await waitFor(() =>
+      expect(banner).toHaveTextContent("Opened pull request #7"),
+    );
+    expect(
+      within(banner).getByRole("link", { name: /view pull request/i }),
+    ).toHaveAttribute("href", "https://github.com/example-org/apps/pull/7");
+    expect(
+      within(banner).getByRole("link", { name: /view pull request/i }),
+    ).toHaveAttribute("rel", "noopener noreferrer");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: /pending changes/i }),
+      ).not.toBeInTheDocument(),
+    );
+    const call = api.calls.find((c) => c.url.endsWith("/pull-request"));
+    expect(call).toMatchObject({
+      method: "POST",
+      url: `${APPS}/session/${SESSION.id}/pull-request`,
+      csrf: ME.csrf_token,
+    });
+
+    fireEvent.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(banner).not.toBeInTheDocument();
+  });
+
+  it("keeps the changes and says why when a pull request is refused", async () => {
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 1,
+          changes: [changeFor(SEAL)],
+        },
+      },
+      pullRequestError: {
+        status: 422,
+        error: `${BILLING}: its documents for the dev env no longer match what api-token was sealed for; seal it again`,
+      },
+    });
+    renderAt(APPS, api);
+    const pending = await screen.findByRole("region", {
+      name: /pending changes/i,
+    });
+    fireEvent.click(
+      within(pending).getByRole("button", { name: "Open pull request" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Open a pull request?",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Open pull request" }),
+    );
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Could not open the pull request: deploy/billing/sealed-secret.yaml: its documents for the dev env no longer match what api-token was sealed for; seal it again",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toHaveTextContent("api-token");
+  });
+
+  it("offers no pull request without changes or while a seal is running", async () => {
+    sealPolling.intervalMs = 60;
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: { "example-org/apps": { ...SESSION } },
+      sealStatuses: ["queued", "sealing", "sealing", "sealing", "sealed"],
+    });
+    renderAt(APPS, api);
+    const pending = await screen.findByRole("region", {
+      name: /pending changes/i,
+    });
+    const open = within(pending).getByRole("button", {
+      name: "Open pull request",
+    });
+    expect(open).toBeDisabled();
+    expect(open).toHaveAttribute("title", "Seal a value first.");
+
+    const { key, value, seal } = await openForm();
+    fireEvent.change(key, { target: { value: "api-token" } });
+    fireEvent.change(value, { target: { value: "s3cr3t" } });
+    fireEvent.click(seal);
+    await waitFor(() =>
+      expect(open).toHaveAttribute(
+        "title",
+        "Wait for the seal in progress to finish.",
+      ),
+    );
+    expect(open).toBeDisabled();
+    await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
+  });
 });
