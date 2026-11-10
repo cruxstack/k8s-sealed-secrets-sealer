@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,7 @@ type Client struct {
 	identity  Identity
 	env       string
 	userAgent string
+	interval  time.Duration
 	logger    *slog.Logger
 	now       func() time.Time
 
@@ -96,6 +98,9 @@ type ClientOptions struct {
 	// env is refused at login.
 	Env     string
 	Version string
+	// CheckInInterval is sent with every check-in, so the control plane
+	// counts the agent healthy for three of its intervals.
+	CheckInInterval time.Duration
 	// HTTPClient defaults to one with a 60-second timeout, above the
 	// longest commands poll. Redirects are never followed.
 	HTTPClient *http.Client
@@ -127,6 +132,7 @@ func NewClient(opts ClientOptions) *Client {
 		identity:  opts.Identity,
 		env:       opts.Env,
 		userAgent: "k8s-sealed-secrets-sealer-agent/" + opts.Version,
+		interval:  opts.CheckInInterval,
 		logger:    logger,
 		now:       now,
 		login:     make(chan struct{}, 1),
@@ -152,7 +158,11 @@ func (c *Client) Now() time.Time {
 // CheckIn reports the agent's state.
 func (c *Client) CheckIn(ctx context.Context, in protocol.CheckIn) (*protocol.CheckInResponse, error) {
 	var out protocol.CheckInResponse
-	if err := c.call(ctx, http.MethodPost, "/agent/v1/checkin", in, &out); err != nil {
+	var header http.Header
+	if c.interval > 0 {
+		header = http.Header{protocol.CheckInIntervalHeader: {strconv.Itoa(int(c.interval / time.Second))}}
+	}
+	if err := c.call(ctx, http.MethodPost, "/agent/v1/checkin", header, in, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -162,7 +172,7 @@ func (c *Client) CheckIn(ctx context.Context, in protocol.CheckIn) (*protocol.Ch
 func (c *Client) Commands(ctx context.Context, wait time.Duration) ([]protocol.Command, error) {
 	var out protocol.CommandsResponse
 	path := fmt.Sprintf("/agent/v1/commands?wait=%d", int(wait/time.Second))
-	if err := c.call(ctx, http.MethodGet, path, nil, &out); err != nil {
+	if err := c.call(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Commands, nil
@@ -171,19 +181,19 @@ func (c *Client) Commands(ctx context.Context, wait time.Duration) ([]protocol.C
 // Result reports a command's outcome.
 func (c *Client) Result(ctx context.Context, id string, res protocol.CommandResult) error {
 	var out map[string]string
-	return c.call(ctx, http.MethodPost, "/agent/v1/commands/"+url.PathEscape(id)+"/result", res, &out)
+	return c.call(ctx, http.MethodPost, "/agent/v1/commands/"+url.PathEscape(id)+"/result", nil, res, &out)
 }
 
 // PutEscrow uploads an escrowed key.
 func (c *Client) PutEscrow(ctx context.Context, fingerprint string, in protocol.EscrowUpload) error {
 	var out map[string]bool
-	return c.call(ctx, http.MethodPut, "/agent/v1/escrow/"+protocol.FingerprintPath(fingerprint), in, &out)
+	return c.call(ctx, http.MethodPut, "/agent/v1/escrow/"+protocol.FingerprintPath(fingerprint), nil, in, &out)
 }
 
 // GetEscrow downloads an escrowed key.
 func (c *Client) GetEscrow(ctx context.Context, fingerprint string) (protocol.EscrowRecord, error) {
 	var out protocol.EscrowRecord
-	if err := c.call(ctx, http.MethodGet, "/agent/v1/escrow/"+protocol.FingerprintPath(fingerprint), nil, &out); err != nil {
+	if err := c.call(ctx, http.MethodGet, "/agent/v1/escrow/"+protocol.FingerprintPath(fingerprint), nil, nil, &out); err != nil {
 		return protocol.EscrowRecord{}, err
 	}
 	return out, nil
@@ -191,13 +201,13 @@ func (c *Client) GetEscrow(ctx context.Context, fingerprint string) (protocol.Es
 
 // call sends an authenticated request, logging in first when needed and
 // once more if the session was rejected.
-func (c *Client) call(ctx context.Context, method, path string, in, out any) error {
+func (c *Client) call(ctx context.Context, method, path string, header http.Header, in, out any) error {
 	for attempt := 0; ; attempt++ {
 		session, err := c.ensureSession(ctx)
 		if err != nil {
 			return err
 		}
-		err = c.do(ctx, method, path, session, in, out)
+		err = c.do(ctx, method, path, session, header, in, out)
 		if errors.Is(err, errUnauthorized) && attempt == 0 {
 			c.dropSession(session)
 			continue
@@ -230,7 +240,7 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	var resp protocol.SessionResponse
-	if err := c.do(ctx, http.MethodPost, "/agent/v1/session", "", login, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/agent/v1/session", "", nil, login, &resp); err != nil {
 		return "", fmt.Errorf("failed to log in to the control plane: %w", err)
 	}
 	if resp.Token == "" {
@@ -264,7 +274,7 @@ func (c *Client) dropSession(session string) {
 	}
 }
 
-func (c *Client) do(ctx context.Context, method, path, session string, in, out any) error {
+func (c *Client) do(ctx context.Context, method, path, session string, header http.Header, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -276,6 +286,9 @@ func (c *Client) do(ctx context.Context, method, path, session string, in, out a
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return fmt.Errorf("failed to build request to %s: %w", path, err)
+	}
+	for name, values := range header {
+		req.Header[name] = values
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")

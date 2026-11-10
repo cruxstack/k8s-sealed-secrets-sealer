@@ -184,6 +184,30 @@ func TestClient_EscrowPathIsOneSegment(t *testing.T) {
 	}
 }
 
+// Check-ins carry the agent's interval, so the control plane counts it
+// healthy for three of them.
+func TestClient_ReportsItsCheckInInterval(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "session:"+r.Header.Get(protocol.CheckInIntervalHeader))
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a"})
+	})
+	mux.HandleFunc("POST /agent/v1/checkin", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "checkin:"+r.Header.Get(protocol.CheckInIntervalHeader))
+		_ = json.NewEncoder(w).Encode(protocol.CheckInResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)}, CheckInInterval: time.Minute})
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "session:,checkin:60" {
+		t.Fatalf("interval headers = %v", got)
+	}
+}
+
 // Every request names the agent's env, so a control plane serving several
 // envs sends it to this one.
 func TestClient_NamesItsEnv(t *testing.T) {

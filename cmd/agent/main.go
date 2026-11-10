@@ -67,11 +67,12 @@ func run() error {
 		return err
 	}
 	client := agent.NewClient(agent.ClientOptions{
-		BaseURL:  cfg.ControlPlaneURL,
-		Identity: identity,
-		Env:      cfg.EnvName,
-		Version:  version.Version,
-		Logger:   logger,
+		BaseURL:         cfg.ControlPlaneURL,
+		Identity:        identity,
+		Env:             cfg.EnvName,
+		Version:         version.Version,
+		CheckInInterval: cfg.CheckInInterval,
+		Logger:          logger,
 	})
 
 	// a handler is registered only for capabilities this agent has; commands
@@ -86,7 +87,7 @@ func run() error {
 			// while the controller restarts, seal with the keys it reported
 			// last, for as long as the control plane counts this agent
 			// healthy without a check-in
-			Keys:         inventory.Fallback(3 * cfg.CheckInInterval),
+			Keys:         inventory.Fallback(protocol.HealthWindow(cfg.CheckInInterval)),
 			KMS:          kmsClient,
 			TransitKeyID: cfg.KMSTransitKeyID,
 			Env:          cfg.EnvName,

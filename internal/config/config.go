@@ -293,7 +293,7 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 		ControllerName:            r.dnsLabel("APP_CONTROLLER_NAME", "sealed-secrets-controller"),
 		AllowInsecureControlPlane: r.boolean("APP_ALLOW_INSECURE_CONTROL_PLANE", false),
 		TokenFile:                 r.str("APP_IDENTITY_TOKEN_FILE", DefaultTokenFile),
-		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, 5*time.Second, 5*time.Minute),
+		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, protocol.MinCheckInInterval, protocol.MaxCheckInInterval),
 	}
 	cfg.ControllerDeployment = r.dnsLabel("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
 	cfg.ControlPlaneURL = r.required(r.url("APP_CONTROL_PLANE_URL", cfg.AllowInsecureControlPlane), "APP_CONTROL_PLANE_URL")

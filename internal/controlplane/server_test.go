@@ -202,6 +202,44 @@ func TestCheckIn_StoresStateAndDiscoversKeysOnce(t *testing.T) {
 	}
 }
 
+// Agents report their check-in interval in a header, so the control plane
+// counts each healthy for three of its own intervals.
+func TestCheckIn_RecordsTheAgentsInterval(t *testing.T) {
+	cases := map[string]struct {
+		header       string
+		stored, next int
+	}{
+		"reported":                {header: "60", stored: 60, next: 60},
+		"none, as older agents":   {header: "", stored: 0, next: 15},
+		"below an agent's bounds": {header: "1", stored: 5, next: 5},
+		"above an agent's bounds": {header: "86400", stored: 300, next: 300},
+		"not whole seconds":       {header: "1m", stored: 0, next: 15},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "")
+			session := h.login()
+			body, _ := json.Marshal(checkIn(protoKey(t, time.Now().Add(-time.Hour))))
+			req := httptest.NewRequest(http.MethodPost, "/agent/v1/checkin", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+session)
+			if tc.header != "" {
+				req.Header.Set(protocol.CheckInIntervalHeader, tc.header)
+			}
+			rec := httptest.NewRecorder()
+			h.h.ServeHTTP(rec, req)
+			var resp protocol.CheckInResponse
+			if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&resp) != nil {
+				t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
+			}
+			states, _ := h.store.GetAgentStates(context.Background(), []string{"use1-blue"})
+			if got := states["use1-blue"].CheckInIntervalSeconds; got != tc.stored || resp.NextCheckInSeconds != tc.next {
+				t.Fatalf("stored %d, next %d; want %d, %d", got, resp.NextCheckInSeconds, tc.stored, tc.next)
+			}
+		})
+	}
+}
+
 func TestCheckIn_LimitsCapabilitiesToRegistry(t *testing.T) {
 	h := newHarness(t, "")
 	session := h.login()

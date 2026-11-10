@@ -143,3 +143,26 @@ func TestCompute_EnvKeyTieGoesToGreaterFingerprint(t *testing.T) {
 		}
 	}
 }
+
+// An agent is healthy for three of its own check-in intervals; one that does
+// not report its interval for three of the default.
+func TestCompute_HealthFollowsEachAgentsInterval(t *testing.T) {
+	reg := testRegistry(t, "default", "slow", "slower", "fast")
+	k := key("SHA256:k", 1)
+	withInterval := func(s store.AgentState, seconds int) store.AgentState {
+		s.CheckInIntervalSeconds = seconds
+		return s
+	}
+	f := Compute("dev", reg, map[string]store.AgentState{
+		"default": state("default", 50*time.Second, k),
+		"slow":    withInterval(state("slow", 150*time.Second, k), 60),
+		"slower":  withInterval(state("slower", 200*time.Second, k), 60),
+		// a short interval still gets the 45-second floor
+		"fast": withInterval(state("fast", 40*time.Second, k), 5),
+	}, now)
+	for id, want := range map[string]bool{"default": false, "slow": true, "slower": false, "fast": true} {
+		if got := agent(t, f, id).Healthy; got != want {
+			t.Errorf("%s healthy = %v, want %v", id, got, want)
+		}
+	}
+}

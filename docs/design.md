@@ -259,7 +259,7 @@ The control plane never connects to an agent. Agents call:
 | Call                                   | Purpose                             |
 | -------------------------------------- | ----------------------------------- |
 | `POST /agent/v1/session`               | Log in (section 4).                 |
-| `POST /agent/v1/checkin`               | Report state (every 15 seconds).    |
+| `POST /agent/v1/checkin`               | Report state on an interval.        |
 | `GET  /agent/v1/commands?wait=20`      | Long-poll for queued commands.      |
 | `POST /agent/v1/commands/{id}/result`  | Report a command's outcome.         |
 | `PUT  /agent/v1/escrow/{fingerprint}`  | Upload an escrowed key.             |
@@ -274,7 +274,11 @@ serve. One serving a single env also accepts a call without the header.
 A check-in carries the agent version, the protocol versions and command types
 it supports, its capabilities, its controller's settings (namespace, key renew
 period, key order priority) and its key set: fingerprint, `NotBefore`,
-`NotAfter` and certificate for every key.
+`NotAfter` and certificate for every key. The agent's check-in interval
+(15 seconds by default, 5 seconds to 5 minutes) comes in the
+`X-K8s-Sealed-Secrets-Sealer-Check-In-Interval` header, in whole seconds. It
+is a header so that control planes that predate it, which refuse unknown
+fields in a check-in, still accept the check-in.
 
 Commands are typed and versioned: `seal.v1`, `keys.restore.v1`,
 `renewal.enable.v1`. Each has an ID (a ULID), the target agent ID, the env,
@@ -532,9 +536,11 @@ certificates only). From those reports the control plane computes:
 
 To choose the agent for a seal:
 
-1. Candidates are agents that are healthy (checked in within the last 45
-   seconds), have the `seal` capability, support `seal.v1`, and hold the env
-   key.
+1. Candidates are agents that are healthy (checked in within three of their
+   check-in intervals, and at least 45 seconds, so a short interval does not
+   make an agent unhealthy while its controller restarts; an agent that does
+   not report its interval is taken to have the default 15 seconds), have
+   the `seal` capability, support `seal.v1`, and hold the env key.
 2. Prefer an agent in a region named by the target documents' region
    annotations.
 3. Then prefer the agent with the fewest commands in flight, then the most

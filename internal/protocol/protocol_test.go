@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSealFits(t *testing.T) {
 	cases := []struct {
@@ -25,5 +28,19 @@ func TestFingerprintPath_RoundTrips(t *testing.T) {
 	fp := "SHA256:ab+c/d="
 	if seg := FingerprintPath(fp); seg != "SHA256:ab-c_d=" || ParseFingerprintPath(seg) != fp {
 		t.Fatalf("FingerprintPath(%q) = %q", fp, seg)
+	}
+}
+
+func TestHealthWindow(t *testing.T) {
+	for interval, want := range map[time.Duration]time.Duration{
+		0:                45 * time.Second,
+		15 * time.Second: 45 * time.Second,
+		5 * time.Second:  45 * time.Second,
+		time.Minute:      3 * time.Minute,
+		24 * time.Hour:   15 * time.Minute,
+	} {
+		if got := HealthWindow(interval); got != want {
+			t.Errorf("HealthWindow(%s) = %s, want %s", interval, got, want)
+		}
 	}
 }
