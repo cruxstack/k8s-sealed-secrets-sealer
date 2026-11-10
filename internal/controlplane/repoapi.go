@@ -35,7 +35,8 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), listFilesTimeout)
 	defer cancel()
 	user := userauth.UserFrom(ctx)
-	listing, err := s.repos.Files(ctx, user, r.PathValue("owner"), r.PathValue("repo"))
+	// ?commit= lists an earlier commit, such as a session's base
+	listing, err := s.repos.Files(ctx, user, r.PathValue("owner"), r.PathValue("repo"), r.URL.Query().Get("commit"))
 	if err != nil {
 		s.repoError(w, r, err)
 		return
@@ -49,7 +50,9 @@ func (s *Server) repoError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, repos.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, repos.ErrForbidden):
+	case errors.Is(err, repos.ErrCommitNotFound), errors.Is(err, repos.ErrFileNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, repos.ErrForbidden), errors.Is(err, repos.ErrArchived):
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, "GitHub did not answer in time")

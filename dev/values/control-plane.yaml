@@ -33,6 +33,10 @@ dynamodb:
   endpoint: http://dynamodb-local.sealer-system.svc.cluster.local:8000
   createTable: true
 
+kms:
+  transitKeyId: alias/sealer-transit
+  endpoint: http://local-kms.sealer-system.svc.cluster.local:8080
+
 aws:
   region: us-east-1
 

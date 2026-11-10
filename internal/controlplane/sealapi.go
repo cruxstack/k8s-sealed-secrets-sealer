@@ -1,0 +1,444 @@
+package controlplane
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/oklog/ulid/v2"
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
+)
+
+// Seal limits.
+const (
+	// sealCommandTTL is how long a seal waits to be leased and run.
+	sealCommandTTL = 2 * time.Minute
+	// maxSealBody bounds a seal request: a value of MaxSealValueBytes,
+	// even with JSON escaping, and its path and key.
+	maxSealBody = 512 << 10
+	// maxPathBytes bounds a file path.
+	maxPathBytes = 1024
+	// maxCiphertextChars bounds one base64 ciphertext in a seal result.
+	maxCiphertextChars = (protocol.MaxSealValueBytes+protocol.SealOverheadBytes)*4/3 + 4
+)
+
+// Seal statuses, as users see them.
+const (
+	sealQueued  = "queued"
+	sealSealing = "sealing"
+	sealSealed  = "sealed"
+	sealFailed  = "failed"
+	sealExpired = "expired"
+)
+
+// sealView is a seal's progress.
+type sealView struct {
+	ID          string       `json:"id"`
+	Status      string       `json:"status"`
+	Path        string       `json:"path"`
+	Key         string       `json:"key"`
+	Targets     []targetView `json:"targets"`
+	Agent       agentView    `json:"agent"`
+	Fingerprint string       `json:"fingerprint"`
+	CreatedAt   time.Time    `json:"created_at"`
+	// ChangeID names the pending change a sealed value went into.
+	ChangeID string `json:"change_id,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// changeID is the ID of the pending change for a key in a file: sealing the
+// same key into the same file again replaces it.
+func changeID(path, key string) string {
+	sum := sha256.Sum256([]byte(path + "\x00" + key))
+	return hex.EncodeToString(sum[:16])
+}
+
+func validChangeID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil && strings.ToLower(id) == id
+}
+
+// requestSeal seals a value into every SealedSecret document for this env in
+// a file, as one seal.v1 command. The value is encrypted under the transit
+// key as soon as it arrives and is never stored, logged or returned.
+func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Path  string `json:"path"`
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if !decodeJSON(w, r, maxSealBody, &in) {
+		return
+	}
+	switch {
+	case in.Path == "" || len(in.Path) > maxPathBytes:
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	case len(validation.IsConfigMapKey(in.Key)) > 0:
+		writeError(w, http.StatusBadRequest, "key must be a valid Secret key: letters, digits, '-', '_' or '.', at most 253 characters")
+		return
+	case in.Value == "":
+		writeError(w, http.StatusBadRequest, "value is required")
+		return
+	case len(in.Value) > protocol.MaxSealValueBytes:
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("value is larger than %d KiB", protocol.MaxSealValueBytes>>10))
+		return
+	}
+	sess, ok := s.currentSession(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), sessionRequestTimeout)
+	defer cancel()
+	user := userauth.UserFrom(ctx)
+
+	// write access is checked again on every seal
+	file, err := s.repos.File(ctx, user, sess.Owner, sess.Repo, sess.Commit, in.Path, true)
+	if err != nil {
+		s.repoError(w, r, err)
+		return
+	}
+	if file.Error != "" {
+		writeError(w, http.StatusUnprocessableEntity, "this file cannot be sealed into: "+file.Error)
+		return
+	}
+	if len(file.Documents) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "this file has no SealedSecret for the "+s.env+" env")
+		return
+	}
+	var targets []store.Target
+	var regions []string
+	for _, d := range file.Documents {
+		if !d.Sealable() {
+			writeError(w, http.StatusUnprocessableEntity,
+				fmt.Sprintf("this file cannot be sealed into: %s/%s: %s", d.Namespace, d.Name, d.Problem))
+			return
+		}
+		targets = append(targets, store.Target{Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
+		if d.Region != "" {
+			regions = append(regions, d.Region)
+		}
+	}
+	if !protocol.SealFits(len(in.Value), len(targets)) {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("value is too large to seal for %d documents", len(targets)))
+		return
+	}
+
+	now := s.now().UTC()
+	agent, envKey, err := s.chooseSealer(ctx, regions, now)
+	var outOfSync *fleet.KeysOutOfSyncError
+	switch {
+	case errors.As(err, &outOfSync):
+		writeError(w, http.StatusConflict, outOfSync.Error())
+		return
+	case errors.Is(err, fleet.ErrNoSealer):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	case err != nil:
+		s.internalError(w, r, "failed to choose an agent", err)
+		return
+	}
+
+	commandID := ulid.Make().String()
+	value := []byte(in.Value)
+	sealed, err := envelope.Seal(ctx, s.transit, s.transitKey, value, protocol.SealContext(s.env, commandID, agent.ID))
+	clear(value)
+	if err != nil {
+		s.internalError(w, r, "failed to encrypt value for transit", err)
+		return
+	}
+	secret, err := json.Marshal(sealed)
+	if err != nil {
+		s.internalError(w, r, "failed to encode transit envelope", err)
+		return
+	}
+
+	if ok, err := s.touch(ctx, sess, now); err != nil || !ok {
+		if err != nil {
+			s.internalError(w, r, "failed to mark session used", err)
+			return
+		}
+		writeError(w, http.StatusNotFound, "session not found; it may have expired or been discarded")
+		return
+	}
+	seal := store.Seal{
+		SessionID:   sess.ID,
+		CommandID:   commandID,
+		AgentID:     agent.ID,
+		Path:        file.Path,
+		Key:         in.Key,
+		Fingerprint: envKey,
+		Targets:     targets,
+		UserID:      user.ID,
+		UserLogin:   user.Login,
+		CreatedAt:   now,
+		ExpiresAt:   sess.EndsAt,
+	}
+	if err := s.store.PutSeal(ctx, seal); err != nil {
+		s.internalError(w, r, "failed to record seal", err)
+		return
+	}
+	payload := protocol.SealPayload{Key: in.Key, Fingerprint: envKey}
+	for _, t := range targets {
+		payload.Targets = append(payload.Targets, protocol.SealTarget{Namespace: t.Namespace, Name: t.Name, Scope: t.Scope})
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		s.internalError(w, r, "failed to encode seal payload", err)
+		return
+	}
+	err = s.store.PutCommand(ctx, store.CommandRecord{
+		AgentID:   agent.ID,
+		ID:        commandID,
+		Type:      protocol.CommandSeal,
+		Status:    store.CommandQueued,
+		CreatedAt: now,
+		ExpiresAt: now.Add(sealCommandTTL),
+		Payload:   string(body),
+		Secret:    string(secret),
+		SessionID: sess.ID,
+	})
+	if err != nil {
+		s.internalError(w, r, "failed to queue seal", err)
+		return
+	}
+	s.logger.InfoContext(ctx, "seal requested",
+		"event", "seal.requested", "env", s.env, "session_id", sess.ID, "command_id", commandID,
+		"user", user.Login, "user_id", user.ID, "repository", sess.Owner+"/"+sess.Repo, "path", file.Path,
+		"key", in.Key, "targets", len(targets), "agent_id", agent.ID, "fingerprint", envKey)
+	httpserver.WriteJSON(w, http.StatusAccepted, s.viewSeal(seal, sealQueued, ""))
+}
+
+// chooseSealer picks the agent for a seal and returns it with the env key.
+func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Time) (fleet.Agent, string, error) {
+	ids := make([]string, 0, len(s.reg.Agents))
+	for _, a := range s.reg.Agents {
+		ids = append(ids, a.ID)
+	}
+	states, err := s.store.GetAgentStates(ctx, ids)
+	if err != nil {
+		return fleet.Agent{}, "", err
+	}
+	f := fleet.Compute(s.env, s.reg, states, now)
+	// commands in flight, counted only for agents that might be chosen
+	inFlight := map[string]int{}
+	for _, a := range f.Agents {
+		if !a.Healthy {
+			continue
+		}
+		cmds, err := s.store.Commands(ctx, a.ID)
+		if err != nil {
+			return fleet.Agent{}, "", err
+		}
+		for _, c := range cmds {
+			if c.Open(now) {
+				inFlight[a.ID]++
+			}
+		}
+	}
+	agent, err := fleet.ChooseSealer(f, regions, inFlight)
+	if err != nil {
+		return fleet.Agent{}, "", err
+	}
+	return agent, f.EnvKey.Fingerprint, nil
+}
+
+func (s *Server) viewSeal(seal store.Seal, status, errMsg string) sealView {
+	return sealView{
+		ID:          seal.CommandID,
+		Status:      status,
+		Path:        seal.Path,
+		Key:         seal.Key,
+		Targets:     viewTargets(seal.Targets),
+		Agent:       s.agentView(seal.AgentID),
+		Fingerprint: seal.Fingerprint,
+		CreatedAt:   seal.CreatedAt,
+		Error:       errMsg,
+	}
+}
+
+// getSeal serves a seal's progress, for the UI to poll.
+func (s *Server) getSeal(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.currentSession(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	id := r.PathValue("seal")
+	if _, err := ulid.ParseStrict(id); err != nil {
+		writeError(w, http.StatusNotFound, "seal not found")
+		return
+	}
+	seal, found, err := s.store.Seal(ctx, sess.ID, id)
+	if err != nil {
+		s.internalError(w, r, "failed to read seal", err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "seal not found")
+		return
+	}
+	cmd, found, err := s.store.Command(ctx, seal.AgentID, seal.CommandID)
+	if err != nil {
+		s.internalError(w, r, "failed to read seal command", err)
+		return
+	}
+	now := s.now().UTC()
+	var v sealView
+	switch {
+	case !found || cmd.Expired(now):
+		// commands are removed an hour after they expire
+		v = s.viewSeal(seal, sealExpired, "no agent finished sealing in time; seal the value again")
+	case cmd.Status == store.CommandQueued:
+		v = s.viewSeal(seal, sealQueued, "")
+	case cmd.Status == store.CommandLeased:
+		v = s.viewSeal(seal, sealSealing, "")
+	case cmd.Status == store.CommandSucceeded:
+		v = s.viewSeal(seal, sealSealed, "")
+		v.ChangeID = changeID(seal.Path, seal.Key)
+	default:
+		v = s.viewSeal(seal, sealFailed, cmd.Error)
+		if v.Error == "" {
+			v.Error = "the agent could not seal the value"
+		}
+	}
+	httpserver.WriteJSON(w, http.StatusOK, v)
+}
+
+// finishSeal records a seal.v1 result: the ciphertexts become a pending
+// change in the seal's session before the command is marked done, so a
+// succeeded seal always has its change. It writes the response.
+func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *registry.Agent, cmd store.CommandRecord, in protocol.CommandResult) {
+	ctx := r.Context()
+	now := s.now().UTC()
+	log := s.logger.With("env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "command_id", cmd.ID, "session_id", cmd.SessionID)
+	if cmd.Status != store.CommandLeased || !now.Before(cmd.ExpiresAt) {
+		writeError(w, http.StatusConflict, "command is not leased or has expired")
+		return
+	}
+	seal, found, err := s.store.Seal(ctx, cmd.SessionID, cmd.ID)
+	if err != nil {
+		s.internalError(w, r, "failed to read seal", err)
+		return
+	}
+
+	status, errMsg := in.Status, in.Error
+	var res protocol.SealResult
+	if status == protocol.CommandSucceeded {
+		switch {
+		case !found:
+			status, errMsg = protocol.CommandFailed, "the seal's session record is missing"
+		default:
+			if err := checkSealResult(cmd, in.Result, &res); err != nil {
+				status, errMsg = protocol.CommandFailed, "the agent returned an invalid result: "+err.Error()
+				log.ErrorContext(ctx, "invalid seal result", "event", "seal.invalid_result", "error", err)
+			}
+		}
+	}
+
+	summary := ""
+	if status == protocol.CommandSucceeded {
+		ciphertexts := make([]string, len(res.Targets))
+		for i, t := range res.Targets {
+			ciphertexts[i] = t.Ciphertext
+		}
+		stored, err := s.store.PutChange(ctx, store.Change{
+			SessionID:   seal.SessionID,
+			ID:          changeID(seal.Path, seal.Key),
+			Path:        seal.Path,
+			Key:         seal.Key,
+			CommandID:   cmd.ID,
+			AgentID:     agent.ID,
+			Fingerprint: res.Fingerprint,
+			Targets:     seal.Targets,
+			Ciphertexts: ciphertexts,
+			UserID:      seal.UserID,
+			UserLogin:   seal.UserLogin,
+			SealedAt:    now,
+			ExpiresAt:   seal.ExpiresAt,
+		})
+		if err != nil {
+			// the command stays leased and expires; the user seals again
+			s.internalError(w, r, "failed to store pending change", err)
+			return
+		}
+		if !stored {
+			log.InfoContext(ctx, "a newer seal of the same key already landed", "event", "seal.superseded")
+		}
+		b, _ := json.Marshal(map[string]any{"fingerprint": res.Fingerprint, "targets": len(res.Targets)})
+		summary = string(b)
+	}
+
+	ok, err := s.store.FinishCommand(ctx, agent.ID, cmd.ID, status, summary, errMsg, now)
+	if err != nil {
+		s.internalError(w, r, "failed to record command result", err)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, "command is not leased or has expired")
+		return
+	}
+	fields := []any{"user", seal.UserLogin, "path", seal.Path, "key", seal.Key, "fingerprint", seal.Fingerprint}
+	if status == protocol.CommandSucceeded {
+		log.InfoContext(ctx, "value sealed", append([]any{"event", "seal.succeeded", "targets", len(res.Targets)}, fields...)...)
+	} else {
+		log.WarnContext(ctx, "seal failed", append([]any{"event", "seal.failed", "error", errMsg}, fields...)...)
+	}
+	if in.Status == protocol.CommandSucceeded && status != protocol.CommandSucceeded {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+// checkSealResult checks that a result has one well-formed ciphertext for
+// each target the command asked for, in order, made with its key.
+func checkSealResult(cmd store.CommandRecord, raw json.RawMessage, res *protocol.SealResult) error {
+	var p protocol.SealPayload
+	if err := json.Unmarshal([]byte(cmd.Payload), &p); err != nil {
+		return fmt.Errorf("failed to decode the command's payload: %w", err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if len(raw) == 0 || dec.Decode(res) != nil {
+		return errors.New("not a seal result")
+	}
+	if res.Fingerprint != p.Fingerprint {
+		return errors.New("sealed with another key")
+	}
+	if len(res.Targets) != len(p.Targets) {
+		return fmt.Errorf("%d ciphertexts for %d targets", len(res.Targets), len(p.Targets))
+	}
+	for i, t := range res.Targets {
+		want := p.Targets[i]
+		if t.Namespace != want.Namespace || t.Name != want.Name {
+			return fmt.Errorf("target %d is %s/%s, want %s/%s", i, t.Namespace, t.Name, want.Namespace, want.Name)
+		}
+		if t.Ciphertext == "" || len(t.Ciphertext) > maxCiphertextChars {
+			return fmt.Errorf("target %d has no usable ciphertext", i)
+		}
+		if _, err := base64.StdEncoding.DecodeString(t.Ciphertext); err != nil {
+			return fmt.Errorf("target %d's ciphertext is not base64", i)
+		}
+	}
+	return nil
+}

@@ -298,36 +298,50 @@ v1 has no command that deletes or disables anything.
 
 ## 6. Seal flow
 
-1. A signed-in user opens a session for a repository and picks a file. The
-   control plane reads it through the GitHub App at the session's base commit.
-2. The user submits a key and a value. The control plane re-checks the user's
-   write permission on the repository and finds every SealedSecret document in
-   the file whose env annotation equals this env. One seal updates all of them,
-   so a file with documents for `use1` and `use2` is sealed once. Each document
-   contributes a target: namespace, name, scope and region.
+1. A signed-in user with write access opens a session for a repository. A
+   session is based on the head of the default branch the user is looking
+   at: if the branch has moved since the page loaded, opening is refused and
+   the page reloads. A user has at most one open session per repository and
+   at most 10 in all.
+2. The user picks a file and submits a key and a value. The control plane
+   re-checks the user's write permission on the repository, reads the file
+   through the GitHub App at the session's base commit, and finds every
+   SealedSecret document in it whose env annotation equals this env. One seal
+   updates all of them, so a file with documents for `use1` and `use2` is
+   sealed once. Each document contributes a target: namespace, name, scope
+   and region.
 3. Scope comes from each document's own sealed-secrets scope annotations, the
    same place the controller reads it. `strict` and `namespace-wide` are
    allowed. `cluster-wide` is refused, because such ciphertext can be decrypted
-   into any namespace by anyone able to create a SealedSecret.
+   into any namespace by anyone able to create a SealedSecret. A file with any
+   document that cannot be sealed into is refused as a whole.
 4. The control plane chooses the env key and an agent (section 7).
 5. It encrypts the value immediately with the **transit** KMS key: a data key
    from `GenerateDataKey` encrypts the value with AES-256-GCM, and the stored
    payload is the wrapped data key, nonce and ciphertext. The encryption
-   context is `{env, command_id, agent_id}`. The plaintext value and the data
-   key are then dropped. The value is never logged, and request bodies are
-   never logged.
+   context is `{env, purpose: seal, command_id, agent_id}`. The plaintext
+   value and the data key are then dropped. The value is never logged, and
+   request bodies are never logged.
 6. It writes a `seal.v1` command (targets, secret key name, env key
-   fingerprint, encrypted value) with an expiry of about 2 minutes, and
-   returns `202` with the command ID. The UI polls the command's status.
-7. The agent leases the command and re-validates it itself: known env, valid
-   key name, namespace and name present, scope `strict` or `namespace-wide`
-   (never `cluster-wide`), and the env key fingerprint present in its own
-   controller's key set. It decrypts the value with KMS using the same
-   encryption context, seals each target in process with that key's
+   fingerprint) with an expiry of 2 minutes, storing the encrypted value
+   beside the payload rather than in it, and returns `202` with the command
+   ID. The UI polls the seal's status every second: queued, sealing, sealed,
+   failed or expired.
+7. The agent leases the command. Leasing removes the encrypted value from the
+   stored command, so it reaches the agent once. The agent re-validates the
+   command itself: valid key name, namespace and name present, scope `strict`
+   or `namespace-wide` (never `cluster-wide`), and the env key fingerprint in
+   its own controller's key set, read again for this seal. It decrypts the
+   value with KMS using the same encryption context, with its own env and ID
+   and the command's ID, seals each target in process with that key's
    certificate, and returns only the ciphertexts.
-8. The control plane removes the encrypted value from the command, records
-   each ciphertext as a pending change in the session, and shows which agent
-   and key sealed it. Users never see ciphertext.
+8. The control plane checks the result (one ciphertext per target, in order,
+   with the requested key) and records the ciphertexts as a pending change in
+   the session before it marks the command done, so a sealed value always has
+   its change. There is one pending change per file and key: sealing the same
+   key into the same file again replaces it, and a seal that finishes late
+   never replaces a newer one. The UI shows which agent and key sealed it.
+   Users never see ciphertext.
 9. When the user creates a pull request, the control plane renders each file
    from its content at the base commit plus the pending changes, editing only
    `spec.encryptedData.<key>` in each targeted document. Names, namespaces,
@@ -347,18 +361,18 @@ sequenceDiagram
   U->>CP: seal a key and value into a file
   CP->>GH: check write permission, read the file
   CP->>CP: targets = the file's documents for this env<br/>choose the env key and an agent
-  CP->>KMS: GenerateDataKey {env, command_id, agent_id}
+  CP->>KMS: GenerateDataKey {env, purpose, command_id, agent_id}
   CP->>CP: encrypt the value, drop the plaintext
   CP->>DB: queue seal.v1 (expires in about 2 minutes)
   CP-->>U: 202 with the command ID
   A->>CP: GET /agent/v1/commands (long poll)
-  CP->>DB: lease the command (queued to leased)
+  CP->>DB: lease the command (queued to leased), remove the value
   CP-->>A: seal.v1
   A->>A: re-check targets, scope and env key
   A->>KMS: Decrypt (context must name this agent)
   A->>A: seal each target with the env key's certificate
   A->>CP: result: ciphertexts only
-  CP->>DB: pending changes in the session, payload removed
+  CP->>DB: pending change in the session, then the command done
   U->>CP: poll the command
   CP-->>U: sealed, by which agent and key
   U->>CP: create pull request
@@ -383,9 +397,32 @@ sends the value elsewhere, so browser-side encryption would only add protection
 against passive leaks, which encrypt-on-receipt and the no-logging rule already
 cover. This is a choice and can be revisited.
 
-**Value size.** A single value is capped at 64 KiB so a command and its result
-fit DynamoDB's 400 KB item limit. Larger values would need S3 and are out of
-scope for v1.
+**Value size.** A single value is capped at 64 KiB, and a seal's value plus
+1 KiB per target document at 224 KiB, so all of a seal's ciphertexts fit in
+one DynamoDB item (400 KB). A 64 KiB value can go to three documents; a value
+of a few KiB, to dozens. Larger values would need S3 and are out of scope for
+v1.
+
+**Routes.** Every route needs a signed-in user, and every write the CSRF
+token (section 12). `.../session` is `/api/v1/repos/{owner}/{repo}/session`.
+
+| Route                                  | Purpose                             |
+| -------------------------------------- | ----------------------------------- |
+| `GET /api/v1/sessions`                 | The user's open sessions, with how  |
+|                                        | many pending changes each has.      |
+| `GET .../session`                      | The user's open session for the     |
+|                                        | repository and its pending changes, |
+|                                        | or null.                            |
+| `POST .../session`                     | Open a session at `commit`, the     |
+|                                        | head the user saw.                  |
+| `DELETE .../session/{id}`              | Discard the session.                |
+| `POST .../session/{id}/seals`          | Seal `value` as `key` into the file |
+|                                        | at `path`; answers `202`.           |
+| `GET .../session/{id}/seals/{seal}`    | A seal's progress.                  |
+| `DELETE .../session/{id}/changes/{id}` | Remove one pending change.          |
+
+The repository's files at a session's base commit come from
+`GET /api/v1/repos/{owner}/{repo}/files?commit=<sha>`.
 
 ## 7. Key selection and agent selection
 
@@ -670,28 +707,44 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
 | Command        | `AGENT#<id>`       | `CMD#<ulid>`        | expiry + 1 hour       |
 | Key            | `KEY#<fp>`         | `META`              | none                  |
 | Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
-| Session        | `SESSION#<id>`     | `META`              | idle timeout (1 hour) |
-| Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | same as session       |
+| Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
+| Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
+| Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | session's maximum age |
 | Login replay   | `REPLAY#<hash>`    | `REPLAY`            | signature expiry      |
 | Audit entry    | `AUDIT#<date>`     | `<ts>#<ulid>`       | configurable          |
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
-  controller settings, key set, commands in flight.
+  controller settings, key set. Commands in flight are counted from the
+  agent's commands.
 - **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`;
   past its expiry without a result it counts as expired), lease and finish
   times, expiry, payload, result. The expiry is also kept as epoch
   milliseconds (`deadline`), so leasing and results are conditional writes
-  that check it. A seal's encrypted value is removed when the command is
-  leased.
+  that check it. A seal's encrypted value is kept in its own attribute and
+  removed when the command is leased; a seal's result keeps only a summary,
+  since its ciphertexts go to the pending change.
 - **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
   Which clusters hold a key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
   encryption context, uploading agent and time.
-- **Session:** owner (GitHub user ID), repository, base branch and commit.
-  File content is not stored; it is fetched again at the base commit when the
-  pull request is created. Sessions per user are capped by counting them.
-- **Pending change:** file path, secret key name, scope and one ciphertext per
-  targeted document. Never plaintext, never returned to clients.
+- **Session:** owner (GitHub user ID and login), repository (lowercased in
+  the key, so there is one per user and repository), base branch and commit,
+  idle expiry and maximum age. Using a session (sealing, removing a change)
+  moves its idle expiry an hour on, but never past its maximum age of 8
+  hours. Keying sessions by user makes ownership structural: a user can only
+  ever address their own. Live sessions per user are capped at 10 by
+  counting them with a query. File content is not stored; it is fetched
+  again at the base commit when the pull request is created.
+- **Seal:** the command carrying a requested seal and the agent it went to,
+  with the file, key, targets and requesting user, so the UI can follow its
+  progress.
+- **Pending change:** file path, secret key name, the command and agent that
+  sealed it, the key's fingerprint, the targets and one ciphertext per target.
+  The ID is derived from the path and key, so sealing a key again replaces
+  the change; a seal that finishes late does not replace a newer one (command
+  IDs are ULIDs). Ciphertexts are stored apart from the targets so listings
+  leave them out; they are never returned to clients. Never plaintext.
+  Discarding a session leaves its seals and changes to expire unreachable.
 - **Audit entry:** who (user or agent), what (seal, PR, command, key event),
   where (repo, file, key name, cluster, fingerprint), result. Never values or
   ciphertext.

@@ -112,6 +112,16 @@ type ControlPlane struct {
 	// KeyRenewPeriod is the period the control plane asks a controller to
 	// renew its key with, when no cluster in the env renews.
 	KeyRenewPeriod time.Duration
+
+	// KMSTransitKeyID is the KMS key (ID, ARN or alias) values are encrypted
+	// under on their way to an agent. The control plane only generates data
+	// keys with it; agents decrypt.
+	KMSTransitKeyID string
+	// KMSRegion is the region of the KMS endpoint; empty uses the AWS SDK's
+	// region.
+	KMSRegion string
+	// KMSEndpoint overrides the KMS endpoint, for local emulators.
+	KMSEndpoint string
 }
 
 // Agent is the agent's configuration.
@@ -154,6 +164,9 @@ type Agent struct {
 	// KMSEscrowKeyID is the KMS key (ID, ARN or alias) escrowed sealing keys
 	// are encrypted under. Required with the keys capability.
 	KMSEscrowKeyID string
+	// KMSTransitKeyID is the KMS key values to seal arrive encrypted under.
+	// Required with the seal capability.
+	KMSTransitKeyID string
 	// KMSRegion is the region of the KMS endpoint; empty uses the AWS SDK's
 	// region. With a multi-Region escrow key, use the replica in this region.
 	KMSRegion string
@@ -234,6 +247,10 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		cfg.DiscoveryFileGlobs = append(cfg.DiscoveryFileGlobs, g)
 	}
 	cfg.KeyRenewPeriod = r.duration("APP_KEY_RENEW_PERIOD", 720*time.Hour, time.Hour, 365*24*time.Hour)
+	cfg.KMSTransitKeyID = r.required(r.str("APP_KMS_TRANSIT_KEY_ID", ""), "APP_KMS_TRANSIT_KEY_ID")
+	cfg.KMSRegion = r.str("APP_KMS_REGION", "")
+	// local emulators only; the endpoint carries no credentials
+	cfg.KMSEndpoint = r.url("APP_KMS_ENDPOINT", true)
 	for _, h := range strings.Split(r.str("APP_AWS_STS_HOSTS", ""), ",") {
 		if h = strings.TrimSpace(h); h == "" {
 			continue
@@ -285,6 +302,10 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 	cfg.KMSEscrowKeyID = r.str("APP_KMS_ESCROW_KEY_ID", "")
 	if cfg.HasCapability(protocol.CapabilityKeys) && cfg.KMSEscrowKeyID == "" {
 		r.fail("APP_KMS_ESCROW_KEY_ID is required with the keys capability")
+	}
+	cfg.KMSTransitKeyID = r.str("APP_KMS_TRANSIT_KEY_ID", "")
+	if cfg.HasCapability(protocol.CapabilitySeal) && cfg.KMSTransitKeyID == "" {
+		r.fail("APP_KMS_TRANSIT_KEY_ID is required with the seal capability")
 	}
 	cfg.KMSRegion = r.str("APP_KMS_REGION", "")
 	// local emulators only; the endpoint carries no credentials

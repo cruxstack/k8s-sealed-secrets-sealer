@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight, FolderGit2 } from "lucide-react";
 import { reposQueryOptions } from "@/api/queries/repos";
+import { sessionsQueryOptions } from "@/api/queries/sessions";
 import { extractApiError } from "@/api/client";
 import type { Repository } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
@@ -17,9 +18,27 @@ export function AccessBadge({ access }: { access: Repository["access"] }) {
   );
 }
 
+/** How many pending changes the user has in a repository, if any. */
+function PendingBadge({ count }: { count: number | undefined }) {
+  if (!count) return null;
+  return (
+    <Badge variant="default" className="ml-2 align-middle font-sans">
+      {count === 1 ? "1 pending change" : `${count} pending changes`}
+    </Badge>
+  );
+}
+
 /** The repositories page: every repository the user can read. */
 export function RepoList() {
   const { data, error, isPending } = useQuery(reposQueryOptions);
+  // pending changes per repository; the list works without them
+  const { data: sessions } = useQuery(sessionsQueryOptions);
+  const pending = new Map(
+    (sessions ?? []).map((s) => [
+      s.repository.toLowerCase(),
+      s.pending_changes,
+    ]),
+  );
 
   return (
     <section aria-labelledby="repos-heading" className="space-y-3">
@@ -97,6 +116,9 @@ export function RepoList() {
                     >
                       {r.full_name}
                     </Link>
+                    <PendingBadge
+                      count={pending.get(r.full_name.toLowerCase())}
+                    />
                   </th>
                   <td className="px-4 py-3">
                     <Badge variant="outline">

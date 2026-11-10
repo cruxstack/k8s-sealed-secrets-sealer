@@ -67,6 +67,18 @@ discovery:
 # cluster in the env renews its sealing key
 keyRenewPeriod: 720h
 
+# The KMS transit key values are encrypted under on their way to an agent.
+# The control plane's IAM role needs only kms:GenerateDataKey on it: it can
+# never decrypt. Each agent's role may decrypt only with its own agent_id in
+# the encryption context.
+kms:
+  # key ID, ARN or alias (required)
+  transitKeyId: ""
+  # region of the KMS endpoint; empty uses aws.region or the AWS SDK's
+  region: ""
+  # overrides the KMS endpoint, for local emulators only
+  endpoint: ""
+
 dynamodb:
   # (required)
   table: ""

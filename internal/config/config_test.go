@@ -27,6 +27,7 @@ func controlPlaneEnv(extra map[string]string) map[string]string {
 		"APP_USER_SESSION_KEY":           strings.Repeat("u", 32),
 		"APP_GITHUB_APP_ID":              "12345",
 		"APP_GITHUB_APP_PRIVATE_KEY":     "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n",
+		"APP_KMS_TRANSIT_KEY_ID":         "alias/sealer-transit",
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -39,6 +40,7 @@ func agentEnv(extra map[string]string) map[string]string {
 		"APP_CONTROLLER_NAMESPACE": "sealed-secrets",
 		"APP_CONTROL_PLANE_URL":    "https://sealer.dev.example.com",
 		"APP_ENV_NAME":             "dev",
+		"APP_KMS_TRANSIT_KEY_ID":   "alias/sealer-transit",
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -62,6 +64,9 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	}
 	if cfg.KeyRenewPeriod != 720*time.Hour {
 		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)
+	}
+	if cfg.KMSTransitKeyID != "alias/sealer-transit" || cfg.KMSRegion != "" || cfg.KMSEndpoint != "" {
+		t.Errorf("KMS = %q %q %q", cfg.KMSTransitKeyID, cfg.KMSRegion, cfg.KMSEndpoint)
 	}
 	if cfg.GitHubAppID != "12345" || cfg.GitHubAppInstallationID != 0 || cfg.EnvAnnotation != "k8s-sealed-secrets-sealer/env" ||
 		cfg.RegionAnnotation != "k8s-sealed-secrets-sealer/region" || cfg.DiscoveryFileGlobs != nil {
@@ -112,6 +117,7 @@ func TestLoadControlPlane_ReportsEveryProblem(t *testing.T) {
 		"APP_ADMIN_TOKEN must be at least 32 bytes",
 		"APP_DYNAMODB_TABLE is required",
 		"requires APP_DYNAMODB_ENDPOINT",
+		"APP_KMS_TRANSIT_KEY_ID is required",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)
@@ -136,8 +142,21 @@ func TestLoadAgent_Defaults(t *testing.T) {
 	if len(cfg.Capabilities) != 1 || !cfg.HasCapability("seal") {
 		t.Errorf("Capabilities = %v, want [seal]", cfg.Capabilities)
 	}
-	if cfg.EnvName != "dev" || cfg.KMSEscrowKeyID != "" || cfg.KMSEndpoint != "" {
+	if cfg.EnvName != "dev" || cfg.KMSEscrowKeyID != "" || cfg.KMSEndpoint != "" || cfg.KMSTransitKeyID != "alias/sealer-transit" {
 		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadAgent_SealNeedsTransitKey(t *testing.T) {
+	vars := agentEnv(nil)
+	delete(vars, "APP_KMS_TRANSIT_KEY_ID")
+	if _, err := loadAgent(env(vars)); err == nil || !strings.Contains(err.Error(), "APP_KMS_TRANSIT_KEY_ID is required with the seal capability") {
+		t.Fatalf("seal without a transit key: %v", err)
+	}
+	// an agent that does not seal needs none
+	vars["APP_CAPABILITIES"] = "renewal"
+	if _, err := loadAgent(env(vars)); err != nil {
+		t.Fatal(err)
 	}
 }
 

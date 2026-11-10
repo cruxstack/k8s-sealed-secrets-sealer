@@ -4,7 +4,10 @@ import type {
   Fleet,
   FleetAgent,
   MeResponse,
+  PendingChange,
   Repository,
+  Seal,
+  SealSession,
 } from "@/api/types";
 
 export const ME: MeResponse = {
@@ -22,6 +25,9 @@ export interface Recorded {
   method: string;
   url: string;
   csrf: string | undefined;
+  params?: Record<string, string>;
+  /** The JSON body, parsed. */
+  body?: unknown;
 }
 
 export interface FakeApi {
@@ -41,17 +47,38 @@ export function fakeApi(opts: {
   /** File listings by "owner/repo"; others answer 404. */
   files?: Record<string, FileListing>;
   reposStatus?: number;
+  /** Open sessions by "owner/repo"; changed by the session routes. */
+  sessions?: Record<string, SealSession>;
+  /** What a seal's progress answers, in order; the last one repeats. */
+  sealStatuses?: Seal["status"][];
+  sealError?: string;
 }): FakeApi {
   const calls: Recorded[] = [];
+  // copies, so the routes never change the caller's fixtures
+  const sessions: Record<string, SealSession> = Object.fromEntries(
+    Object.entries(opts.sessions ?? {}).map(([k, v]) => [
+      k,
+      { ...v, changes: [...(v.changes ?? [])] },
+    ]),
+  );
+  let polls = 0;
   const adapter: AxiosAdapter = async (config) => {
     const url = config.url ?? "";
     const method = (config.method ?? "get").toUpperCase();
+    const body: unknown =
+      typeof config.data === "string" ? JSON.parse(config.data) : undefined;
     calls.push({
       method,
       url,
       csrf: config.headers.get("X-CSRF-Token")?.toString(),
+      params: config.params as Record<string, string> | undefined,
+      body,
     });
-    const reply = (status: number, data: unknown) => {
+    const reply = (status: number, payload: unknown) => {
+      // a copy, as from the network: later changes to the fake's state must
+      // not reach data the client already holds
+      const data: unknown =
+        typeof payload === "object" ? structuredClone(payload) : payload;
       const response = { data, status, statusText: "", headers: {}, config };
       if (status >= 400) {
         throw new AxiosError("error", "ERR_BAD_REQUEST", config, {}, response);
@@ -75,6 +102,69 @@ export function fakeApi(opts: {
       if (opts.reposStatus)
         return reply(opts.reposStatus, { error: "GitHub request failed" });
       return reply(200, { repositories: opts.repos ?? [] });
+    }
+    if (url === "/sessions") {
+      return reply(200, { sessions: Object.values(sessions) });
+    }
+    const session =
+      /^\/repos\/([^/]+)\/([^/]+)\/session(?:\/([^/]+))?(\/.*)?$/.exec(url);
+    if (session) {
+      const [, owner = "", repo = "", id, rest = ""] = session;
+      const key = `${decodeURIComponent(owner)}/${decodeURIComponent(repo)}`;
+      const current = sessions[key];
+      if (!id) {
+        if (method === "GET") return reply(200, { session: current ?? null });
+        const created: SealSession = current ?? {
+          ...SESSION,
+          repository: key,
+          commit: (body as { commit: string }).commit,
+          changes: [],
+        };
+        sessions[key] = created;
+        return reply(current ? 200 : 201, { session: created });
+      }
+      if (!current || current.id !== id) {
+        return reply(404, { error: "session not found" });
+      }
+      if (method === "DELETE" && rest === "") {
+        delete sessions[key];
+        return reply(204, "");
+      }
+      if (method === "POST" && rest === "/seals") {
+        const { path, key: secretKey } = body as { path: string; key: string };
+        polls = 0;
+        return reply(202, { ...SEAL, path, key: secretKey, status: "queued" });
+      }
+      const sealPoll = /^\/seals\/([^/]+)$/.exec(rest);
+      if (method === "GET" && sealPoll) {
+        const statuses = opts.sealStatuses ?? ["sealing", "sealed"];
+        const status =
+          statuses[Math.min(polls++, statuses.length - 1)] ?? "sealed";
+        const last = calls.filter((c) => c.url.endsWith("/seals")).at(-1)
+          ?.body as { path: string; key: string };
+        const seal: Seal = { ...SEAL, path: last.path, key: last.key, status };
+        if (status === "sealed") {
+          const change = changeFor(seal);
+          current.changes = [
+            ...(current.changes ?? []).filter((c) => c.id !== change.id),
+            change,
+          ];
+          current.pending_changes = current.changes.length;
+        }
+        if (status === "failed" || status === "expired") {
+          seal.error = opts.sealError ?? "the agent could not seal the value";
+        }
+        return reply(200, seal);
+      }
+      const change = /^\/changes\/([^/]+)$/.exec(rest);
+      if (method === "DELETE" && change) {
+        current.changes = (current.changes ?? []).filter(
+          (c) => c.id !== change[1],
+        );
+        current.pending_changes = current.changes.length;
+        return reply(204, "");
+      }
+      return reply(404, { error: "not found" });
     }
     const files = /^\/repos\/([^/]+)\/([^/]+)\/files$/.exec(url);
     if (files) {
@@ -211,5 +301,55 @@ export function listing(overrides: Partial<FileListing> = {}): FileListing {
       },
     ],
     ...overrides,
+  };
+}
+
+export const SESSION: SealSession = {
+  id: "01J00000000000000000000SES",
+  repository: "example-org/apps",
+  owner: "example-org",
+  repo: "apps",
+  branch: "main",
+  commit: "0123456789abcdef0123456789abcdef01234567",
+  created_at: iso(60_000),
+  expires_at: new Date(NOW + 3_600_000).toISOString(),
+  ends_at: new Date(NOW + 8 * 3_600_000).toISOString(),
+  pending_changes: 0,
+  changes: [],
+};
+
+export const SEAL: Seal = {
+  id: "01J00000000000000000000SEA",
+  status: "queued",
+  path: "deploy/billing/sealed-secret.yaml",
+  key: "api-token",
+  targets: [
+    {
+      namespace: "dev-use1-blue-apps",
+      name: "billing",
+      scope: "strict",
+      region: "use1",
+    },
+    {
+      namespace: "dev-use2-blue-apps",
+      name: "billing",
+      scope: "strict",
+      region: "use2",
+    },
+  ],
+  agent: { id: "dev-use1-blue", cluster: "dev-use1-blue", region: "use1" },
+  fingerprint: KEY_A.fingerprint,
+  created_at: iso(1_000),
+};
+
+export function changeFor(seal: Seal): PendingChange {
+  return {
+    id: `change-${seal.key}`,
+    path: seal.path,
+    key: seal.key,
+    targets: seal.targets,
+    sealed_at: iso(500),
+    sealed_by: seal.agent,
+    fingerprint: seal.fingerprint,
   };
 }

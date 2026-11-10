@@ -65,9 +65,15 @@ spec:
               value: {{ required "env is required" .Values.env | quote }}
             - name: APP_CAPABILITIES
               value: {{ include "agent.capabilities" . | quote }}
+            {{- if .Values.capabilities.seal }}
+            - name: APP_KMS_TRANSIT_KEY_ID
+              value: {{ required "kms.transitKeyId is required with the seal capability" .Values.kms.transitKeyId | quote }}
+            {{- end }}
             {{- if .Values.capabilities.keys }}
             - name: APP_KMS_ESCROW_KEY_ID
               value: {{ required "kms.escrowKeyId is required with the keys capability" .Values.kms.escrowKeyId | quote }}
+            {{- end }}
+            {{- if or .Values.capabilities.seal .Values.capabilities.keys }}
             {{- with .Values.kms.region }}
             - name: APP_KMS_REGION
               value: {{ . | quote }}

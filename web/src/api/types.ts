@@ -114,3 +114,77 @@ export interface FileListing {
   /** Globs that select the files searched. */
   file_globs: string[];
 }
+
+/** A SealedSecret document a value is sealed for. */
+export interface SealTarget {
+  namespace: string;
+  name: string;
+  scope: "strict" | "namespace-wide";
+  region?: string;
+}
+
+/** An agent, as users see it. */
+export interface AgentRef {
+  id: string;
+  cluster?: string;
+  region?: string;
+}
+
+/**
+ * A value sealed for every document of a file, waiting to be committed.
+ * Ciphertexts are never sent to the browser.
+ */
+export interface PendingChange {
+  id: string;
+  path: string;
+  key: string;
+  targets: SealTarget[];
+  sealed_at: string;
+  sealed_by: AgentRef;
+  fingerprint: string;
+}
+
+/** The user's pending changes to one repository, based on one commit. */
+export interface SealSession {
+  id: string;
+  repository: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  commit: string;
+  created_at: string;
+  /** When the session ends unless it is used again. */
+  expires_at: string;
+  /** The latest the session lasts, however much it is used. */
+  ends_at: string;
+  pending_changes: number;
+  /** Present on a single session, absent in listings. */
+  changes?: PendingChange[];
+}
+
+/** GET /api/v1/repos/{owner}/{repo}/session */
+export interface SessionResponse {
+  session: SealSession | null;
+}
+
+/** GET /api/v1/sessions */
+export interface SessionList {
+  sessions: SealSession[];
+}
+
+export type SealStatus = "queued" | "sealing" | "sealed" | "failed" | "expired";
+
+/** A seal's progress. */
+export interface Seal {
+  id: string;
+  status: SealStatus;
+  path: string;
+  key: string;
+  targets: SealTarget[];
+  agent: AgentRef;
+  fingerprint: string;
+  created_at: string;
+  /** The pending change the value went into, once sealed. */
+  change_id?: string;
+  error?: string;
+}

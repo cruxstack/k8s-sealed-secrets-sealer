@@ -1,0 +1,86 @@
+package store
+
+import (
+	"errors"
+	"strings"
+	"time"
+)
+
+// ErrTooManySessions is returned when a user already has the most live
+// sessions allowed.
+var ErrTooManySessions = errors.New("too many open sessions")
+
+// Session is one user's set of pending changes to one repository, based on
+// a commit of its default branch. A user has at most one live session per
+// repository.
+type Session struct {
+	ID        string    `dynamodbav:"session_id"`
+	UserID    int64     `dynamodbav:"user_id"`
+	UserLogin string    `dynamodbav:"user_login"`
+	Owner     string    `dynamodbav:"owner"`
+	Repo      string    `dynamodbav:"repo"`
+	Branch    string    `dynamodbav:"branch"`
+	Commit    string    `dynamodbav:"commit"`
+	CreatedAt time.Time `dynamodbav:"created_at"`
+	UsedAt    time.Time `dynamodbav:"used_at"`
+	// ExpiresAt ends the session when it goes unused; using it moves this
+	// on, but never past EndsAt.
+	ExpiresAt time.Time `dynamodbav:"session_expires_at"`
+	// EndsAt is the latest a session lasts. Its seals and pending changes
+	// are kept until then.
+	EndsAt time.Time `dynamodbav:"session_ends_at"`
+}
+
+// Live reports whether the session is still open at now.
+func (s Session) Live(now time.Time) bool { return now.Before(s.ExpiresAt) }
+
+// RepoKey identifies a repository in session keys. GitHub names are case
+// insensitive.
+func RepoKey(owner, repo string) string { return strings.ToLower(owner + "/" + repo) }
+
+// Target is one SealedSecret document a seal writes to.
+type Target struct {
+	Namespace string `dynamodbav:"namespace"`
+	Name      string `dynamodbav:"name"`
+	Scope     string `dynamodbav:"scope"`
+	Region    string `dynamodbav:"region,omitempty"`
+}
+
+// Seal is a seal requested in a session: which command carries it and to
+// which agent, so its progress can be looked up.
+type Seal struct {
+	SessionID   string    `dynamodbav:"session_id"`
+	CommandID   string    `dynamodbav:"command_id"`
+	AgentID     string    `dynamodbav:"agent_id"`
+	Path        string    `dynamodbav:"path"`
+	Key         string    `dynamodbav:"key"`
+	Fingerprint string    `dynamodbav:"fingerprint"`
+	Targets     []Target  `dynamodbav:"targets"`
+	UserID      int64     `dynamodbav:"user_id"`
+	UserLogin   string    `dynamodbav:"user_login"`
+	CreatedAt   time.Time `dynamodbav:"created_at"`
+	// ExpiresAt is the session's EndsAt.
+	ExpiresAt time.Time `dynamodbav:"seal_expires_at"`
+}
+
+// Change is a pending change: a value sealed for every target document of a
+// file, waiting to be committed. There is one per file and key in a session;
+// sealing the same key into the same file again replaces it.
+type Change struct {
+	SessionID   string   `dynamodbav:"session_id"`
+	ID          string   `dynamodbav:"change_id"`
+	Path        string   `dynamodbav:"path"`
+	Key         string   `dynamodbav:"key"`
+	CommandID   string   `dynamodbav:"command_id"`
+	AgentID     string   `dynamodbav:"agent_id"`
+	Fingerprint string   `dynamodbav:"fingerprint"`
+	Targets     []Target `dynamodbav:"targets"`
+	// Ciphertexts holds one ciphertext per target, in order. It is stored
+	// apart from Targets so listings can leave it out. Nil when not read.
+	Ciphertexts []string  `dynamodbav:"ciphertexts,omitempty"`
+	UserID      int64     `dynamodbav:"user_id"`
+	UserLogin   string    `dynamodbav:"user_login"`
+	SealedAt    time.Time `dynamodbav:"sealed_at"`
+	// ExpiresAt is the session's EndsAt.
+	ExpiresAt time.Time `dynamodbav:"change_expires_at"`
+}

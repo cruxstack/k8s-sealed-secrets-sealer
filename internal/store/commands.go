@@ -1,6 +1,8 @@
 package store
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
@@ -30,8 +32,14 @@ type CommandRecord struct {
 	FinishedAt *time.Time `dynamodbav:"finished_at,omitempty"`
 	// Payload and Result are JSON.
 	Payload string `dynamodbav:"payload"`
-	Result  string `dynamodbav:"result,omitempty"`
-	Error   string `dynamodbav:"error,omitempty"`
+	// Secret is an encrypted value (a protocol.Envelope, as JSON) delivered
+	// as the payload's "value" field. It is stored apart so leasing can
+	// remove it: it reaches the agent once and is not kept after.
+	Secret string `dynamodbav:"secret,omitempty"`
+	// SessionID is the session a seal command's result is recorded in.
+	SessionID string `dynamodbav:"session_id,omitempty"`
+	Result    string `dynamodbav:"result,omitempty"`
+	Error     string `dynamodbav:"error,omitempty"`
 }
 
 // Open reports whether the command is still waiting or running at now.
@@ -39,13 +47,32 @@ func (c CommandRecord) Open(now time.Time) bool {
 	return (c.Status == CommandQueued || c.Status == CommandLeased) && now.Before(c.ExpiresAt)
 }
 
-// Protocol returns the command as sent to the agent.
-func (c CommandRecord) Protocol() protocol.Command {
+// Expired reports whether the command ran out of time without a result.
+func (c CommandRecord) Expired(now time.Time) bool {
+	return (c.Status == CommandQueued || c.Status == CommandLeased) && !now.Before(c.ExpiresAt)
+}
+
+// Protocol returns the command as sent to the agent, with its secret, if
+// any, as the payload's "value" field.
+func (c CommandRecord) Protocol() (protocol.Command, error) {
+	payload := json.RawMessage(c.Payload)
+	if c.Secret != "" {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return protocol.Command{}, fmt.Errorf("failed to decode payload of command %s: %w", c.ID, err)
+		}
+		fields["value"] = json.RawMessage(c.Secret)
+		merged, err := json.Marshal(fields)
+		if err != nil {
+			return protocol.Command{}, fmt.Errorf("failed to encode payload of command %s: %w", c.ID, err)
+		}
+		payload = merged
+	}
 	return protocol.Command{
 		ID:        c.ID,
 		Type:      c.Type,
 		CreatedAt: c.CreatedAt,
 		ExpiresAt: c.ExpiresAt,
-		Payload:   []byte(c.Payload),
-	}
+		Payload:   payload,
+	}, nil
 }

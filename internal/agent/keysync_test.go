@@ -155,7 +155,7 @@ func TestKeySync_EscrowThenRestoreInAnotherCluster(t *testing.T) {
 
 	// dst holds k2 only, and names its keys with another prefix
 	dst := newCluster(t, kms, escrow, "dev", k2.secret("custom-k2"), controllerDeployment("--key-prefix", "custom-"))
-	out, err := dst.sync.Restore(context.Background(), restorePayload(k1.fp, k2.fp))
+	out, err := dst.sync.Restore(context.Background(), protocol.Command{Payload: restorePayload(k1.fp, k2.fp)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestKeySync_EscrowThenRestoreInAnotherCluster(t *testing.T) {
 
 	// running it again changes nothing and does not restart
 	again := newCluster(t, kms, escrow, "dev", k1.secret("a"), k2.secret("b"), controllerDeployment())
-	out, err = again.sync.Restore(context.Background(), restorePayload(k1.fp))
+	out, err = again.sync.Restore(context.Background(), protocol.Command{Payload: restorePayload(k1.fp)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			escrow := &memEscrow{records: map[string]protocol.EscrowRecord{k1.fp: {Fingerprint: k1.fp, Envelope: tc.env}}}
 			c := newCluster(t, kms, escrow, "dev", controllerDeployment(tc.args...))
-			out, err := c.sync.Restore(ctx, restorePayload(k1.fp))
+			out, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload(k1.fp)})
 			msg := ""
 			if err != nil {
 				msg = err.Error()
@@ -247,12 +247,12 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 	// payload validation
 	c := newCluster(t, kms, &memEscrow{records: map[string]protocol.EscrowRecord{}}, "dev", controllerDeployment())
 	for _, raw := range []string{`{}`, `{"fingerprints":["md5:x"]}`, `{"fingerprints":["SHA256:x"],"extra":true}`, `not json`} {
-		if _, err := c.sync.Restore(ctx, json.RawMessage(raw)); err == nil || !strings.Contains(err.Error(), "invalid payload") {
+		if _, err := c.sync.Restore(ctx, protocol.Command{Payload: json.RawMessage(raw)}); err == nil || !strings.Contains(err.Error(), "invalid payload") {
 			t.Errorf("payload %s: err = %v", raw, err)
 		}
 	}
 	// a key with no escrow record fails, and is reported
-	out, err := c.sync.Restore(ctx, restorePayload("SHA256:missing"))
+	out, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload("SHA256:missing")})
 	if res := out.(protocol.KeysRestoreResult); err == nil || len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Error, "not found") {
 		t.Fatalf("missing escrow: err = %v, result = %+v", err, res)
 	}

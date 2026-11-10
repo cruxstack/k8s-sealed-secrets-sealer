@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
@@ -43,6 +44,11 @@ type Options struct {
 	// Repos gives signed-in users access to repositories; nil disables the
 	// repository API.
 	Repos *repos.Service
+	// Transit encrypts values for seal commands under TransitKeyID. It can
+	// only generate data keys: the control plane never decrypts a value.
+	// Sealing needs both Repos and Transit.
+	Transit      envelope.DataKeyGenerator
+	TransitKeyID string
 	// WebUI serves the web UI at /. Nil serves nothing there.
 	WebUI http.Handler
 	// HSTS sets Strict-Transport-Security, for deployments served over https.
@@ -76,6 +82,8 @@ type Server struct {
 	adminToken string
 	users      *userauth.Handler
 	repos      *repos.Service
+	transit    envelope.DataKeyGenerator
+	transitKey string
 	webUI      http.Handler
 	hsts       bool
 	now        func() time.Time
@@ -120,6 +128,8 @@ func New(opts Options) *Server {
 		adminToken: opts.AdminToken,
 		users:      opts.Users,
 		repos:      opts.Repos,
+		transit:    opts.Transit,
+		transitKey: opts.TransitKeyID,
 		webUI:      opts.WebUI,
 		hsts:       opts.HSTS,
 		now:        now,
@@ -157,6 +167,18 @@ func (s *Server) Handler() http.Handler {
 		if s.repos != nil {
 			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.listRepos))
 			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.listFiles))
+		}
+		if s.repos != nil && s.transit != nil {
+			// state-changing routes need the CSRF token
+			write := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireCSRF(h)) }
+			const session = "/api/v1/repos/{owner}/{repo}/session"
+			mux.HandleFunc("GET /api/v1/sessions", u.RequireUser(s.listSessions))
+			mux.HandleFunc("GET "+session, u.RequireUser(s.getSession))
+			mux.HandleFunc("POST "+session, write(s.createSession))
+			mux.HandleFunc("DELETE "+session+"/{id}", write(s.deleteSession))
+			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.requestSeal))
+			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
+			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
 		}
 	}
 

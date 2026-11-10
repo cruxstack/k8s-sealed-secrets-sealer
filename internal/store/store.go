@@ -60,8 +60,11 @@ type Store interface {
 	PutCommand(ctx context.Context, c CommandRecord) error
 	// Commands returns an agent's commands, oldest first.
 	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
+	// Command returns one of an agent's commands.
+	Command(ctx context.Context, agentID, id string) (CommandRecord, bool, error)
 	// LeaseCommand moves a queued, unexpired command to leased, and reports
-	// whether this call did; a command is leased at most once.
+	// whether this call did; a command is leased at most once. Leasing
+	// removes the command's secret.
 	LeaseCommand(ctx context.Context, agentID, id string, now time.Time) (bool, error)
 	// FinishCommand records the outcome of a leased, unexpired command, and
 	// reports whether this call did; a result is accepted at most once.
@@ -74,4 +77,34 @@ type Store interface {
 	Escrow(ctx context.Context, fingerprint string) (protocol.EscrowRecord, bool, error)
 	// Escrowed reports which of the fingerprints have an escrowed key.
 	Escrowed(ctx context.Context, fingerprints []string) (map[string]bool, error)
+
+	// CreateSession stores a session unless its user already has a live
+	// one for the repository, which it returns instead, reporting whether
+	// this call created one. It fails with ErrTooManySessions when the user
+	// already has max live sessions.
+	CreateSession(ctx context.Context, s Session, max int, now time.Time) (Session, bool, error)
+	// Session returns a user's live session for a repository (RepoKey).
+	Session(ctx context.Context, userID int64, repoKey string, now time.Time) (Session, bool, error)
+	// Sessions returns a user's live sessions.
+	Sessions(ctx context.Context, userID int64, now time.Time) ([]Session, error)
+	// TouchSession marks a live session used at now and moves its expiry to
+	// expires, and reports whether it did. The session must still be id.
+	TouchSession(ctx context.Context, userID int64, repoKey, id string, expires, now time.Time) (bool, error)
+	// DeleteSession ends a session if it is still id, and reports whether
+	// it did. Its seals and changes are left to expire.
+	DeleteSession(ctx context.Context, userID int64, repoKey, id string) (bool, error)
+
+	// PutSeal records a requested seal.
+	PutSeal(ctx context.Context, s Seal) error
+	// Seal returns a seal requested in a session.
+	Seal(ctx context.Context, sessionID, commandID string) (Seal, bool, error)
+	// PutChange stores a pending change, replacing the one for the same
+	// file and key unless that came from a newer seal, and reports whether
+	// it did.
+	PutChange(ctx context.Context, c Change) (bool, error)
+	// Changes returns a session's pending changes, with their ciphertexts
+	// only when asked for.
+	Changes(ctx context.Context, sessionID string, ciphertexts bool) ([]Change, error)
+	// DeleteChange removes a pending change and reports whether it existed.
+	DeleteChange(ctx context.Context, sessionID, id string) (bool, error)
 }

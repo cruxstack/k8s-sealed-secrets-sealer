@@ -1,14 +1,23 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { FileSearch, FileWarning, Lock } from "lucide-react";
+import { FileSearch, FileWarning, Lock, LockKeyhole } from "lucide-react";
 import { repoFilesQueryOptions } from "@/api/queries/repos";
+import { sessionQueryOptions } from "@/api/queries/sessions";
 import { extractApiError } from "@/api/client";
-import type { RepositoryFile, SealedSecretDocument } from "@/api/types";
+import type {
+  RepositoryFile,
+  SealSession,
+  SealedSecretDocument,
+} from "@/api/types";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/lib/auth";
 import { AccessBadge } from "./RepoList";
+import { PendingChanges } from "./PendingChanges";
+import { SealForm } from "./SealForm";
 
 function Dash() {
   return (
@@ -73,25 +82,66 @@ function DocumentRow({ doc }: { doc: SealedSecretDocument }) {
   );
 }
 
-function FileCard({ file }: { file: RepositoryFile }) {
+/** Why values cannot be sealed into a file, or null when they can. */
+function fileProblem(file: RepositoryFile): string | null {
   const docs = file.documents ?? [];
+  if (file.error) return "This file could not be read.";
+  if (docs.length === 0) return "This file has no SealedSecret for this env.";
+  if (docs.some((d) => d.problem))
+    return "A document in this file can't be sealed into.";
+  return null;
+}
+
+interface SealProps {
+  owner: string;
+  repo: string;
+  commit: string;
+  session: SealSession | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+function FileCard({
+  file,
+  seal,
+}: {
+  file: RepositoryFile;
+  /** Present when the user can write: sealing into this file. */
+  seal?: SealProps;
+}) {
+  const docs = file.documents ?? [];
+  const problem = fileProblem(file);
   return (
     <section
       aria-label={file.path}
       className="overflow-hidden rounded-xl border bg-card"
     >
-      <div className="flex items-baseline justify-between gap-4 border-b border-border px-4 py-3">
+      <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
         <h2
           className="truncate font-mono text-sm font-semibold"
           title={file.path}
         >
           {file.path}
         </h2>
-        {!file.error && (
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {docs.length === 1 ? "1 document" : `${docs.length} documents`}
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-3">
+          {!file.error && (
+            <span className="text-xs text-muted-foreground">
+              {docs.length === 1 ? "1 document" : `${docs.length} documents`}
+            </span>
+          )}
+          {seal && !seal.open && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={problem !== null}
+              title={problem ?? undefined}
+              onClick={() => seal.onOpenChange(true)}
+            >
+              <LockKeyhole className="mr-1.5 h-4 w-4" aria-hidden="true" />
+              Seal a value
+            </Button>
+          )}
+        </div>
       </div>
       {file.error ? (
         <p className="flex items-center gap-2 px-4 py-3 text-sm text-warning">
@@ -139,16 +189,35 @@ function FileCard({ file }: { file: RepositoryFile }) {
           </table>
         </div>
       )}
+      {seal?.open && problem === null && (
+        <SealForm
+          owner={seal.owner}
+          repo={seal.repo}
+          file={file}
+          commit={seal.commit}
+          session={seal.session}
+          onClose={() => seal.onOpenChange(false)}
+        />
+      )}
     </section>
   );
 }
 
-/** A repository's SealedSecret files for this env. */
+/**
+ * A repository's SealedSecret files for this env. With an open session the
+ * files are shown at the session's base commit, under its pending changes.
+ */
 export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
   const { env } = useAuth();
-  const { data, error, isPending } = useQuery(
-    repoFilesQueryOptions(owner, repo),
-  );
+  const sessionQuery = useQuery(sessionQueryOptions(owner, repo));
+  const session = sessionQuery.data ?? null;
+  const { data, error, isPending } = useQuery({
+    ...repoFilesQueryOptions(owner, repo, session?.commit),
+    // wait for the session, so the files are read at its commit
+    enabled: !sessionQuery.isPending,
+  });
+  const [sealing, setSealing] = useState<string | null>(null);
+  const canWrite = data?.repository.access === "write";
 
   return (
     <div className="space-y-6">
@@ -199,7 +268,11 @@ export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
             </p>
           </header>
 
-          {data.repository.access !== "write" && (
+          {canWrite && session && (
+            <PendingChanges owner={owner} repo={repo} session={session} />
+          )}
+
+          {!canWrite && (
             <p className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm">
               <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
               You can read this repository but not write to it. Sealing needs
@@ -240,7 +313,23 @@ export function RepoFiles({ owner, repo }: { owner: string; repo: string }) {
           ) : (
             <div className="space-y-4">
               {data.files.map((f) => (
-                <FileCard key={f.path} file={f} />
+                <FileCard
+                  key={f.path}
+                  file={f}
+                  seal={
+                    canWrite
+                      ? {
+                          owner,
+                          repo,
+                          commit: data.commit,
+                          session,
+                          open: sealing === f.path,
+                          onOpenChange: (open) =>
+                            setSealing(open ? f.path : null),
+                        }
+                      : undefined
+                  }
+                />
               ))}
             </div>
           )}

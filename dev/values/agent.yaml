@@ -21,6 +21,7 @@ capabilities:
   renewal: true
 
 kms:
+  transitKeyId: alias/sealer-transit
   escrowKeyId: alias/sealer-escrow
   region: us-east-1
   endpoint: http://local-kms.sealer-system.svc.cluster.local:8080

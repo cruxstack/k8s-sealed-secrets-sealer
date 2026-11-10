@@ -47,6 +47,7 @@ type DynamoAPI interface {
 	BatchGetItem(ctx context.Context, in *dynamodb.BatchGetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
 	GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	DeleteItem(ctx context.Context, in *dynamodb.DeleteItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 	Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	CreateTable(ctx context.Context, in *dynamodb.CreateTableInput, opts ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
 	DescribeTable(ctx context.Context, in *dynamodb.DescribeTableInput, opts ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
@@ -256,13 +257,33 @@ func (d *Dynamo) Commands(ctx context.Context, agentID string) ([]CommandRecord,
 	}
 }
 
+func (d *Dynamo) Command(ctx context.Context, agentID, id string) (CommandRecord, bool, error) {
+	res, err := d.api.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      &d.table,
+		Key:            commandKey(agentID, id),
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return CommandRecord{}, false, fmt.Errorf("failed to read command %s of agent %s: %w", id, agentID, err)
+	}
+	if len(res.Item) == 0 {
+		return CommandRecord{}, false, nil
+	}
+	var item commandItem
+	if err := attributevalue.UnmarshalMap(res.Item, &item); err != nil {
+		return CommandRecord{}, false, fmt.Errorf("failed to decode command %s of agent %s: %w", id, agentID, err)
+	}
+	return item.CommandRecord, true, nil
+}
+
 func (d *Dynamo) LeaseCommand(ctx context.Context, agentID, id string, now time.Time) (bool, error) {
 	at, err := attributevalue.Marshal(now)
 	if err != nil {
 		return false, fmt.Errorf("failed to encode lease time: %w", err)
 	}
+	// the secret reaches the agent in this lease's response and only there
 	return d.updateCommand(ctx, agentID, id, CommandQueued, now,
-		"SET #status = :to, leased_at = :at",
+		"SET #status = :to, leased_at = :at REMOVE secret",
 		map[string]types.AttributeValue{
 			":to": &types.AttributeValueMemberS{Value: CommandLeased},
 			":at": at,

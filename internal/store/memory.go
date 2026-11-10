@@ -18,6 +18,11 @@ type Memory struct {
 	// commands by agent ID, then command ID
 	commands map[string]map[string]CommandRecord
 	escrow   map[string]protocol.EscrowRecord
+	// sessions by user ID, then repository key; seals and changes by
+	// session ID, then command or change ID
+	sessions map[int64]map[string]Session
+	seals    map[string]map[string]Seal
+	changes  map[string]map[string]Change
 }
 
 // NewMemory returns an empty in-memory Store.
@@ -28,6 +33,9 @@ func NewMemory() *Memory {
 		replays:  map[string]time.Time{},
 		commands: map[string]map[string]CommandRecord{},
 		escrow:   map[string]protocol.EscrowRecord{},
+		sessions: map[int64]map[string]Session{},
+		seals:    map[string]map[string]Seal{},
+		changes:  map[string]map[string]Change{},
 	}
 }
 
@@ -98,6 +106,13 @@ func (m *Memory) Commands(_ context.Context, agentID string) ([]CommandRecord, e
 	return out, nil
 }
 
+func (m *Memory) Command(_ context.Context, agentID, id string) (CommandRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.commands[agentID][id]
+	return c, ok, nil
+}
+
 func (m *Memory) LeaseCommand(_ context.Context, agentID, id string, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -107,6 +122,7 @@ func (m *Memory) LeaseCommand(_ context.Context, agentID, id string, now time.Ti
 	}
 	c.Status = CommandLeased
 	c.LeasedAt = &now
+	c.Secret = ""
 	m.commands[agentID][id] = c
 	return true, nil
 }
@@ -150,6 +166,130 @@ func (m *Memory) Escrowed(_ context.Context, fingerprints []string) (map[string]
 		}
 	}
 	return out, nil
+}
+
+func (m *Memory) CreateSession(_ context.Context, s Session, maxSessions int, now time.Time) (Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := RepoKey(s.Owner, s.Repo)
+	live := 0
+	for k, existing := range m.sessions[s.UserID] {
+		if !existing.Live(now) {
+			continue
+		}
+		if k == key {
+			return existing, false, nil
+		}
+		live++
+	}
+	if live >= maxSessions {
+		return Session{}, false, ErrTooManySessions
+	}
+	if m.sessions[s.UserID] == nil {
+		m.sessions[s.UserID] = map[string]Session{}
+	}
+	m.sessions[s.UserID][key] = s
+	return s, true, nil
+}
+
+func (m *Memory) Session(_ context.Context, userID int64, repoKey string, now time.Time) (Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	if !ok || !s.Live(now) {
+		return Session{}, false, nil
+	}
+	return s, true, nil
+}
+
+func (m *Memory) Sessions(_ context.Context, userID int64, now time.Time) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Session{}
+	for _, s := range m.sessions[userID] {
+		if s.Live(now) {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return RepoKey(out[i].Owner, out[i].Repo) < RepoKey(out[j].Owner, out[j].Repo) })
+	return out, nil
+}
+
+func (m *Memory) TouchSession(_ context.Context, userID int64, repoKey, id string, expires, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	if !ok || s.ID != id || !s.Live(now) {
+		return false, nil
+	}
+	s.UsedAt, s.ExpiresAt = now, expires
+	m.sessions[userID][repoKey] = s
+	return true, nil
+}
+
+func (m *Memory) DeleteSession(_ context.Context, userID int64, repoKey, id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	if !ok || s.ID != id {
+		return false, nil
+	}
+	delete(m.sessions[userID], repoKey)
+	return true, nil
+}
+
+func (m *Memory) PutSeal(_ context.Context, s Seal) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seals[s.SessionID] == nil {
+		m.seals[s.SessionID] = map[string]Seal{}
+	}
+	m.seals[s.SessionID][s.CommandID] = s
+	return nil
+}
+
+func (m *Memory) Seal(_ context.Context, sessionID, commandID string) (Seal, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.seals[sessionID][commandID]
+	return s, ok, nil
+}
+
+func (m *Memory) PutChange(_ context.Context, c Change) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if prev, ok := m.changes[c.SessionID][c.ID]; ok && prev.CommandID > c.CommandID {
+		return false, nil
+	}
+	if m.changes[c.SessionID] == nil {
+		m.changes[c.SessionID] = map[string]Change{}
+	}
+	m.changes[c.SessionID][c.ID] = c
+	return true, nil
+}
+
+func (m *Memory) Changes(_ context.Context, sessionID string, ciphertexts bool) ([]Change, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Change{}
+	for _, c := range m.changes[sessionID] {
+		if !ciphertexts {
+			c.Ciphertexts = nil
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (m *Memory) DeleteChange(_ context.Context, sessionID, id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.changes[sessionID][id]; !ok {
+		return false, nil
+	}
+	delete(m.changes[sessionID], id)
+	return true, nil
 }
 
 // Key returns a recorded key, for tests.

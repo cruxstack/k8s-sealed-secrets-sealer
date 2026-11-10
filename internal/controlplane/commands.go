@@ -20,8 +20,9 @@ const (
 	// maxPollWait is the longest a commands poll is held, under API
 	// Gateway's integration timeout.
 	maxPollWait = 20 * time.Second
-	// maxResultBody bounds a command result.
-	maxResultBody = 64 << 10
+	// maxResultBody bounds a command result: a seal's ciphertexts, at most
+	// protocol.SealBudgetBytes in base64, with their names.
+	maxResultBody = 512 << 10
 	// maxResultError bounds a failed command's error message.
 	maxResultError = 1024
 )
@@ -75,6 +76,10 @@ func (s *Server) leaseCommands(ctx context.Context, agent *registry.Agent) ([]pr
 		if capability := protocol.CommandCapability[c.Type]; capability == "" || !agent.HasCapability(capability) {
 			continue
 		}
+		cmd, err := c.Protocol()
+		if err != nil {
+			return nil, err
+		}
 		ok, err := s.store.LeaseCommand(ctx, agent.ID, c.ID, now)
 		if err != nil {
 			return nil, err
@@ -85,7 +90,7 @@ func (s *Server) leaseCommands(ctx context.Context, agent *registry.Agent) ([]pr
 		}
 		s.logger.InfoContext(ctx, "command leased",
 			"event", "command.leased", "env", s.env, "agent_id", agent.ID, "command_id", c.ID, "type", c.Type)
-		leased = append(leased, c.Protocol())
+		leased = append(leased, cmd)
 	}
 	return leased, nil
 }
@@ -114,7 +119,7 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	ctx := r.Context()
-	cmd, found, err := s.findCommand(ctx, agent.ID, id)
+	cmd, found, err := s.store.Command(ctx, agent.ID, id)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to read command", "agent_id", agent.ID, "command_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -122,6 +127,10 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 	}
 	if !found {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if cmd.Type == protocol.CommandSeal {
+		s.finishSeal(w, r, agent, cmd, in)
 		return
 	}
 	ok, err := s.store.FinishCommand(ctx, agent.ID, id, in.Status, string(in.Result), in.Error, s.now().UTC())
@@ -136,19 +145,6 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 	}
 	s.logCommandResult(ctx, agent, cmd, in)
 	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": in.Status})
-}
-
-func (s *Server) findCommand(ctx context.Context, agentID, id string) (store.CommandRecord, bool, error) {
-	records, err := s.store.Commands(ctx, agentID)
-	if err != nil {
-		return store.CommandRecord{}, false, err
-	}
-	for _, c := range records {
-		if c.ID == id {
-			return c, true, nil
-		}
-	}
-	return store.CommandRecord{}, false, nil
 }
 
 // logCommandResult writes the alert events for a finished key command.

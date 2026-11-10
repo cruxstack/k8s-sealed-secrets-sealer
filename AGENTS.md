@@ -11,21 +11,21 @@
 - **Packages**:
   - `internal/config/` - reads and validates all configuration; nothing else reads the environment
   - `internal/protocol/` - the agent API's messages and capabilities; a change here is a protocol change
-  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API), shared by the server and Lambda entry points; key sync planning (escrow, restore, renewal) runs on each check-in
+  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API, user API), shared by the server and Lambda entry points; key sync planning (escrow, restore, renewal) runs on each check-in; sessions, seal requests (transit encryption, agent choice) and seal results becoming pending changes
   - `internal/agentauth/` - agent login (k8s-oidc: projected service-account tokens via go-oidc; aws-sts: signed sts:GetCallerIdentity forwarded to STS, with a host allowlist and replay protection) and agent session tokens
   - `internal/registry/` - the agent registry file: who may log in, with which identity and capabilities
-  - `internal/fleet/` - pure computation of agent health, the env key and missing keys (design section 7)
+  - `internal/fleet/` - pure computation of agent health, the env key, missing keys and which agent seals (design section 7)
   - `internal/store/` - persistence: DynamoDB, plus an in-memory store for tests
   - `internal/keys/` - sealing key fingerprints (the controller's own format) from certificates
   - `internal/envelope/` - KMS envelope encryption (data key + AES-256-GCM, bound to an encryption context), with a fake KMS for tests
-  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes, the command runner, key escrow and restore, and turning on key renewal
+  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes, the command runner, sealing (seal.v1), key escrow and restore, and turning on key renewal
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time
   - `internal/userauth/` - GitHub OAuth sign-in (org and team checks), user session cookies, CSRF
   - `internal/githubapp/` - the GitHub App client: App JWTs, least-privilege installation tokens, repository reads
   - `internal/manifest/` - finds an env's SealedSecret documents in a YAML file (scope, keys, why one cannot be sealed into)
-  - `internal/repos/` - repository access for signed-in users, checked against their own GitHub permission; SealedSecret discovery
+  - `internal/repos/` - repository access for signed-in users, checked against their own GitHub permission; SealedSecret discovery at the head or at a session's commit
   - `internal/webui/` - serves the web UI embedded from `internal/webui/dist/app` (built by `atmos web build`)
   - `internal/mockgithub/`, `cmd/mock-github/` - GitHub mock (OAuth, a GitHub App, fixture repositories in `internal/mockgithub/fixtures`) for tests and the local stack; never released
 - **Web UI**: `web/` (React, Vite, TanStack Router and Query, shadcn/ui). `atmos web check|test|build|dev`.

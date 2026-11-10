@@ -75,12 +75,25 @@ func run() error {
 
 	// a handler is registered only for capabilities this agent has
 	commands := agent.NewCommands(client, logger, nil)
-	var escrow agent.Escrower
-	if cfg.HasCapability(protocol.CapabilityKeys) {
-		kmsClient, err := newKMS(cfg)
-		if err != nil {
+	var kmsClient *kms.Client
+	if cfg.HasCapability(protocol.CapabilitySeal) || cfg.HasCapability(protocol.CapabilityKeys) {
+		if kmsClient, err = newKMS(cfg); err != nil {
 			return err
 		}
+	}
+	if cfg.HasCapability(protocol.CapabilitySeal) {
+		sealer := agent.NewSealer(agent.SealerOptions{
+			Keys:         inventory,
+			KMS:          kmsClient,
+			TransitKeyID: cfg.KMSTransitKeyID,
+			Env:          cfg.EnvName,
+			AgentID:      client.AgentID,
+			Logger:       logger,
+		})
+		commands.Handle(protocol.CommandSeal, sealer.Seal)
+	}
+	var escrow agent.Escrower
+	if cfg.HasCapability(protocol.CapabilityKeys) {
 		keySync := agent.NewKeySync(agent.KeySyncOptions{
 			Kube:        kube,
 			Namespace:   cfg.ControllerNamespace,
@@ -123,8 +136,8 @@ func run() error {
 	return g.Wait()
 }
 
-// newKMS returns the KMS client for the escrow key. Credentials come from the
-// SDK's default chain: EKS Pod Identity or IRSA in a cluster.
+// newKMS returns the KMS client for the transit and escrow keys. Credentials
+// come from the SDK's default chain: EKS Pod Identity or IRSA in a cluster.
 func newKMS(cfg *config.Agent) (*kms.Client, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
 	if err != nil {
@@ -135,7 +148,7 @@ func newKMS(cfg *config.Agent) (*kms.Client, error) {
 		region = awsCfg.Region
 	}
 	if region == "" {
-		return nil, errors.New("the keys capability needs a KMS region: set APP_KMS_REGION or AWS_REGION")
+		return nil, errors.New("the seal and keys capabilities need a KMS region: set APP_KMS_REGION or AWS_REGION")
 	}
 	return kms.NewFromConfig(awsCfg, func(o *kms.Options) {
 		o.Region = region

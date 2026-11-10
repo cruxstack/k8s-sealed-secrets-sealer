@@ -188,9 +188,9 @@ func (k *KeySync) keySecrets(ctx context.Context) (map[string]*corev1.Secret, er
 
 // Restore runs keys.restore.v1: it restores each escrowed key the controller
 // is missing, then restarts the controller once so it loads them.
-func (k *KeySync) Restore(ctx context.Context, raw json.RawMessage) (any, error) {
+func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error) {
 	var p protocol.KeysRestorePayload
-	if err := strictDecode(raw, &p); err != nil {
+	if err := strictDecode(cmd.Payload, &p); err != nil {
 		return nil, err
 	}
 	if len(p.Fingerprints) == 0 || len(p.Fingerprints) > protocol.MaxKeys {
