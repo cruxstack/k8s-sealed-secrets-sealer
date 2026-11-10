@@ -117,10 +117,18 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 				"fingerprint", rec.Fingerprint, "not_before", rec.NotBefore)
 		}
 	}
+	escrowNeeded, err := s.syncKeys(r.Context(), agent, state)
+	if err != nil {
+		// key sync catches up on a later check-in; the check-in itself is
+		// stored
+		s.logger.ErrorContext(r.Context(), "failed to plan key sync",
+			"event", "key.sync_failed", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "error", err)
+	}
 	s.logger.DebugContext(r.Context(), "agent checked in",
 		"event", "agent.checkin", "agent_id", agent.ID, "keys", len(state.Keys), "active", state.Controller.ActiveFingerprint)
 	httpserver.WriteJSON(w, http.StatusOK, protocol.CheckInResponse{
 		NextCheckInSeconds: int(fleet.CheckInInterval / time.Second),
+		EscrowNeeded:       escrowNeeded,
 	})
 }
 
@@ -170,10 +178,17 @@ func validateCheckIn(in protocol.CheckIn, agent *registry.Agent, now time.Time) 
 	if len(in.Commands) > maxCommands {
 		fail("too many commands")
 	}
+	var commands []string
 	for _, c := range in.Commands {
-		if c == "" || len(c) > maxShortField {
+		switch {
+		case c == "" || len(c) > maxShortField:
 			fail("invalid command type")
-			break
+		case slices.Contains(commands, c):
+			fail("duplicate command type %q", c)
+		default:
+			// types this control plane does not know are kept for the
+			// fleet view but never sent
+			commands = append(commands, c)
 		}
 	}
 
@@ -247,7 +262,7 @@ func validateCheckIn(in protocol.CheckIn, agent *registry.Agent, now time.Time) 
 		AgentVersion: in.AgentVersion,
 		Protocol:     in.Protocol,
 		Capabilities: capabilities,
-		Commands:     in.Commands,
+		Commands:     commands,
 		Controller:   ctrl,
 		Keys:         refs,
 		KeysComplete: in.KeysComplete,

@@ -398,7 +398,9 @@ certificates only). From those reports the control plane computes:
   that has never checked in is ignored and flagged in the UI. A cluster leaves
   scope only when it is removed from the registry.
 - **Env key:** the key with the newest `NotBefore` that is in every in-scope
-  cluster's key set.
+  cluster's key set. Certificates have one-second precision, so keys made in
+  the same second tie; the tie goes to the greater fingerprint, so the env
+  key never depends on the order agents report in.
 
 To choose the agent for a seal:
 
@@ -449,35 +451,55 @@ KMS key:
 | Control plane | none                                                    |
 | Admins        | none, except a separate break-glass role                |
 
-The encryption context is `{env, fingerprint}`. Key secrets are larger than
-the 4 KB limit of KMS `Encrypt`, so escrow uses envelope encryption: a data key
-from `GenerateDataKey` encrypts the key secret's `tls.crt` and `tls.key` with
-AES-256-GCM, and the escrow record stores the wrapped data key, nonce and
-ciphertext next to the public certificate.
+The encryption context is `{env, fingerprint, purpose: key-escrow}`. Key
+secrets are larger than the 4 KB limit of KMS `Encrypt`, so escrow uses
+envelope encryption: a data key from `GenerateDataKey` encrypts the key
+secret's `tls.crt` and `tls.key` with AES-256-GCM, and the escrow record
+stores the wrapped data key, nonce and ciphertext next to the public
+certificate. The encryption context is both the KMS encryption context and
+the GCM additional data. An agent's env comes from its Helm values, not from
+the control plane: an agent refuses to log in to a control plane serving
+another env.
 
-**Upload.** When an agent finds a key in its controller's key set that the
-control plane has no escrow for, it encrypts and uploads it. The control plane
-parses the public certificate, checks that its fingerprint matches the URL, and
-stores the record with a conditional write (the first upload wins). It can
-check the certificate but cannot read or verify the private key.
+**Upload.** Each check-in response lists the agent's keys that have no
+escrow record (`escrow_needed`), for agents with the `keys` capability. The
+agent encrypts and uploads them. The control plane parses the public
+certificate, checks that its fingerprint matches the URL, that the agent's
+latest check-in reported that key, and that the envelope's context is this
+env and key, and stores the record with a conditional write (the first upload
+wins). It can check the certificate but cannot read or verify the private
+key. Fingerprints are base64, which can contain `/`, so in URLs they use the
+URL-safe alphabet (`+` as `-`, `/` as `_`).
 
-**Restore.** When the control plane sees an in-scope cluster missing an
-escrowed key, it queues `keys.restore.v1` for that cluster's agent with the
-missing fingerprints. The agent, for each one:
+**Restore.** When an in-scope cluster's agent checks in missing an escrowed
+key, the control plane queues `keys.restore.v1` for that agent with the
+missing fingerprints. The agent, for each one not already present:
 
-1. downloads the escrow record and decrypts it with KMS, using the expected
-   `{env, fingerprint}` context;
+1. downloads the escrow record and decrypts it with KMS, naming its own
+   configured escrow key and the expected context (neither is taken from the
+   record, so a record made under another key or for another env or key does
+   not open);
 2. checks that the private key matches the certificate and the certificate's
    fingerprint matches the one requested;
 3. creates a `kubernetes.io/tls` Secret in the controller namespace with the
-   controller's key name prefix and the label
-   `sealedsecrets.bitnami.com/sealed-secrets-key=active`, annotated with the
-   fingerprint and `restored-from: escrow`.
+   controller's key name prefix (its `--key-prefix`) and the label
+   `sealedsecrets.bitnami.com/sealed-secrets-key=active`, annotated with
+   `sealer.cruxstack.io/fingerprint`,
+   `sealer.cruxstack.io/restored-from: escrow` and the time.
 
-After restoring all missing keys, the agent restarts the controller once (by
-patching the Deployment's pod template annotation). This is required: the
-controller lists key secrets only at startup (`initKeyRegistry`) and does not
-watch for new ones.
+After restoring the missing keys, the agent restarts the controller once, the
+way `kubectl rollout restart` does (the pod template annotation
+`kubectl.kubernetes.io/restartedAt`). This is required: the controller lists
+key secrets only at startup (`initKeyRegistry`) and does not watch for new
+ones. The agent refuses the whole command if its controller orders keys by
+`SecretCreationTimestamp`.
+
+Key commands expire after 10 minutes. The control plane does not queue a
+restore for a key that an open restore command already covers, nor for 2
+minutes after one succeeded (until the agent's next inventory shows the key)
+or 5 minutes after one failed. Each decision is about the agent that is
+checking in, and an agent checks in serially, so concurrent check-ins from
+different agents cannot queue duplicate commands.
 
 ```mermaid
 sequenceDiagram
@@ -491,7 +513,7 @@ sequenceDiagram
 
   H->>CP: check-in reports K
   CP-->>H: K has no escrow record
-  H->>KMS: GenerateDataKey {env, fingerprint K}
+  H->>KMS: GenerateDataKey {env, fingerprint K, purpose}
   H->>H: encrypt tls.crt and tls.key
   H->>CP: PUT /agent/v1/escrow/K
   CP->>CP: certificate fingerprint matches K
@@ -500,7 +522,7 @@ sequenceDiagram
   CP->>DB: queue keys.restore.v1 [K] for M
   M->>CP: lease keys.restore.v1
   M->>CP: GET /agent/v1/escrow/K
-  M->>KMS: Decrypt {env, fingerprint K}
+  M->>KMS: Decrypt with its escrow key, {env, fingerprint K, purpose}
   M->>M: private key matches certificate,<br/>certificate matches K
   M->>C: create the key Secret (label active)
   M->>C: restart (keys load only at startup)
@@ -509,10 +531,15 @@ sequenceDiagram
 
 **Key order.** The controller orders keys by `--key-order-priority`, which
 defaults to `CertNotBefore`. With that default a restored key keeps its place
-in the order, so the newest key is the same in every cluster. With
-`SecretCreationTimestamp`, a restored old key would become a controller's
-newest. Agents report the setting; the control plane flags any cluster not
-using `CertNotBefore` and excludes it from key comparison until fixed.
+in the order, so the newest key is the same in every cluster. The exception
+is keys made in the same second, such as by clusters created together: each
+controller breaks the tie its own way and may keep its own key as active.
+That is harmless, because sealing uses the env key and every cluster holds
+every key, and the next renewal produces a key that is newest everywhere.
+With `SecretCreationTimestamp`, a restored old key would become a
+controller's newest. Agents report the setting; the control plane flags any
+cluster not using `CertNotBefore` and excludes it from key comparison until
+fixed.
 
 **Authenticity.** Only agent roles can encrypt under the escrow key, and
 AES-GCM with a bound encryption context detects tampering. The control plane
@@ -526,10 +553,12 @@ level or above:
 | ----------------------- | ------------------------------------------------- |
 | `key.discovered`        | A check-in reports a fingerprint never seen.      |
 | `key.escrowed`          | An agent uploads a key to escrow.                 |
+| `key.restore_queued`    | A restore is queued for a cluster missing keys.   |
 | `key.restored`          | An agent restores a key into its controller.      |
 | `key.sync_failed`       | An upload or restore fails.                       |
 | `key.order_mismatch`    | A controller does not order keys by NotBefore.    |
 | `keys.out_of_sync`      | A seal was refused because no env key exists.     |
+| `renewal.enable_queued` | No cluster renews; one is asked to.               |
 | `renewal.enabled`       | An agent turned on key renewal.                   |
 | `controller.restarted`  | An agent restarted its controller.                |
 
@@ -551,11 +580,14 @@ default; `0` turns renewal off). Two postures are supported:
   holds it. The cost is more keys over time, which key retirement will handle
   (section 16).
 - **Renewal on in at least one cluster.** Agents report their controller's
-  renew period. If no in-scope cluster in the env has renewal on, the control
-  plane sends `renewal.enable.v1` to one healthy agent with the `renewal`
-  capability (chosen deterministically, by agent ID), which patches its
-  controller Deployment's arguments to set the configured period and logs
-  `renewal.enabled`.
+  renew period. If no in-scope cluster in the env is known to have renewal
+  on, the control plane sends `renewal.enable.v1` to one healthy agent that
+  has the `renewal` capability and can read its controller's flags, chosen
+  deterministically (the lowest agent ID). The agent patches its controller
+  Deployment's arguments to set the configured period (`keyRenewPeriod` in
+  the control plane's chart, 30 days by default), which rolls the
+  controller, and logs `renewal.enabled`. If renewal is already on, it
+  changes nothing. If the chosen agent goes down, the next one is asked.
 
 ## 10. Security model
 
@@ -645,9 +677,12 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
   controller settings, key set, commands in flight.
-- **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`,
-  `expired`), lease time, expiry, payload, result. A seal's encrypted value is
-  removed when the command is leased.
+- **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`;
+  past its expiry without a result it counts as expired), lease and finish
+  times, expiry, payload, result. The expiry is also kept as epoch
+  milliseconds (`deadline`), so leasing and results are conditional writes
+  that check it. A seal's encrypted value is removed when the command is
+  leased.
 - **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
   Which clusters hold a key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
@@ -808,7 +843,9 @@ Each step is one pull request or a few:
    the seal command, and the end-to-end decrypt tests. The fleet page
    arrives with the UI; until users can sign in, fleet data stays behind the
    admin API rather than on an unauthenticated page.
-4. **Keys:** escrow, sync, renewal management and the alert events.
+4. **Keys:** escrow, sync, renewal management and the alert events. Built
+   before the sealing half of step 3, because sealing needs an env key and
+   the simulated clusters start with keys of their own.
 5. **Release:** images, the Lambda package and the Helm charts.
 
 The Terraform module repository follows step 5.

@@ -13,10 +13,24 @@ identity:
   # Tilt sets it to the control plane's publicURL for this stack
   audience: http://localhost:4100
 
+env: dev
+
 capabilities:
   seal: true
   keys: true
   renewal: true
+
+kms:
+  escrowKeyId: alias/sealer-escrow
+  region: us-east-1
+  endpoint: http://local-kms.sealer-system.svc.cluster.local:8080
+
+# local KMS accepts any credentials; these are not secrets
+extraEnv:
+  - name: AWS_ACCESS_KEY_ID
+    value: local
+  - name: AWS_SECRET_ACCESS_KEY
+    value: local
 
 # faster than the 15s default, so the local stack settles quickly
 checkinInterval: 5s

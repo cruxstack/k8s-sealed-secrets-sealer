@@ -1,6 +1,7 @@
 // Package agent runs beside a sealed-secrets controller. On every interval
 // it reads the controller's keys and settings and checks in with the control
-// plane; sealing and key sync build on this loop.
+// plane, uploading keys the env has no escrowed copy of; alongside, it polls
+// for commands and runs them.
 package agent
 
 import (
@@ -27,14 +28,24 @@ type CheckInClient interface {
 	CheckIn(ctx context.Context, in protocol.CheckIn) (*protocol.CheckInResponse, error)
 }
 
+// Escrower uploads keys the control plane has no escrowed copy of.
+type Escrower interface {
+	Escrow(ctx context.Context, fingerprints []string)
+}
+
 // Options configures an Agent.
 type Options struct {
 	Inventory    Collector
 	ControlPlane CheckInClient
 	Interval     time.Duration
 	Capabilities []string
-	Logger       *slog.Logger
-	Version      string
+	// Commands are the command types the agent runs.
+	Commands []string
+	// Escrow uploads keys after a check-in asks for them; nil without the
+	// keys capability.
+	Escrow  Escrower
+	Logger  *slog.Logger
+	Version string
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -45,6 +56,8 @@ type Agent struct {
 	controlPlane CheckInClient
 	interval     time.Duration
 	capabilities []string
+	commands     []string
+	escrow       Escrower
 	logger       *slog.Logger
 	version      string
 	now          func() time.Time
@@ -69,6 +82,8 @@ func New(opts Options) *Agent {
 		controlPlane: opts.ControlPlane,
 		interval:     opts.Interval,
 		capabilities: opts.Capabilities,
+		commands:     opts.Commands,
+		escrow:       opts.Escrow,
 		logger:       logger,
 		version:      opts.Version,
 		now:          now,
@@ -103,11 +118,15 @@ func (a *Agent) cycle(ctx context.Context) {
 	}
 	a.noteActiveKey(ctx, report)
 
-	_, err = a.controlPlane.CheckIn(ctx, protocol.CheckIn{
+	commands := a.commands
+	if commands == nil {
+		commands = []string{}
+	}
+	resp, err := a.controlPlane.CheckIn(ctx, protocol.CheckIn{
 		Protocol:     protocol.Version,
 		AgentVersion: a.version,
 		Capabilities: a.capabilities,
-		Commands:     []string{},
+		Commands:     commands,
 		Controller:   report.Controller,
 		Keys:         report.Keys,
 		KeysComplete: report.Complete,
@@ -124,6 +143,9 @@ func (a *Agent) cycle(ctx context.Context) {
 	if first {
 		a.logger.InfoContext(ctx, "checked in with the control plane",
 			"event", "agent.checked_in", "keys", len(report.Keys), "keys_complete", report.Complete)
+	}
+	if a.escrow != nil && len(resp.EscrowNeeded) > 0 {
+		a.escrow.Escrow(ctx, resp.EscrowNeeded)
 	}
 }
 

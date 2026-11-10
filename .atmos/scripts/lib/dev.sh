@@ -25,8 +25,9 @@ BUILD_DIR=".tools/build"
 # The local control plane's admin token, from its local-only Secret.
 LOCAL_ADMIN_TOKEN="$(sed -n 's/^  APP_ADMIN_TOKEN: *//p' dev/k3d/control-plane-secret.yaml)"
 
-# DynamoDB Local, for the integration tests that run without a cluster.
+# AWS emulators, for the integration tests that run without a cluster.
 DYNAMODB_LOCAL_IMAGE="amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86"
+LOCAL_KMS_IMAGE="nsmithuk/local-kms:3.11.7@sha256:360d7377b6f3687c89a622236791e4fa3f7316366267b437829edbdfa8a5fc60"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi

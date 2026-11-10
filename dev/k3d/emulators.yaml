@@ -1,37 +1,8 @@
 # Local stand-ins for AWS services, in namespace sealer-system. The control
 # plane and agents use the real AWS SDK with their endpoints pointed here.
 #
-# The KMS seed keys below are throwaway values for this local stack only.
-# They are public, protect nothing, and must never be used anywhere else.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: local-kms-seed
-  namespace: sealer-system
-  labels:
-    app.kubernetes.io/name: sealer-emulator
-    app.kubernetes.io/component: kms
-data:
-  seed.yaml: |
-    Keys:
-      Symmetric:
-        Aes:
-          - Metadata:
-              KeyId: 2ee47573-3fd6-4204-a872-018797d24a3e
-              Description: transit key (local only)
-            BackingKeys:
-              - cc256fa3bba1f05d9e566bc2281ed5f01f0d123d54a22d980671d6144b81e969
-          - Metadata:
-              KeyId: c32aaf1d-d72d-490d-b529-e4cf4d67cc79
-              Description: escrow key (local only)
-            BackingKeys:
-              - 24f1e4a5d1280d15ab8d502e905b1ca57fd90a4ed2e977f890f9b92f524252c4
-    Aliases:
-      - AliasName: alias/sealer-transit
-        TargetKeyId: 2ee47573-3fd6-4204-a872-018797d24a3e
-      - AliasName: alias/sealer-escrow
-        TargetKeyId: c32aaf1d-d72d-490d-b529-e4cf4d67cc79
----
+# local KMS reads its keys from the local-kms-seed ConfigMap, which the
+# Tiltfile builds from dev/local-kms/seed.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

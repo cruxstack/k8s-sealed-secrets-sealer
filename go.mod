@@ -8,10 +8,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.17
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.20
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.73.2
+	github.com/aws/aws-sdk-go-v2/service/kms v1.62.5
 	github.com/bitnami/sealed-secrets v0.41.2
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/oklog/ulid/v2 v2.1.2
 	golang.org/x/sync v0.25.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2

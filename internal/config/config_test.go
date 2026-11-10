@@ -36,6 +36,7 @@ func agentEnv(extra map[string]string) map[string]string {
 	vars := map[string]string{
 		"APP_CONTROLLER_NAMESPACE": "sealed-secrets",
 		"APP_CONTROL_PLANE_URL":    "https://sealer.dev.example.com",
+		"APP_ENV_NAME":             "dev",
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -56,6 +57,9 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	}
 	if cfg.AdminToken != "" || cfg.DynamoDBCreateTable {
 		t.Errorf("admin and create-table must be off by default: %+v", cfg)
+	}
+	if cfg.KeyRenewPeriod != 720*time.Hour {
+		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)
 	}
 }
 
@@ -101,6 +105,25 @@ func TestLoadAgent_Defaults(t *testing.T) {
 	if len(cfg.Capabilities) != 1 || !cfg.HasCapability("seal") {
 		t.Errorf("Capabilities = %v, want [seal]", cfg.Capabilities)
 	}
+	if cfg.EnvName != "dev" || cfg.KMSEscrowKeyID != "" || cfg.KMSEndpoint != "" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadAgent_KeysNeedEscrowKey(t *testing.T) {
+	vars := agentEnv(map[string]string{"APP_CAPABILITIES": "seal,keys"})
+	if _, err := loadAgent(env(vars)); err == nil || !strings.Contains(err.Error(), "APP_KMS_ESCROW_KEY_ID is required") {
+		t.Fatalf("keys without an escrow key: %v", err)
+	}
+	vars["APP_KMS_ESCROW_KEY_ID"] = "alias/sealer-escrow"
+	vars["APP_KMS_ENDPOINT"] = "http://local-kms:8080"
+	cfg, err := loadAgent(env(vars))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KMSEscrowKeyID != "alias/sealer-escrow" || cfg.KMSEndpoint != "http://local-kms:8080" {
+		t.Errorf("cfg = %+v", cfg)
+	}
 }
 
 func TestLoadAgent_RequiresHTTPSUnlessAllowed(t *testing.T) {
@@ -129,6 +152,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_CONTROLLER_NAMESPACE is required",
 		"APP_CONTROLLER_NAME must be a DNS-1123 label",
 		"APP_CONTROL_PLANE_URL is required",
+		"APP_ENV_NAME is required",
 		"APP_CHECKIN_INTERVAL must be between",
 		`unknown capability "root"`,
 		"APP_LOG_LEVEL must be",
@@ -141,7 +165,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 }
 
 func TestLoadAgent_Capabilities(t *testing.T) {
-	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal"})))
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal", "APP_KMS_ESCROW_KEY_ID": "alias/escrow"})))
 	if err != nil {
 		t.Fatal(err)
 	}

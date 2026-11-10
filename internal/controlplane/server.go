@@ -43,9 +43,21 @@ type Options struct {
 	WebUI http.Handler
 	// HSTS sets Strict-Transport-Security, for deployments served over https.
 	HSTS bool
+	// KeyRenewPeriod is the period renewal.enable.v1 sets when no cluster
+	// renews its key. Zero means DefaultKeyRenewPeriod.
+	KeyRenewPeriod time.Duration
+	// PollInterval is how often a held commands poll checks for new
+	// commands. Zero means DefaultPollInterval.
+	PollInterval time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
+
+// Defaults for Options.
+const (
+	DefaultKeyRenewPeriod = 720 * time.Hour
+	DefaultPollInterval   = 500 * time.Millisecond
+)
 
 // Server is the control plane's HTTP handler. The same handler runs behind
 // the HTTP server and the Lambda adapter.
@@ -63,10 +75,15 @@ type Server struct {
 	hsts       bool
 	now        func() time.Time
 
+	keyRenewPeriod time.Duration
+	pollInterval   time.Duration
+
 	// knownKeys caches fingerprints already recorded, so repeated check-ins
-	// do not repeat conditional writes. Losing it only costs writes.
-	knownMu   sync.Mutex
-	knownKeys map[string]bool
+	// do not repeat conditional writes; knownEscrow caches fingerprints with
+	// an escrowed copy. Losing either only costs reads and writes.
+	knownMu     sync.Mutex
+	knownKeys   map[string]bool
+	knownEscrow map[string]bool
 }
 
 // New returns a Server. It makes no network calls.
@@ -78,6 +95,14 @@ func New(opts Options) *Server {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
+	}
+	keyRenewPeriod := opts.KeyRenewPeriod
+	if keyRenewPeriod <= 0 {
+		keyRenewPeriod = DefaultKeyRenewPeriod
+	}
+	pollInterval := opts.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = DefaultPollInterval
 	}
 	return &Server{
 		logger:     logger,
@@ -92,7 +117,11 @@ func New(opts Options) *Server {
 		webUI:      opts.WebUI,
 		hsts:       opts.HSTS,
 		now:        now,
-		knownKeys:  map[string]bool{},
+
+		keyRenewPeriod: keyRenewPeriod,
+		pollInterval:   pollInterval,
+		knownKeys:      map[string]bool{},
+		knownEscrow:    map[string]bool{},
 	}
 }
 
@@ -104,6 +133,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /agent/v1/session", s.agentSession)
 	mux.HandleFunc("POST /agent/v1/checkin", s.requireAgent(s.agentCheckIn))
+	mux.HandleFunc("GET /agent/v1/commands", s.requireAgent(s.agentCommands))
+	mux.HandleFunc("POST /agent/v1/commands/{id}/result", s.requireAgent(s.agentCommandResult))
+	mux.HandleFunc("PUT /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentPutEscrow))
+	mux.HandleFunc("GET /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentGetEscrow))
 
 	if s.adminToken != "" {
 		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.fleet))

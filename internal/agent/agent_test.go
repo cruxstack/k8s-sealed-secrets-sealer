@@ -24,9 +24,10 @@ type fakeInventory struct {
 func (f *fakeInventory) Collect(context.Context) (Report, error) { return f.report, f.err }
 
 type fakeControlPlane struct {
-	mu   sync.Mutex
-	got  []protocol.CheckIn
-	errs []error
+	mu     sync.Mutex
+	got    []protocol.CheckIn
+	errs   []error
+	escrow []string
 }
 
 func (f *fakeControlPlane) CheckIn(_ context.Context, in protocol.CheckIn) (*protocol.CheckInResponse, error) {
@@ -40,8 +41,12 @@ func (f *fakeControlPlane) CheckIn(_ context.Context, in protocol.CheckIn) (*pro
 			return nil, err
 		}
 	}
-	return &protocol.CheckInResponse{NextCheckInSeconds: 15}, nil
+	return &protocol.CheckInResponse{NextCheckInSeconds: 15, EscrowNeeded: f.escrow}, nil
 }
+
+type recordingEscrow struct{ got [][]string }
+
+func (r *recordingEscrow) Escrow(_ context.Context, fps []string) { r.got = append(r.got, fps) }
 
 func reportWith(t *testing.T) Report {
 	t.Helper()
@@ -151,5 +156,30 @@ func TestAgent_RunStopsWithContext(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+func TestAgent_EscrowsWhatTheControlPlaneAsksFor(t *testing.T) {
+	cp := &fakeControlPlane{}
+	esc := &recordingEscrow{}
+	a := New(Options{
+		Inventory:    &fakeInventory{report: reportWith(t)},
+		ControlPlane: cp,
+		Interval:     15 * time.Second,
+		Commands:     []string{protocol.CommandKeysRestore},
+		Escrow:       esc,
+		Logger:       slog.New(slog.DiscardHandler),
+	})
+	a.cycle(context.Background())
+	if len(esc.got) != 0 {
+		t.Fatalf("escrowed without being asked: %v", esc.got)
+	}
+	cp.escrow = []string{"SHA256:a"}
+	a.cycle(context.Background())
+	if len(esc.got) != 1 || esc.got[0][0] != "SHA256:a" {
+		t.Fatalf("escrow calls = %v", esc.got)
+	}
+	if got := cp.got[1].Commands; len(got) != 1 || got[0] != protocol.CommandKeysRestore {
+		t.Fatalf("check-in commands = %v", got)
 	}
 }

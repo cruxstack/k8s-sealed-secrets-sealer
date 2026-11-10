@@ -170,6 +170,63 @@ done
 [[ "$healthy" == "$expected" ]] || die "only ${healthy}/${expected} agents are healthy: ${fleet}"
 check "all ${expected} agents check in and are healthy"
 
+[[ "$(api GET "/agent/v1/escrow/SHA256:x" "" | cut -d' ' -f1)" == 401 ]] || die "escrow answered without a session"
+[[ "$(api GET "/agent/v1/commands" "" | cut -d' ' -f1)" == 401 ]] || die "commands answered without a session"
+check "escrow and commands require a session token"
+
+# --- key sync: every simulated cluster starts with its own key. Agents
+# escrow them, each cluster restores the others' keys from escrow, and the
+# control plane turns key renewal on in exactly one cluster. ---
+synced() {
+  jq -e --argjson n "$expected" '
+    .keys_in_sync
+    and ([.agents[] | select(.healthy and (.keys | length) == $n and (.missing_keys | length) == 0)] | length) == $n
+    and ([.agents[] | select(.controller.key_renew_period != "0s")] | length) == 1
+  ' <<<"$1" >/dev/null 2>&1
+}
+for _ in $(seq 1 120); do
+  fleet="$(api GET /api/v1/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
+  synced "$fleet" && break
+  sleep 2
+done
+synced "$fleet" || die "keys did not converge: $(jq -c '{keys_in_sync, env_key: .env_key.fingerprint, agents: [.agents[] | {id, healthy, keys: [.keys[].fingerprint], missing_keys, active: .controller.active_fingerprint, renew: .controller.key_renew_period}]}' <<<"$fleet")"
+env_key="$(jq -r .env_key.fingerprint <<<"$fleet")"
+check "keys converge: every cluster holds all ${expected} keys (env key ${env_key})"
+
+restored=0
+for name in $(stack_clusters); do
+  n="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-sealed-secrets" get secrets \
+    -l sealedsecrets.bitnami.com/sealed-secrets-key=active -o json \
+    | jq '[.items[] | select(.metadata.annotations["sealer.cruxstack.io/restored-from"] == "escrow")] | length')"
+  [[ "$n" == "$((expected - 1))" ]] || die "cluster ${name} restored ${n} keys from escrow, want $((expected - 1))"
+  restored=$((restored + n))
+done
+check "each cluster restored the other clusters' keys from escrow (${restored} restores)"
+
+escrowed="$(log_events sealer-system sealer-control-plane key.escrowed | wc -l | tr -d ' ')"
+[[ "$escrowed" == "$expected" ]] || die "the control plane logged ${escrowed} key.escrowed events, want ${expected}"
+check "the control plane logged key.escrowed once per key"
+
+renewing="$(jq -r '[.agents[] | select(.controller.key_renew_period != "0s") | .id] | join(",")' <<<"$fleet")"
+[[ "$renewing" == "$(stack_clusters | sort | head -n 1)" ]] || die "renewal was turned on in ${renewing}, want the lowest agent ID"
+args="$(kubectl --context "$KUBE_CONTEXT" -n "${renewing}-sealed-secrets" get deploy sealed-secrets-controller \
+  -o jsonpath='{.spec.template.spec.containers[0].args}')"
+grep -Eq -- '--key-renew-period(=|",")720h0m0s"' <<<"$args" || die "controller ${renewing} args do not renew: ${args}"
+check "key renewal is on in exactly one cluster (${renewing})"
+
+# The env key's certificate, from a cluster that restored it from escrow.
+# The simulated controllers generate their keys in the same second, so each
+# may prefer its own key as active; the env key is the control plane's
+# deterministic choice among them, and sealing uses it.
+for name in $(stack_clusters); do
+  kubectl --context "$KUBE_CONTEXT" -n "${name}-sealed-secrets" get secrets \
+    -l sealedsecrets.bitnami.com/sealed-secrets-key=active -o json \
+    | jq -r --arg fp "$env_key" '.items[] | select(.metadata.annotations["sealer.cruxstack.io/fingerprint"] == $fp)
+        | .data["tls.crt"]' | head -n 1 | base64 -d >"${work}/env-key.pem" 2>/dev/null || true
+  [[ -s "${work}/env-key.pem" ]] && break
+done
+[[ -s "${work}/env-key.pem" ]] || die "no cluster restored the env key ${env_key}"
+
 while read -r name; do
   agent="$(jq --arg id "$name" '.agents[] | select(.id == $id)' <<<"$fleet")"
   [[ "$(jq -r .keys_complete <<<"$agent")" == true ]] || die "agent ${name} did not report its full key set"
@@ -177,7 +234,7 @@ while read -r name; do
   [[ "$active" == SHA256:* ]] || die "agent ${name} reported no active key"
   jq -e --arg fp "$active" '[.keys[].fingerprint] | index($fp) != null' <<<"$agent" >/dev/null \
     || die "agent ${name}'s key set lacks its active key"
-  [[ "$(jq -r '.controller.key_renew_period + " " + .controller.key_order_priority' <<<"$agent")" == "720h0m0s CertNotBefore" ]] \
+  [[ "$(jq -r .controller.key_order_priority <<<"$agent")" == CertNotBefore ]] \
     || die "agent ${name} reported unexpected controller flags: $(jq -c .controller <<<"$agent")"
   check "agent ${name} reports its controller's keys and flags (${active})"
 
@@ -190,15 +247,13 @@ while read -r name; do
   done
   check "agent ${name} can reach only its own controller"
 
-  # The controller really serves its apps namespace: a value sealed with its
-  # certificate comes back as the same plaintext Secret.
+  # A value sealed with the env key's certificate unseals in every cluster:
+  # in all but the one that generated it, the key arrived through escrow.
   apps_ns="${name}-apps"
   value="e2e-$(openssl rand -hex 12)"
-  kubectl --context "$KUBE_CONTEXT" get --raw \
-    "/api/v1/namespaces/${name}-sealed-secrets/services/http:sealed-secrets-controller:http/proxy/v1/cert.pem" >"${work}/${name}.pem"
   kubectl --context "$KUBE_CONTEXT" create secret generic e2e-roundtrip -n "$apps_ns" \
     --from-literal=value="$value" --dry-run=client -o json \
-    | kubeseal --cert "${work}/${name}.pem" --scope strict --format yaml \
+    | kubeseal --cert "${work}/env-key.pem" --scope strict --format yaml \
     | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
   got=""
   for _ in $(seq 1 30); do
@@ -208,18 +263,7 @@ while read -r name; do
     sleep 2
   done
   [[ "$got" == "$value" ]] || die "controller ${name} did not unseal into ${apps_ns}"
-  check "controller ${name} unseals into ${apps_ns}"
+  check "controller ${name} unseals a value sealed with the env key into ${apps_ns}"
 done < <(stack_clusters)
-
-# Until key sync exists, every simulated cluster generates its own key, so no
-# key is held everywhere. A shared key would mean the clusters are not
-# isolated from each other.
-[[ "$(jq -r .keys_in_sync <<<"$fleet")" == false && "$(jq -r .env_key <<<"$fleet")" == null ]] \
-  || die "the fleet reports an env key before key sync exists: $(jq -c .env_key <<<"$fleet")"
-[[ "$(jq '[.agents[].keys[].fingerprint] | unique | length' <<<"$fleet")" == "$expected" ]] \
-  || die "simulated clusters share keys"
-jq -e --argjson n "$((expected - 1))" 'all(.agents[]; (.missing_keys | length) == $n)' <<<"$fleet" >/dev/null \
-  || die "missing keys are not reported per cluster: $(jq -c '[.agents[] | {id, missing_keys}]' <<<"$fleet")"
-check "keys are out of sync, and each cluster is missing the others' keys"
 
 echo "e2e: ${passed} checks passed" >&2

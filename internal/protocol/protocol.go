@@ -4,7 +4,9 @@
 package protocol
 
 import (
+	"encoding/json"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -114,7 +116,124 @@ type Key struct {
 // CheckInResponse answers a check-in.
 type CheckInResponse struct {
 	NextCheckInSeconds int `json:"next_checkin_seconds"`
+	// EscrowNeeded lists reported keys the env has no escrowed copy of yet.
+	// An agent with the keys capability uploads them.
+	EscrowNeeded []string `json:"escrow_needed,omitempty"`
 }
+
+// Command types. Each is versioned; an agent advertises the ones it handles
+// in its check-in, and refuses any other.
+const (
+	CommandKeysRestore   = "keys.restore.v1"
+	CommandRenewalEnable = "renewal.enable.v1"
+)
+
+// CommandCapability is the capability each command needs.
+var CommandCapability = map[string]string{
+	CommandKeysRestore:   CapabilityKeys,
+	CommandRenewalEnable: CapabilityRenewal,
+}
+
+// Command is a unit of work queued for one agent.
+type Command struct {
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// CommandsResponse answers GET /agent/v1/commands: the commands just leased
+// to the agent, possibly none.
+type CommandsResponse struct {
+	Commands []Command `json:"commands"`
+}
+
+// Command outcomes.
+const (
+	CommandSucceeded = "succeeded"
+	CommandFailed    = "failed"
+)
+
+// CommandResult reports a command's outcome.
+type CommandResult struct {
+	Status string          `json:"status"`
+	Error  string          `json:"error,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// KeysRestorePayload asks an agent to add escrowed keys to its controller.
+type KeysRestorePayload struct {
+	Fingerprints []string `json:"fingerprints"`
+}
+
+// KeysRestoreResult reports a restore.
+type KeysRestoreResult struct {
+	Restored            []string     `json:"restored"`
+	AlreadyPresent      []string     `json:"already_present"`
+	Failed              []KeyFailure `json:"failed"`
+	ControllerRestarted bool         `json:"controller_restarted"`
+}
+
+// KeyFailure is one key that could not be restored.
+type KeyFailure struct {
+	Fingerprint string `json:"fingerprint"`
+	Error       string `json:"error"`
+}
+
+// RenewalEnablePayload asks an agent to turn on its controller's key
+// renewal with the given period.
+type RenewalEnablePayload struct {
+	Period string `json:"period"`
+}
+
+// Envelope is data encrypted under a data key from KMS: AES-256-GCM, with
+// the encryption context as additional authenticated data and as the KMS
+// encryption context, so the ciphertext only opens for that context.
+type Envelope struct {
+	KeyID      string            `json:"key_id"`
+	WrappedKey string            `json:"wrapped_key"`
+	Nonce      string            `json:"nonce"`
+	Ciphertext string            `json:"ciphertext"`
+	Context    map[string]string `json:"context"`
+}
+
+// EscrowUpload is a sealing key encrypted under the escrow KMS key, with its
+// public certificate so the control plane can check what it is.
+type EscrowUpload struct {
+	Certificate string   `json:"certificate"`
+	Envelope    Envelope `json:"envelope"`
+}
+
+// EscrowRecord is an escrowed sealing key as the control plane stores it.
+type EscrowRecord struct {
+	Fingerprint string    `json:"fingerprint"`
+	Certificate string    `json:"certificate"`
+	Envelope    Envelope  `json:"envelope"`
+	UploadedBy  string    `json:"uploaded_by"`
+	UploadedAt  time.Time `json:"uploaded_at"`
+}
+
+// Escrow encryption context keys.
+const (
+	ContextEnv         = "env"
+	ContextFingerprint = "fingerprint"
+	ContextPurpose     = "purpose"
+	PurposeKeyEscrow   = "key-escrow"
+)
+
+// fingerprintPath maps a fingerprint's base64 to the URL-safe alphabet, so a
+// fingerprint is one path segment that no proxy decodes or splits.
+var (
+	fingerprintPath   = strings.NewReplacer("+", "-", "/", "_")
+	fingerprintUnpath = strings.NewReplacer("-", "+", "_", "/")
+)
+
+// FingerprintPath returns a key fingerprint as a URL path segment.
+func FingerprintPath(fp string) string { return fingerprintPath.Replace(fp) }
+
+// ParseFingerprintPath returns the fingerprint a URL path segment names.
+func ParseFingerprintPath(segment string) string { return fingerprintUnpath.Replace(segment) }
 
 // Error is the body of every error response.
 type Error struct {

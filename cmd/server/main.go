@@ -111,6 +111,8 @@ func run() error {
 		Users:      users,
 		WebUI:      webui.Handler(),
 		HSTS:       strings.HasPrefix(cfg.PublicURL, "https://"),
+
+		KeyRenewPeriod: cfg.KeyRenewPeriod,
 	})
 	return httpserver.Serve(ctx, cfg.HTTPAddr, srv.Handler(), logger)
 }

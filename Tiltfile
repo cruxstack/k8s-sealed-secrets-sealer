@@ -153,6 +153,12 @@ def agent_registry():
     }
 
 setup_objects.append(agent_registry())
+setup_objects.append({
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {"name": "local-kms-seed", "namespace": SYSTEM_NAMESPACE},
+    "data": {"seed.yaml": str(read_file("dev/local-kms/seed.yaml"))},
+})
 setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
 def mock_github():
@@ -195,8 +201,10 @@ for cluster in STACK["clusters"]:
         values=["dev/values/sealed-secrets.yaml"],
         set=[
             "additionalNamespaces={%s}" % apps_ns,
-            # the chart's args value replaces its defaults, so repeat the ones we keep
-            "args={--update-status,--key-prefix,sealed-secrets-key,--all-namespaces=false,--additional-namespaces,%s}" % apps_ns,
+            # the chart's args value replaces its defaults, so repeat the ones
+            # we keep. Renewal starts off everywhere, so the control plane turns
+            # it on in exactly one cluster (docs/design.md, "Key renewal").
+            "args={--update-status,--key-prefix,sealed-secrets-key,--key-renew-period=0,--all-namespaces=false,--additional-namespaces,%s}" % apps_ns,
         ],
     ))
     add([o for o in controller if o["kind"] != "CustomResourceDefinition"])

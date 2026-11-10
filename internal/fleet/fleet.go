@@ -49,6 +49,7 @@ type Agent struct {
 	LastCheckIn  *time.Time           `json:"last_checkin,omitempty"`
 	AgentVersion string               `json:"agent_version,omitempty"`
 	Capabilities []string             `json:"capabilities,omitempty"`
+	Commands     []string             `json:"commands,omitempty"`
 	Controller   *protocol.Controller `json:"controller,omitempty"`
 	Keys         []store.KeyRef       `json:"keys,omitempty"`
 	KeysComplete bool                 `json:"keys_complete"`
@@ -90,6 +91,7 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 		a.Healthy = now.Sub(last) <= HealthyWithin
 		a.AgentVersion = s.AgentVersion
 		a.Capabilities = s.Capabilities
+		a.Commands = s.Commands
 		a.Controller = &ctrl
 		a.Keys = s.Keys
 		a.KeysComplete = s.KeysComplete

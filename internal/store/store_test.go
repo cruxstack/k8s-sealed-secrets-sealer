@@ -113,3 +113,137 @@ func TestStore_PutReplayIfAbsent(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_Commands(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			agent := "use1-blue-" + name
+			first := CommandRecord{AgentID: agent, ID: "01J0000000000000000000000A", Type: protocol.CommandKeysRestore, Status: CommandQueued, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute), Payload: `{"fingerprints":["SHA256:a"]}`}
+			second := first
+			second.ID = "01J0000000000000000000000B"
+			expired := first
+			expired.ID = "01J0000000000000000000000C"
+			expired.ExpiresAt = now.Add(-time.Second)
+			other := first
+			other.AgentID = "use2-blue-" + name
+			for _, c := range []CommandRecord{second, first, expired, other} {
+				if err := s.PutCommand(ctx, c); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := s.Commands(ctx, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 3 || got[0].ID != first.ID || got[1].ID != second.ID {
+				t.Fatalf("Commands = %+v", got)
+			}
+			if got[0].Payload != first.Payload || !got[0].ExpiresAt.Equal(first.ExpiresAt) || !got[0].Open(now) || got[2].Open(now) {
+				t.Fatalf("command round trip: %+v", got[0])
+			}
+
+			// finishing before leasing is refused
+			if ok, err := s.FinishCommand(ctx, agent, first.ID, CommandSucceeded, "{}", "", now); err != nil || ok {
+				t.Fatalf("finish unleased: ok=%v err=%v", ok, err)
+			}
+			// leased once
+			if ok, err := s.LeaseCommand(ctx, agent, first.ID, now); err != nil || !ok {
+				t.Fatalf("lease: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.LeaseCommand(ctx, agent, first.ID, now); err != nil || ok {
+				t.Fatalf("lease again: ok=%v err=%v", ok, err)
+			}
+			// another agent cannot lease or finish it
+			if ok, err := s.LeaseCommand(ctx, other.AgentID, second.ID, now); err != nil || ok {
+				t.Fatalf("lease by another agent: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.FinishCommand(ctx, other.AgentID, first.ID, CommandSucceeded, "", "", now); err != nil || ok {
+				t.Fatalf("finish by another agent: ok=%v err=%v", ok, err)
+			}
+			// expired and unknown commands are not leased
+			if ok, err := s.LeaseCommand(ctx, agent, expired.ID, now); err != nil || ok {
+				t.Fatalf("lease expired: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.LeaseCommand(ctx, agent, "01J0000000000000000000000Z", now); err != nil || ok {
+				t.Fatalf("lease unknown: ok=%v err=%v", ok, err)
+			}
+			// a result is accepted once, and not after expiry
+			if ok, err := s.LeaseCommand(ctx, agent, second.ID, now); err != nil || !ok {
+				t.Fatalf("lease second: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.FinishCommand(ctx, agent, second.ID, CommandSucceeded, "", "", second.ExpiresAt); err != nil || ok {
+				t.Fatalf("finish after expiry: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.FinishCommand(ctx, agent, first.ID, CommandFailed, `{"restored":[]}`, "boom", now); err != nil || !ok {
+				t.Fatalf("finish: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.FinishCommand(ctx, agent, first.ID, CommandSucceeded, "", "", now); err != nil || ok {
+				t.Fatalf("finish again: ok=%v err=%v", ok, err)
+			}
+
+			got, err = s.Commands(ctx, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := got[0]
+			if f.Status != CommandFailed || f.Error != "boom" || f.Result != `{"restored":[]}` || f.LeasedAt == nil || f.FinishedAt == nil || f.Open(now) {
+				t.Fatalf("finished command: %+v", f)
+			}
+			if got[1].Status != CommandLeased || !got[1].Open(now) {
+				t.Fatalf("leased command: %+v", got[1])
+			}
+		})
+	}
+}
+
+func TestStore_Escrow(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fp := "SHA256:escrow-" + name
+			rec := protocol.EscrowRecord{
+				Fingerprint: fp,
+				Certificate: "PEM",
+				Envelope: protocol.Envelope{
+					KeyID: "arn:aws:kms:us-east-1:000000000000:key/k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y2lwaGVy",
+					Context: map[string]string{"env": "dev", "fingerprint": fp, "purpose": "key-escrow"},
+				},
+				UploadedBy: "use1-blue",
+				UploadedAt: time.Now().UTC().Truncate(time.Millisecond),
+			}
+			if _, ok, err := s.Escrow(ctx, fp); err != nil || ok {
+				t.Fatalf("escrow before upload: ok=%v err=%v", ok, err)
+			}
+			if stored, err := s.PutEscrowIfAbsent(ctx, rec); err != nil || !stored {
+				t.Fatalf("first upload: stored=%v err=%v", stored, err)
+			}
+			second := rec
+			second.UploadedBy = "use2-blue"
+			if stored, err := s.PutEscrowIfAbsent(ctx, second); err != nil || stored {
+				t.Fatalf("second upload: stored=%v err=%v", stored, err)
+			}
+			got, ok, err := s.Escrow(ctx, fp)
+			if err != nil || !ok {
+				t.Fatalf("escrow: ok=%v err=%v", ok, err)
+			}
+			if got.UploadedBy != "use1-blue" || got.Envelope.Ciphertext != "Y2lwaGVy" || got.Envelope.Context["fingerprint"] != fp || !got.UploadedAt.Equal(rec.UploadedAt) {
+				t.Fatalf("escrow round trip: %+v", got)
+			}
+
+			fps := []string{fp, fp, "SHA256:none"}
+			for i := range 120 {
+				fps = append(fps, "SHA256:missing-"+time.Duration(i).String())
+			}
+			escrowed, err := s.Escrowed(ctx, fps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(escrowed) != 1 || !escrowed[fp] {
+				t.Fatalf("Escrowed = %v", escrowed)
+			}
+		})
+	}
+}
