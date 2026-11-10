@@ -38,6 +38,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos check all
+      - name: Web UI Checks (eslint, tsc, prettier)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: atmos web check
 
   test:
     runs-on: ubuntu-latest
@@ -60,6 +64,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos test integration
+      - name: Web UI Tests (vitest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: atmos web test
 
   e2e:
     runs-on: ubuntu-latest

@@ -11,7 +11,7 @@ state_dir=.tools/dev-agent
 state_file="${state_dir}/stack.env"
 log_file="${state_dir}/tilt.log"
 # one block of ports per stack, in this order from the block's base port
-port_vars=(SEALER_TILT_PORT SEALER_CONTROL_PLANE_PORT SEALER_DYNAMODB_PORT SEALER_KMS_PORT)
+port_vars=(SEALER_TILT_PORT SEALER_CONTROL_PLANE_PORT SEALER_DYNAMODB_PORT SEALER_KMS_PORT SEALER_GITHUB_PORT)
 block_size=10
 block_count=800
 first_port=16000
@@ -160,9 +160,10 @@ print_endpoints() {
   cat >&2 <<EOF
   Cluster:        ${SEALER_CLUSTER} (context ${KUBE_CONTEXT})
   Tilt:           http://localhost:${SEALER_TILT_PORT}
-  Control plane:  http://localhost:${SEALER_CONTROL_PLANE_PORT}
+  Web UI:         http://localhost:${SEALER_CONTROL_PLANE_PORT}
   DynamoDB Local: http://localhost:${SEALER_DYNAMODB_PORT}
   KMS (local):    http://localhost:${SEALER_KMS_PORT}
+  GitHub (mock):  http://localhost:${SEALER_GITHUB_PORT}
 EOF
 }
 
@@ -175,6 +176,7 @@ case "$command" in
       reallocate_if_taken
       ensure_cluster
       pull_charts
+      build_web
       build_binaries
       start_tilt "$@"
     fi

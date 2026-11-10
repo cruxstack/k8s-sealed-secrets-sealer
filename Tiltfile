@@ -12,6 +12,13 @@ CHART_DIR = os.getenv("SEALED_SECRETS_CHART_DIR", "")
 CONTROL_PLANE_PORT = int(os.getenv("SEALER_CONTROL_PLANE_PORT", "4100"))
 DYNAMODB_PORT = int(os.getenv("SEALER_DYNAMODB_PORT", "4102"))
 KMS_PORT = int(os.getenv("SEALER_KMS_PORT", "4103"))
+GITHUB_PORT = int(os.getenv("SEALER_GITHUB_PORT", "4104"))
+
+# This stack's URLs as a browser on this machine sees them. They are the
+# OAuth redirect targets and the agents' token audience, so worktree and e2e
+# stacks on other ports still work.
+PUBLIC_URL = "http://localhost:%d" % CONTROL_PLANE_PORT
+GITHUB_URL = "http://localhost:%d" % GITHUB_PORT
 
 LABEL_BUILD = "build"
 LABEL_SETUP = "setup"
@@ -84,13 +91,26 @@ def add(objs):
 # ------------------------------------------------------------------- build ---
 
 local_resource(
-    "binaries",
-    cmd="bash .atmos/scripts/dev/build.sh",
-    deps=["cmd", "internal", "go.mod", "go.sum"],
+    "web",
+    cmd="bash .atmos/scripts/dev/web.sh",
+    deps=["web/src", "web/index.html", "web/public", "web/package.json", "web/package-lock.json", "web/vite.config.ts"],
     labels=[LABEL_BUILD],
 )
 
-for image, binary in [("local.invalid/sealer-control-plane", "server"), ("local.invalid/sealer-agent", "agent")]:
+local_resource(
+    "binaries",
+    cmd="bash .atmos/scripts/dev/build.sh",
+    deps=["cmd", "internal", "go.mod", "go.sum"],
+    # the control plane embeds the UI build (internal/webui/dist/app)
+    resource_deps=["web"],
+    labels=[LABEL_BUILD],
+)
+
+for image, binary in [
+    ("local.invalid/sealer-control-plane", "server"),
+    ("local.invalid/sealer-agent", "agent"),
+    ("local.invalid/sealer-mock-github", "mock-github"),
+]:
     docker_build(
         image,
         context=".tools/build",
@@ -135,11 +155,13 @@ def agent_registry():
 setup_objects.append(agent_registry())
 setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
+add(decode_yaml_stream(read_file("dev/k3d/mock-github.yaml")))
 add(decode_yaml_stream(helm(
     "deploy/helm/control-plane",
     name="sealer-control-plane",
     namespace=SYSTEM_NAMESPACE,
     values=["dev/values/control-plane.yaml"],
+    set=["publicURL=" + PUBLIC_URL, "github.url=" + GITHUB_URL],
 )))
 
 # --------------------------------------------------------- simulated clusters ---
@@ -172,7 +194,7 @@ for cluster in STACK["clusters"]:
         name="sealer-agent",
         namespace=agent_ns,
         values=["dev/values/agent.yaml"],
-        set=["controller.namespace=" + controller_ns],
+        set=["controller.namespace=" + controller_ns, "identity.audience=" + PUBLIC_URL],
     )))
 
 # --------------------------------------------------------------- resources ---
@@ -198,9 +220,15 @@ k8s_resource(
     labels=[LABEL_PLATFORM],
 )
 k8s_resource(
+    "mock-github",
+    port_forwards=["%d:8080" % GITHUB_PORT],
+    resource_deps=["setup", "binaries"],
+    labels=[LABEL_PLATFORM],
+)
+k8s_resource(
     "sealer-control-plane",
     port_forwards=["%d:8080" % CONTROL_PLANE_PORT],
-    resource_deps=["setup", "binaries", "local-kms", "dynamodb-local"],
+    resource_deps=["setup", "binaries", "local-kms", "dynamodb-local", "mock-github"],
     labels=[LABEL_PLATFORM],
 )
 

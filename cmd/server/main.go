@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/webui"
 )
 
 func main() {
@@ -69,8 +72,30 @@ func run() error {
 		return err
 	}
 
+	userSessions, err := userauth.NewSessions(cfg.UserSessionKey, cfg.PublicURL, cfg.EnvName, cfg.UserSessionTTL, nil)
+	if err != nil {
+		return err
+	}
+	users := userauth.NewHandler(userauth.HandlerOptions{
+		Sessions: userSessions,
+		GitHub: userauth.NewGitHub(userauth.GitHubOptions{
+			ClientID:     cfg.GitHubOAuthClientID,
+			ClientSecret: cfg.GitHubOAuthClientSecret,
+			TokenURL:     cfg.GitHubOAuthTokenURL,
+			APIURL:       cfg.GitHubAPIURL,
+		}),
+		PublicURL:    cfg.PublicURL,
+		AuthorizeURL: cfg.GitHubURL + "/login/oauth/authorize",
+		ClientID:     cfg.GitHubOAuthClientID,
+		Env:          cfg.EnvName,
+		Org:          cfg.GitHubOrg,
+		Teams:        cfg.GitHubAllowedTeams,
+		Logger:       logger,
+	})
+
 	logger.InfoContext(ctx, "starting control plane",
-		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "")
+		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
+		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams)
 	srv := controlplane.New(controlplane.Options{
 		Logger:   logger,
 		Version:  version.Version,
@@ -83,6 +108,9 @@ func run() error {
 		Sessions:   sessions,
 		Store:      st,
 		AdminToken: cfg.AdminToken,
+		Users:      users,
+		WebUI:      webui.Handler(),
+		HSTS:       strings.HasPrefix(cfg.PublicURL, "https://"),
 	})
 	return httpserver.Serve(ctx, cfg.HTTPAddr, srv.Handler(), logger)
 }

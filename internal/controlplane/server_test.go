@@ -18,6 +18,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/testutil/testcerts"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
 
 const adminToken = "admin-0123456789abcdef0123456789abcdef"
@@ -338,5 +339,71 @@ func TestSession_RoutesByMethod(t *testing.T) {
 	rec = h.do(http.MethodPost, "/agent/v1/session", "", protocol.SessionRequest{Method: protocol.MethodAWSSTS, Token: "blue-sa-token"})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("cross-method login = %d", rec.Code)
+	}
+}
+
+func TestUserRoutes(t *testing.T) {
+	reg, err := registry.Parse([]byte(`
+issuers: [{name: local, url: "https://k8s.example.com", jwksFile: k.json}]
+agents:
+  - {id: use1-blue, cluster: blue, region: use1, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
+`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentSessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "http://localhost:4100", "dev", nil)
+	userSessions, err := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "http://localhost:4100", "dev", time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := userauth.NewHandler(userauth.HandlerOptions{
+		Sessions: userSessions, PublicURL: "http://localhost:4100", Env: "dev", Org: "example-org",
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("<html>ui</html>")) })
+	h := New(Options{
+		Env: "dev", Registry: reg, Sessions: agentSessions, Store: store.NewMemory(),
+		Users: users, WebUI: ui, HSTS: true, Logger: slog.New(slog.DiscardHandler),
+	}).Handler()
+
+	get := func(path, session string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if session != "" {
+			req.AddCookie(&http.Cookie{Name: "sealer_session", Value: session})
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := get("/api/v1/fleet", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("fleet without a session = %d", rec.Code)
+	}
+	agentSession, _, _ := agentSessions.Issue("use1-blue")
+	if rec := get("/api/v1/fleet", agentSession); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("fleet with an agent session as cookie = %d", rec.Code)
+	}
+	session, _, _ := userSessions.Issue(userauth.User{ID: 1001, Login: "alice"})
+	rec := get("/api/v1/fleet", session)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"use1-blue"`) {
+		t.Fatalf("fleet = %d %s", rec.Code, rec.Body)
+	}
+
+	if rec := get("/api/v1/nope", session); rec.Code != http.StatusNotFound || !strings.Contains(rec.Header().Get("Content-Type"), "json") {
+		t.Fatalf("unknown api route = %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	rec = get("/agents/use1-blue", "")
+	if rec.Body.String() != "<html>ui</html>" {
+		t.Fatalf("ui route = %d %s", rec.Code, rec.Body)
+	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy":   "script-src 'self'",
+		"X-Frame-Options":           "DENY",
+		"Strict-Transport-Security": "max-age=",
+		"X-Content-Type-Options":    "nosniff",
+	} {
+		if got := rec.Header().Get(header); !strings.Contains(got, want) {
+			t.Errorf("%s = %q, want it to contain %q", header, got, want)
+		}
 	}
 }

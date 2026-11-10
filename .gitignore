@@ -1,6 +1,8 @@
 # build output
-dist/
+/dist/
 release/
+# the web UI build, embedded into the control plane (the placeholder stays)
+internal/webui/dist/app/
 coverage.out
 
 # atmos toolchain, pulled charts, local builds and dev-stack state

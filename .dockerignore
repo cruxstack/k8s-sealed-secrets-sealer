@@ -13,3 +13,5 @@ deploy
 dev
 coverage.out
 .DS_Store
+web/node_modules
+internal/webui/dist/app

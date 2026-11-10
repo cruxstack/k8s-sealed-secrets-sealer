@@ -21,6 +21,10 @@
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time
+  - `internal/userauth/` - GitHub OAuth sign-in (org and team checks), user session cookies, CSRF
+  - `internal/webui/` - serves the web UI embedded from `internal/webui/dist/app` (built by `atmos web build`)
+  - `internal/mockgithub/`, `cmd/mock-github/` - GitHub OAuth mock for tests and the local stack; never released
+- **Web UI**: `web/` (React, Vite, TanStack Router and Query, shadcn/ui). `atmos web check|test|build|dev`.
 - **Deploy**: `deploy/helm/agent` and `deploy/helm/control-plane`. AWS infrastructure lives in the separate `terraform-aws-k8s-sealed-secrets-sealer` repository.
 
 ## Build & Test
@@ -47,7 +51,7 @@ Atmos is the task runner; every command installs its pinned tools into `.tools/`
 - **Logging**: `log/slog` with key-value pairs and snake_case keys, `*Context` methods where a context exists. Operational events carry an `event` key (e.g. `controller.key_active`) so they can be alerted on; see `docs/design.md` for the list.
 
 ## Configuration
-- All variables are read in `internal/config`; nothing else reads the environment
+- All variables are read in `internal/config`; nothing else reads the environment (dev-only tools such as `cmd/mock-github` excepted)
 - Settings use the `APP_` prefix
 - Validate at load time and report every problem at once; invalid configuration is an error, never a silent default
 
