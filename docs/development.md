@@ -348,4 +348,5 @@ empty), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs` and
 `keyRenewPeriod`. With `APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`,
 `APP_REGISTRY_FILE`, `APP_DYNAMODB_TABLE` and `APP_KMS_TRANSIT_KEY_ID` are
 refused. Env names cannot be the UI's own paths (`secrets`, `fleet`,
-`login` and so on).
+`login` and so on). [docs/deployment.md](deployment.md) shows a whole
+deployment across envs, accounts and regions.

@@ -96,7 +96,8 @@ kms:
   # key ID, ARN or alias (required, unless envs is set); a key in another
   # account is named by its ARN, whose region is then the one called
   transitKeyId: ""
-  # region of the KMS endpoint; empty uses aws.region or the AWS SDK's
+  # region of the KMS endpoint for a key not named by ARN; empty uses
+  # aws.region or the AWS SDK's
   region: ""
   # overrides the KMS endpoint, for local emulators only
   endpoint: ""
