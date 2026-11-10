@@ -58,6 +58,40 @@ const (
 // agents of any other.
 const EnvHeader = "X-K8s-Sealed-Secrets-Sealer-Env"
 
+// CheckInIntervalHeader carries an agent's check-in interval, in whole
+// seconds, on each check-in. The control plane counts the agent healthy
+// for three intervals after a check-in. It is a header rather than a field
+// of CheckIn because control planes refuse check-ins with fields they do
+// not know, and those that predate it ignore the header; without it, the
+// agent is taken to check in every 15 seconds.
+const CheckInIntervalHeader = "X-K8s-Sealed-Secrets-Sealer-Check-In-Interval"
+
+// Check-in timing, shared by agents and the control plane.
+const (
+	// DefaultCheckInInterval is an agent's check-in interval unless set
+	// otherwise, and the one assumed for an agent that does not report its
+	// own.
+	DefaultCheckInInterval = 15 * time.Second
+	// MinCheckInInterval and MaxCheckInInterval bound an agent's interval.
+	MinCheckInInterval = 5 * time.Second
+	MaxCheckInInterval = 5 * time.Minute
+	// MinHealthWindow keeps an agent with a short interval healthy through
+	// a brief outage, such as its controller restarting.
+	MinHealthWindow = 3 * DefaultCheckInInterval
+)
+
+// HealthWindow is how long after an agent's last check-in the control plane
+// counts it healthy: three of its check-in intervals, so three missed
+// check-ins make it unhealthy, but at least MinHealthWindow and at most
+// three of the longest interval. An interval of zero, from an agent that
+// does not report it, is taken as the default.
+func HealthWindow(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		interval = DefaultCheckInInterval
+	}
+	return min(max(3*interval, MinHealthWindow), 3*MaxCheckInInterval)
+}
+
 // SessionRequest asks for an agent session token. Token is set for
 // MethodK8sOIDC and AWS for MethodAWSSTS.
 type SessionRequest struct {

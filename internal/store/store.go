@@ -22,6 +22,15 @@ type AgentState struct {
 	// Keys holds no certificates; those are stored once per key.
 	Keys         []KeyRef `dynamodbav:"keys"`
 	KeysComplete bool     `dynamodbav:"keys_complete"`
+	// CheckInIntervalSeconds is the agent's check-in interval, 0 when the
+	// agent did not report it.
+	CheckInIntervalSeconds int `dynamodbav:"checkin_interval_seconds,omitempty"`
+}
+
+// CheckInInterval is the agent's check-in interval, 0 when it did not report
+// it.
+func (s AgentState) CheckInInterval() time.Duration {
+	return time.Duration(s.CheckInIntervalSeconds) * time.Second
 }
 
 // KeyRef identifies a key in an agent's key set.

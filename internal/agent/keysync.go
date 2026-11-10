@@ -3,39 +3,34 @@ package agent
 import (
 	"context"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
+	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/keyutil"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/keys"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
-// Annotations the agent sets on key Secrets it restores, and on the
-// controller's pod template when it restarts the controller.
+// Annotations the agent sets on key Secrets it restores.
 const (
 	annotationFingerprint  = "sealer.cruxstack.io/fingerprint"
 	annotationRestoredFrom = "sealer.cruxstack.io/restored-from"
 	annotationRestoredAt   = "sealer.cruxstack.io/restored-at"
-	annotationRestartedAt  = "kubectl.kubernetes.io/restartedAt"
 )
 
-// Controller flag values the agent works with.
+// The controller's key label and the value it loads keys with.
 const (
-	defaultKeyPrefix          = "sealed-secrets-key"
-	orderSecretCreationTime   = "SecretCreationTimestamp"
 	keyLabel                  = "sealedsecrets.bitnami.com/sealed-secrets-key"
 	keyLabelActive            = "active"
 	escrowedRestoredFromValue = "escrow"
@@ -66,6 +61,16 @@ type KeySync struct {
 	escrow      EscrowClient
 	logger      *slog.Logger
 	now         func() time.Time
+
+	// restartMu serializes controller restarts, from restores and from the
+	// check-in loop, and guards the fields below
+	restartMu      sync.Mutex
+	nextRestart    time.Time
+	restartBackoff time.Duration
+	// lastCreate is when this agent last created a key Secret, by the
+	// monotonic clock; a restart waits settle after it
+	lastCreate time.Time
+	settle     time.Duration
 }
 
 // KeySyncOptions configures a KeySync.
@@ -105,6 +110,9 @@ func NewKeySync(opts KeySyncOptions) *KeySync {
 		escrow:      opts.Escrow,
 		logger:      logger,
 		now:         now,
+
+		restartBackoff: restartRetry,
+		settle:         time.Second,
 	}
 }
 
@@ -125,7 +133,7 @@ func escrowContext(env, fingerprint string) map[string]string {
 // Escrow encrypts the named keys under the escrow KMS key and uploads them.
 // Failures are logged; the control plane asks again on the next check-in.
 func (k *KeySync) Escrow(ctx context.Context, fingerprints []string) {
-	secrets, err := k.keySecrets(ctx)
+	secrets, err := k.keySecrets(ctx, keyLabelSelector)
 	if err != nil {
 		k.logger.WarnContext(ctx, "failed to read key secrets for escrow",
 			"event", "key.sync_failed", "env", k.env, "error", err)
@@ -148,6 +156,11 @@ func (k *KeySync) Escrow(ctx context.Context, fingerprints []string) {
 }
 
 func (k *KeySync) escrowOne(ctx context.Context, fp string, s *corev1.Secret) error {
+	// the first upload wins and the control plane cannot check the private
+	// key, so a bad one would block every restore of this key
+	if err := checkKeyPair(s.Data[corev1.TLSCertKey], s.Data[corev1.TLSPrivateKeyKey], fp); err != nil {
+		return fmt.Errorf("refusing to escrow key secret %s: %w", s.Name, err)
+	}
 	plaintext, err := json.Marshal(escrowedKey{
 		Certificate: string(s.Data[corev1.TLSCertKey]),
 		PrivateKey:  string(s.Data[corev1.TLSPrivateKeyKey]),
@@ -166,28 +179,55 @@ func (k *KeySync) escrowOne(ctx context.Context, fp string, s *corev1.Secret) er
 	})
 }
 
-// keySecrets returns the controller's key Secrets by fingerprint.
-func (k *KeySync) keySecrets(ctx context.Context) (map[string]*corev1.Secret, error) {
-	list, err := k.kube.CoreV1().Secrets(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: keyLabelSelector})
+// keySecrets returns the key Secrets that selector selects by fingerprint.
+func (k *KeySync) keySecrets(ctx context.Context, selector string) (map[string]*corev1.Secret, error) {
+	list, err := k.listKeySecrets(ctx, selector)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list key secrets in %s: %w", k.namespace, err)
+		return nil, err
 	}
 	out := map[string]*corev1.Secret{}
-	for i := range list.Items {
-		s := &list.Items[i]
-		parsed, _, err := keys.ParseCert(s.Data[corev1.TLSCertKey])
-		if err != nil {
+	for i := range list {
+		s := &list[i]
+		fp, ok := secretFingerprint(s)
+		if !ok {
 			continue
 		}
-		if _, dup := out[parsed.Fingerprint]; !dup {
-			out[parsed.Fingerprint] = s
+		if _, dup := out[fp]; !dup {
+			out[fp] = s
 		}
 	}
 	return out, nil
 }
 
+func (k *KeySync) listKeySecrets(ctx context.Context, selector string) ([]corev1.Secret, error) {
+	list, err := k.kube.CoreV1().Secrets(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list key secrets in %s: %w", k.namespace, err)
+	}
+	return list.Items, nil
+}
+
+// secretFingerprint returns the fingerprint of the key a Secret holds, from
+// its certificate or else its private key.
+func secretFingerprint(s *corev1.Secret) (string, bool) {
+	if parsed, _, err := keys.ParseCert(s.Data[corev1.TLSCertKey]); err == nil {
+		return parsed.Fingerprint, true
+	}
+	key, err := keyutil.ParsePrivateKeyPEM(s.Data[corev1.TLSPrivateKeyKey])
+	if err != nil {
+		return "", false
+	}
+	priv, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return "", false
+	}
+	fp, err := sscrypto.PublicKeyFingerprint(&priv.PublicKey)
+	return fp, err == nil
+}
+
 // Restore runs keys.restore.v1: it restores each escrowed key the controller
-// is missing, then restarts the controller once so it loads them.
+// is missing, then restarts the controller so it loads them, deleting the
+// pods that started before them.
 func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error) {
 	var p protocol.KeysRestorePayload
 	if err := strictDecode(cmd.Payload, &p); err != nil {
@@ -206,23 +246,30 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to get controller deployment %s/%s: %w", k.namespace, k.deployment, err)
 	}
-	args := controllerArgs(d)
-	if order, _ := flagValue(args, "key-order-priority"); order == orderSecretCreationTime {
+	settings := readSettings(d)
+	switch settings.keyOrderPriority {
+	case orderCertNotBefore:
+	case orderSecretCreationTime:
 		// a restored old key would become this controller's newest
 		return nil, fmt.Errorf("refusing to restore keys: controller orders keys by %s", orderSecretCreationTime)
+	default:
+		return nil, errors.New("refusing to restore keys: cannot tell how the controller orders keys (its key order is set where the agent cannot read it)")
 	}
-	prefix := defaultKeyPrefix
-	if v, ok := flagValue(args, "key-prefix"); ok && v != "" {
-		prefix = v
-	}
+	prefix := settings.keyPrefix
 
-	present, err := k.keySecrets(ctx)
+	// a key held under any label value is present: one relabeled (as
+	// compromised, say) must not come back as active
+	present, err := k.keySecrets(ctx, keyLabel)
 	if err != nil {
 		return nil, err
 	}
 	res := protocol.KeysRestoreResult{Restored: []string{}, AlreadyPresent: []string{}, Failed: []protocol.KeyFailure{}}
 	for _, fp := range p.Fingerprints {
-		if _, ok := present[fp]; ok {
+		if s, ok := present[fp]; ok {
+			if label := s.Labels[keyLabel]; label != keyLabelActive {
+				k.logger.WarnContext(ctx, "not restoring a sealing key held under another label",
+					"event", "key.restore_skipped", "env", k.env, "fingerprint", fp, "secret", s.Name, "label", label)
+			}
 			res.AlreadyPresent = append(res.AlreadyPresent, fp)
 			continue
 		}
@@ -235,18 +282,16 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 		}
 		k.logger.WarnContext(ctx, "sealing key restored from escrow",
 			"event", "key.restored", "env", k.env, "fingerprint", fp, "secret", name)
-		present[fp] = nil
+		present[fp] = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{keyLabel: keyLabelActive}}}
 		res.Restored = append(res.Restored, fp)
 	}
 
-	if len(res.Restored) > 0 {
-		if err := k.restartController(ctx); err != nil {
-			return res, err
-		}
-		res.ControllerRestarted = true
-		k.logger.WarnContext(ctx, "controller restarted to load restored keys",
-			"event", "controller.restarted", "env", k.env, "deployment", k.namespace+"/"+k.deployment,
-			"reason", "keys restored", "fingerprints", res.Restored)
+	// load the keys just restored, and any restored before that the
+	// controller has not loaded, as after a failed restart
+	restarted, err := k.restart(ctx, "", "keys restored", true)
+	res.ControllerRestarted = restarted
+	if err != nil {
+		return res, err
 	}
 	if len(res.Failed) > 0 {
 		return res, fmt.Errorf("failed to restore %d of %d keys", len(res.Failed), len(p.Fingerprints))
@@ -271,7 +316,7 @@ func (k *KeySync) restoreOne(ctx context.Context, fp, prefix string) (string, er
 		return "", errors.New("failed to decode escrowed key")
 	}
 	if err := checkKeyPair([]byte(ek.Certificate), []byte(ek.PrivateKey), fp); err != nil {
-		return "", err
+		return "", fmt.Errorf("escrowed key is unusable: %w", err)
 	}
 
 	s := &corev1.Secret{
@@ -292,71 +337,35 @@ func (k *KeySync) restoreOne(ctx context.Context, fp, prefix string) (string, er
 		},
 	}
 	created, err := k.kube.CoreV1().Secrets(k.namespace).Create(ctx, s, metav1.CreateOptions{})
+	k.restartMu.Lock()
+	k.lastCreate = time.Now()
+	k.restartMu.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("failed to create key secret in %s: %w", k.namespace, err)
 	}
 	return created.Name, nil
 }
 
-// checkKeyPair checks that a certificate is the key named fp and that the
-// private key is its private half.
+// checkKeyPair checks a key Secret's data the way the controller reads it
+// (readKeyPair), that the certificate is the key named fp, and that the
+// private key is the certificate's: the controller serves the certificate
+// and decrypts with the private key without checking they match.
 func checkKeyPair(certPEM, keyPEM []byte, fp string) error {
+	priv, err := readKeyPair(certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
 	parsed, pub, err := keys.ParseCert(certPEM)
 	if err != nil {
 		return err
 	}
 	if parsed.Fingerprint != fp {
-		return fmt.Errorf("escrowed certificate is %s, not the requested key", parsed.Fingerprint)
-	}
-	block, _ := pem.Decode(keyPEM)
-	if block == nil {
-		return errors.New("escrowed private key is not PEM")
-	}
-	var priv *rsa.PrivateKey
-	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		priv = k
-	} else if k8, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		rk, ok := k8.(*rsa.PrivateKey)
-		if !ok {
-			return errors.New("escrowed private key is not RSA")
-		}
-		priv = rk
-	} else {
-		return errors.New("escrowed private key does not parse")
+		return fmt.Errorf("certificate is %s, not the requested key", parsed.Fingerprint)
 	}
 	if !priv.PublicKey.Equal(pub) {
-		return errors.New("escrowed private key does not match its certificate")
+		return errors.New("private key does not match its certificate")
 	}
 	return nil
-}
-
-// restartController rolls the controller's pods by stamping its pod
-// template, as kubectl rollout restart does. The controller reads key
-// Secrets only at startup.
-func (k *KeySync) restartController(ctx context.Context) error {
-	patch, err := json.Marshal(map[string]any{
-		"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{
-			"annotations": map[string]string{annotationRestartedAt: k.now().UTC().Format(time.RFC3339Nano)},
-		}}},
-	})
-	if err != nil {
-		return err
-	}
-	_, err = k.kube.AppsV1().Deployments(k.namespace).Patch(ctx, k.deployment, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to restart controller %s/%s: %w", k.namespace, k.deployment, err)
-	}
-	return nil
-}
-
-// controllerArgs returns the command and arguments of the controller's
-// containers.
-func controllerArgs(d *appsv1.Deployment) []string {
-	var args []string
-	for _, c := range d.Spec.Template.Spec.Containers {
-		args = append(append(args, c.Command...), c.Args...)
-	}
-	return args
 }
 
 // strictDecode decodes a command payload, refusing unknown fields.

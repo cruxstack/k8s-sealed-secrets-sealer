@@ -55,6 +55,8 @@ func TestStore_AgentStates(t *testing.T) {
 				Controller:   protocol.Controller{Namespace: "sealed-secrets", Name: "sealed-secrets-controller", ActiveFingerprint: "SHA256:a"},
 				Keys:         []KeyRef{{Fingerprint: "SHA256:a", NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}},
 				KeysComplete: true,
+
+				CheckInIntervalSeconds: 60,
 			}
 			if err := s.PutAgentState(ctx, state); err != nil {
 				t.Fatal(err)
@@ -72,7 +74,7 @@ func TestStore_AgentStates(t *testing.T) {
 				t.Fatalf("got %d states, want 1", len(got))
 			}
 			g := got["use1-blue"]
-			if !g.LastCheckIn.Equal(now) || g.Controller.ActiveFingerprint != "SHA256:a" || len(g.Keys) != 1 || !g.KeysComplete {
+			if !g.LastCheckIn.Equal(now) || g.Controller.ActiveFingerprint != "SHA256:a" || len(g.Keys) != 1 || !g.KeysComplete || g.CheckInIntervalSeconds != 60 {
 				t.Fatalf("state round trip: %+v", g)
 			}
 		})

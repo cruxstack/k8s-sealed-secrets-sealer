@@ -67,21 +67,27 @@ func run() error {
 		return err
 	}
 	client := agent.NewClient(agent.ClientOptions{
-		BaseURL:  cfg.ControlPlaneURL,
-		Identity: identity,
-		Env:      cfg.EnvName,
-		Version:  version.Version,
+		BaseURL:         cfg.ControlPlaneURL,
+		Identity:        identity,
+		Env:             cfg.EnvName,
+		Version:         version.Version,
+		CheckInInterval: cfg.CheckInInterval,
+		Logger:          logger,
 	})
 
-	// a handler is registered only for capabilities this agent has
-	commands := agent.NewCommands(client, logger, nil)
+	// a handler is registered only for capabilities this agent has; commands
+	// expire in the control plane's time
+	commands := agent.NewCommands(client, logger, client.Now)
 	if cfg.HasCapability(protocol.CapabilitySeal) {
 		kmsClient, err := newKMS(cfg, cfg.KMSTransitKeyID)
 		if err != nil {
 			return err
 		}
 		sealer := agent.NewSealer(agent.SealerOptions{
-			Keys:         inventory,
+			// while the controller restarts, seal with the keys it reported
+			// last, for as long as the control plane counts this agent
+			// healthy without a check-in
+			Keys:         inventory.Fallback(protocol.HealthWindow(cfg.CheckInInterval)),
 			KMS:          kmsClient,
 			TransitKeyID: cfg.KMSTransitKeyID,
 			Env:          cfg.EnvName,
@@ -91,6 +97,7 @@ func run() error {
 		commands.Handle(protocol.CommandSeal, sealer.Seal)
 	}
 	var escrow agent.Escrower
+	var loader agent.KeyLoader
 	if cfg.HasCapability(protocol.CapabilityKeys) {
 		kmsClient, err := newKMS(cfg, cfg.KMSEscrowKeyID)
 		if err != nil {
@@ -106,7 +113,7 @@ func run() error {
 			Escrow:      client,
 			Logger:      logger,
 		})
-		escrow = keySync
+		escrow, loader = keySync, keySync
 		commands.Handle(protocol.CommandKeysRestore, keySync.Restore)
 	}
 	if cfg.HasCapability(protocol.CapabilityRenewal) {
@@ -121,10 +128,13 @@ func run() error {
 		Capabilities: cfg.Capabilities,
 		Commands:     commands.Types(),
 		Escrow:       escrow,
+		Loader:       loader,
 		Logger:       logger,
 		Version:      version.Version,
 	})
 
+	// on SIGTERM the check-in loop stops at once; the command runner finishes
+	// the command in flight within agent.ShutdownGrace
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

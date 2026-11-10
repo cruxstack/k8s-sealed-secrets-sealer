@@ -6,8 +6,10 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,10 +17,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/keyutil"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/keys"
@@ -58,6 +62,20 @@ type pair struct {
 	key  []byte
 }
 
+// pkcs8AsRSABlock is the private key in PKCS#8, labeled as PKCS#1.
+func (p pair) pkcs8AsRSABlock(t *testing.T) []byte {
+	t.Helper()
+	k, err := keyutil.ParsePrivateKeyPEM(p.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der})
+}
+
 func newPair(t *testing.T, notBefore time.Time) pair {
 	t.Helper()
 	priv := testcerts.RSA(t, 2048)
@@ -85,7 +103,8 @@ func (p pair) secret(name string) *corev1.Secret {
 	}
 }
 
-// cluster is one simulated cluster: a fake API server with a controller.
+// cluster is one simulated cluster: a fake API server with a controller,
+// whose one pod was created an hour ago.
 type cluster struct {
 	kube *fake.Clientset
 	sync *KeySync
@@ -93,17 +112,19 @@ type cluster struct {
 
 func newCluster(t *testing.T, kms *envelope.FakeKMS, escrow *memEscrow, env string, objs ...runtime.Object) *cluster {
 	t.Helper()
+	objs = append(objs, controllerPod("controller-old", time.Now().Add(-time.Hour), true))
 	kube := fake.NewClientset(objs...)
-	// the fake API server does not generate names
+	// the fake API server does not generate names or set creation times
 	var n atomic.Int32
 	kube.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		s := action.(k8stesting.CreateAction).GetObject().(*corev1.Secret)
 		if s.Name == "" && s.GenerateName != "" {
 			s.Name = fmt.Sprintf("%s%05d", s.GenerateName, n.Add(1))
 		}
+		s.CreationTimestamp = metav1.Now()
 		return false, nil, nil
 	})
-	return &cluster{kube: kube, sync: NewKeySync(KeySyncOptions{
+	sync := NewKeySync(KeySyncOptions{
 		Kube:        kube,
 		Namespace:   ns,
 		Deployment:  "sealed-secrets-controller",
@@ -111,7 +132,9 @@ func newCluster(t *testing.T, kms *envelope.FakeKMS, escrow *memEscrow, env stri
 		EscrowKeyID: "escrow",
 		Env:         env,
 		Escrow:      escrow,
-	})}
+	})
+	sync.settle = 0
+	return &cluster{kube: kube, sync: sync}
 }
 
 func (c *cluster) keySecrets(t *testing.T) []corev1.Secret {
@@ -123,13 +146,21 @@ func (c *cluster) keySecrets(t *testing.T) []corev1.Secret {
 	return list.Items
 }
 
-func (c *cluster) restartedAt(t *testing.T) string {
+// restarted reports whether the controller was restarted: its old pod
+// deleted.
+func (c *cluster) restarted(t *testing.T) bool {
 	t.Helper()
-	d, err := c.kube.AppsV1().Deployments(ns).Get(context.Background(), "sealed-secrets-controller", metav1.GetOptions{})
-	if err != nil {
+	_, err := c.kube.CoreV1().Pods(ns).Get(context.Background(), "controller-old", metav1.GetOptions{})
+	return apierrors.IsNotFound(err)
+}
+
+// replacePod stands in for the Deployment: a new, ready pod from a later
+// second than every key.
+func (c *cluster) replacePod(t *testing.T) {
+	t.Helper()
+	if _, err := c.kube.CoreV1().Pods(ns).Create(context.Background(), controllerPod("controller-new", time.Now().Add(2*time.Second), true), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	return d.Spec.Template.Annotations[annotationRestartedAt]
 }
 
 func restorePayload(fps ...string) json.RawMessage {
@@ -177,7 +208,7 @@ func TestKeySync_EscrowThenRestoreInAnotherCluster(t *testing.T) {
 		restored.Annotations[annotationFingerprint] != k1.fp || string(restored.Data["tls.key"]) != string(k1.key) {
 		t.Fatalf("restored secret = %+v", restored)
 	}
-	if dst.restartedAt(t) == "" {
+	if !dst.restarted(t) {
 		t.Fatal("controller was not restarted")
 	}
 
@@ -187,7 +218,7 @@ func TestKeySync_EscrowThenRestoreInAnotherCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res := out.(protocol.KeysRestoreResult); len(res.Restored) != 0 || res.ControllerRestarted || again.restartedAt(t) != "" {
+	if res := out.(protocol.KeysRestoreResult); len(res.Restored) != 0 || res.ControllerRestarted || again.restarted(t) {
 		t.Fatalf("second restore = %+v", res)
 	}
 }
@@ -219,9 +250,12 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 		// a record stored under k1 that holds k2
 		"swapped key": {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k2.cert), PrivateKey: string(k2.key)}), nil, "not the requested key"},
 		// k1's certificate with k2's private key
-		"mismatched pair":   {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k2.key)}), nil, "does not match its certificate"},
-		"garbage key":       {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k1.cert), PrivateKey: "nope"}), nil, "not PEM"},
-		"newest-first keys": {seal("escrow", "dev", k1.fp, good), []string{"--key-order-priority=SecretCreationTimestamp"}, "refusing to restore"},
+		"mismatched pair": {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k2.key)}), nil, "does not match its certificate"},
+		"garbage key":     {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k1.cert), PrivateKey: "nope"}), nil, "does not parse"},
+		// the controller reads an RSA PRIVATE KEY block as PKCS#1 only, and
+		// would not start with this
+		"pkcs8 in an rsa block": {seal("escrow", "dev", k1.fp, escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k1.pkcs8AsRSABlock(t))}), nil, "does not parse"},
+		"newest-first keys":     {seal("escrow", "dev", k1.fp, good), []string{"--key-order-priority=SecretCreationTimestamp"}, "refusing to restore"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -238,7 +272,7 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 			if err == nil || !strings.Contains(msg, tc.want) {
 				t.Fatalf("error = %q, want it to contain %q", msg, tc.want)
 			}
-			if n := len(c.keySecrets(t)); n != 0 || c.restartedAt(t) != "" {
+			if n := len(c.keySecrets(t)); n != 0 || c.restarted(t) {
 				t.Fatalf("refused restore created %d secrets or restarted the controller", n)
 			}
 		})
@@ -255,5 +289,198 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 	out, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload("SHA256:missing")})
 	if res := out.(protocol.KeysRestoreResult); err == nil || len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Error, "not found") {
 		t.Fatalf("missing escrow: err = %v, result = %+v", err, res)
+	}
+}
+
+// A restored old key would become the controller's newest unless it orders
+// keys by NotBefore, so restore refuses unless it can tell that it does.
+func TestKeySync_RestoreNeedsKnownKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	kms := envelope.NewFakeKMS("escrow")
+	cases := map[string][]corev1.EnvVar{
+		"newest-first by variable": {{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", Value: "SecretCreationTimestamp"}},
+		"order from a ConfigMap":   {{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Key: "order"}}}},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := controllerDeployment()
+			d.Spec.Template.Spec.Containers[0].Env = env
+			c := newCluster(t, kms, &memEscrow{records: map[string]protocol.EscrowRecord{}}, "dev", d)
+			if _, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload("SHA256:k")}); err == nil || !strings.Contains(err.Error(), "refusing to restore") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+// escrowed returns an escrow holding the given keys, as an agent of env dev
+// would upload them.
+func escrowed(t *testing.T, kms *envelope.FakeKMS, keys ...pair) *memEscrow {
+	t.Helper()
+	escrow := &memEscrow{records: map[string]protocol.EscrowRecord{}}
+	var objs []runtime.Object
+	var fps []string
+	for i, k := range keys {
+		objs = append(objs, k.secret(fmt.Sprintf("src-%d", i)))
+		fps = append(fps, k.fp)
+	}
+	newCluster(t, kms, escrow, "dev", append(objs, controllerDeployment())...).sync.Escrow(context.Background(), fps)
+	if len(escrow.records) != len(keys) {
+		t.Fatalf("escrowed %d of %d keys", len(escrow.records), len(keys))
+	}
+	return escrow
+}
+
+func podDeletes(c *cluster) int {
+	n := 0
+	for _, a := range c.kube.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "pods" {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *cluster) inventory(active []byte) *Inventory {
+	return NewInventory(InventoryOptions{
+		Certs: staticCerts{pem: active}, Kube: c.kube, Namespace: ns,
+		Name: "sealed-secrets-controller", Deployment: "sealed-secrets-controller", ListKeys: true,
+	})
+}
+
+// A restored key whose restart failed must not count as held: the
+// controller has not loaded it, so sealing with it would make values this
+// cluster cannot decrypt. The restart is retried until the controller has
+// it.
+func TestKeySync_RetriesAFailedRestart(t *testing.T) {
+	ctx := context.Background()
+	kms := envelope.NewFakeKMS("escrow")
+	k1 := newPair(t, time.Now().Add(-time.Hour))
+	own := newPair(t, time.Now().Add(-48*time.Hour))
+	escrow := escrowed(t, kms, k1)
+
+	dst := newCluster(t, kms, escrow, "dev", own.secret("own"), controllerDeployment())
+	failDeletes := atomic.Bool{}
+	failDeletes.Store(true)
+	dst.kube.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failDeletes.Load() {
+			return true, nil, errors.New("api server unavailable")
+		}
+		return false, nil, nil
+	})
+	out, err := dst.sync.Restore(ctx, protocol.Command{Payload: restorePayload(k1.fp)})
+	if res := out.(protocol.KeysRestoreResult); err == nil || len(res.Restored) != 1 || res.ControllerRestarted {
+		t.Fatalf("restore with a failing restart: err = %v, result = %+v", err, res)
+	}
+
+	inv := dst.inventory(own.cert)
+	r, err := inv.Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsKey(r.Keys, k1.fp) || !slices.Equal(r.Pending, []string{k1.fp}) {
+		t.Fatalf("a key the controller has not loaded was reported: keys %d, pending %v", len(r.Keys), r.Pending)
+	}
+
+	// the control plane asks again; the key is there, and the restart is
+	// retried
+	failDeletes.Store(false)
+	out, err = dst.sync.Restore(ctx, protocol.Command{Payload: restorePayload(k1.fp)})
+	if res := out.(protocol.KeysRestoreResult); err != nil || len(res.AlreadyPresent) != 1 || !res.ControllerRestarted || !dst.restarted(t) {
+		t.Fatalf("second restore: err = %v, result = %+v", err, res)
+	}
+	dst.replacePod(t)
+	if r, err = inv.Collect(ctx); err != nil || !containsKey(r.Keys, k1.fp) || len(r.Pending) != 0 {
+		t.Fatalf("after the new pod started: err = %v, keys %d, pending %v", err, len(r.Keys), r.Pending)
+	}
+}
+
+// Without another restore command, the check-in loop retries the restart,
+// backing off between attempts.
+func TestKeySync_LoadRestoredBacksOff(t *testing.T) {
+	ctx := context.Background()
+	k1 := newPair(t, time.Now().Add(-time.Hour))
+	restored := k1.secret("restored")
+	restored.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Minute))
+	restored.Annotations = map[string]string{annotationRestoredFrom: escrowedRestoredFromValue}
+	c := newCluster(t, envelope.NewFakeKMS("escrow"), nil, "dev", restored, controllerDeployment())
+	c.kube.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden")
+	})
+	now := time.Now()
+	c.sync.now = func() time.Time { return now }
+
+	c.sync.LoadRestored(ctx, "")
+	c.sync.LoadRestored(ctx, "")
+	if n := podDeletes(c); n != 1 {
+		t.Fatalf("delete attempts = %d, want 1 before the backoff passes", n)
+	}
+	now = now.Add(restartRetry + time.Second)
+	c.sync.LoadRestored(ctx, "")
+	if n := podDeletes(c); n != 2 {
+		t.Fatalf("delete attempts = %d, want 2 after the backoff", n)
+	}
+	// the backoff doubled
+	now = now.Add(restartRetry + time.Second)
+	c.sync.LoadRestored(ctx, "")
+	if n := podDeletes(c); n != 2 {
+		t.Fatalf("delete attempts = %d, want still 2", n)
+	}
+}
+
+// A key held under another label value, such as one relabeled as
+// compromised, is present: restore must never bring it back as active.
+func TestKeySync_RestoreLeavesRelabeledKeys(t *testing.T) {
+	kms := envelope.NewFakeKMS("escrow")
+	k1 := newPair(t, time.Now().Add(-time.Hour))
+	escrow := escrowed(t, kms, k1)
+	relabeled := k1.secret("retired")
+	relabeled.Labels[keyLabel] = "compromised"
+	c := newCluster(t, kms, escrow, "dev", relabeled, controllerDeployment())
+
+	out, err := c.sync.Restore(context.Background(), protocol.Command{Payload: restorePayload(k1.fp)})
+	if res := out.(protocol.KeysRestoreResult); err != nil || len(res.AlreadyPresent) != 1 || len(res.Restored) != 0 || res.ControllerRestarted {
+		t.Fatalf("err = %v, result = %+v", err, res)
+	}
+	if n := len(c.keySecrets(t)); n != 0 {
+		t.Fatalf("restored %d active key secrets", n)
+	}
+}
+
+// The first upload wins and the control plane cannot check private keys,
+// so a key the controller could not use must never be uploaded.
+func TestKeySync_EscrowRefusesUnusableKeys(t *testing.T) {
+	kms := envelope.NewFakeKMS("escrow")
+	good := newPair(t, time.Now().Add(-time.Hour))
+	other := newPair(t, time.Now().Add(-time.Hour))
+	mismatched := newPair(t, time.Now().Add(-time.Hour))
+	mismatched.key = other.key
+	pkcs8 := newPair(t, time.Now().Add(-time.Hour))
+	pkcs8.key = pkcs8.pkcs8AsRSABlock(t)
+
+	escrow := &memEscrow{records: map[string]protocol.EscrowRecord{}}
+	c := newCluster(t, kms, escrow, "dev", good.secret("good"), mismatched.secret("mismatched"), pkcs8.secret("pkcs8"), controllerDeployment())
+	c.sync.Escrow(context.Background(), []string{good.fp, mismatched.fp, pkcs8.fp})
+	if _, ok := escrow.records[good.fp]; !ok || len(escrow.records) != 1 {
+		t.Fatalf("escrowed %v, want only the good key", maps.Keys(escrow.records))
+	}
+}
+
+// The new pods read every key Secret and stop at one they cannot read; with
+// the old pods deleted, the controller would be down.
+func TestKeySync_RefusesARestartThatWouldStopTheController(t *testing.T) {
+	kms := envelope.NewFakeKMS("escrow")
+	k1 := newPair(t, time.Now().Add(-time.Hour))
+	escrow := escrowed(t, kms, k1)
+	broken := newPair(t, time.Now().Add(-48*time.Hour))
+	broken.key = []byte("not a key")
+	c := newCluster(t, kms, escrow, "dev", broken.secret("broken"), controllerDeployment())
+
+	out, err := c.sync.Restore(context.Background(), protocol.Command{Payload: restorePayload(k1.fp)})
+	if res := out.(protocol.KeysRestoreResult); err == nil || !strings.Contains(err.Error(), "would stop it from starting") || res.ControllerRestarted {
+		t.Fatalf("err = %v, result = %+v", err, res)
+	}
+	if c.restarted(t) {
+		t.Fatal("the controller was restarted")
 	}
 }

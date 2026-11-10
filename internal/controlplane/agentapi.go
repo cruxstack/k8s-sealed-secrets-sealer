@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -104,6 +105,7 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 		s.logger.WarnContext(r.Context(), "agent reports capabilities it is not registered for; ignoring them",
 			"event", "agent.capability_ignored", "env", s.env, "agent_id", agent.ID, "capabilities", ignored)
 	}
+	state.CheckInIntervalSeconds = checkInIntervalSeconds(r.Header.Get(protocol.CheckInIntervalHeader))
 	if err := s.store.PutAgentState(r.Context(), state); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to store agent check-in", "agent_id", agent.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -135,10 +137,25 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 	}
 	s.logger.DebugContext(r.Context(), "agent checked in",
 		"event", "agent.checkin", "agent_id", agent.ID, "keys", len(state.Keys), "active", state.Controller.ActiveFingerprint)
+	next := fleet.CheckInInterval
+	if state.CheckInIntervalSeconds > 0 {
+		next = state.CheckInInterval()
+	}
 	httpserver.WriteJSON(w, http.StatusOK, protocol.CheckInResponse{
-		NextCheckInSeconds: int(fleet.CheckInInterval / time.Second),
+		NextCheckInSeconds: int(next / time.Second),
 		EscrowNeeded:       escrowNeeded,
 	})
+}
+
+// checkInIntervalSeconds reads an agent's check-in interval header, held
+// within the bounds an agent accepts. It is 0 when the header is missing or
+// not a whole number of seconds, as from agents that predate it.
+func checkInIntervalSeconds(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return min(max(n, int(protocol.MinCheckInInterval/time.Second)), int(protocol.MaxCheckInInterval/time.Second))
 }
 
 func (s *Server) isKnownKey(fp string) bool {

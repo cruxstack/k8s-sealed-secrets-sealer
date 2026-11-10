@@ -28,15 +28,24 @@ rules:
     resourceNames: [{{ $deployment | quote }}]
     verbs: ["get"]
   {{- if .Values.capabilities.keys }}
-  # read key Secrets for the key set and escrow, and create restored ones;
-  # list cannot be narrowed by label, which is why the controller needs a
-  # namespace of its own
+  # list key Secrets for the key set and escrow, and create restored ones;
+  # neither can be narrowed by name or label, which is why the controller
+  # needs a namespace of its own
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["list", "create"]
+  # the controller reads keys only when it starts: see which of its pods
+  # predate a restored key, and delete them so its Deployment starts new
+  # ones; pod names are generated, so this cannot be narrowed by name
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
   {{- end }}
-  {{- if or .Values.capabilities.keys .Values.capabilities.renewal }}
-  # restart the controller after a restore, and turn on key renewal
+  {{- if .Values.capabilities.renewal }}
+  # set --key-renew-period in the controller's arguments. RBAC cannot narrow
+  # a patch to one field, so this allows any change to the controller's
+  # Deployment, and with it running anything as the controller's service
+  # account. See "renewal" in the chart's values.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     resourceNames: [{{ $deployment | quote }}]

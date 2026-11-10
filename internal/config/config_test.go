@@ -224,6 +224,48 @@ func TestLoadAgent_Capabilities(t *testing.T) {
 	}
 }
 
+// An agent can have no capabilities: it still checks in and reports its
+// controller's active key, and needs no KMS key.
+func TestLoadAgent_NoCapabilities(t *testing.T) {
+	for _, v := range []string{"", "none", " none "} {
+		vars := agentEnv(map[string]string{"APP_CAPABILITIES": v})
+		delete(vars, "APP_KMS_TRANSIT_KEY_ID")
+		cfg, err := loadAgent(env(vars))
+		if err != nil {
+			t.Fatalf("%q: %v", v, err)
+		}
+		if len(cfg.Capabilities) != 0 {
+			t.Errorf("%q: Capabilities = %v, want none", v, cfg.Capabilities)
+		}
+	}
+	if _, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": "none,seal"}))); err == nil || !strings.Contains(err.Error(), "none cannot be combined") {
+		t.Fatalf("none with seal: %v", err)
+	}
+}
+
+// A trailing slash in the control plane's URL must not reach the token
+// audience: the control plane compares it with its own URL, without one.
+func TestLoadAgent_TrailingSlash(t *testing.T) {
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CONTROL_PLANE_URL": "https://sealer.dev.example.com/"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ControlPlaneURL != "https://sealer.dev.example.com" || cfg.IdentityAudience != cfg.ControlPlaneURL {
+		t.Errorf("url = %q, audience = %q", cfg.ControlPlaneURL, cfg.IdentityAudience)
+	}
+}
+
+// A Deployment's name may contain dots, unlike a Service's.
+func TestLoadAgent_ControllerDeploymentName(t *testing.T) {
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CONTROLLER_DEPLOYMENT": "sealed-secrets.controller"})))
+	if err != nil || cfg.ControllerDeployment != "sealed-secrets.controller" {
+		t.Fatalf("deployment = %q, err = %v", cfg.ControllerDeployment, err)
+	}
+	if _, err := loadAgent(env(agentEnv(map[string]string{"APP_CONTROLLER_DEPLOYMENT": "Not_Valid"}))); err == nil || !strings.Contains(err.Error(), "DNS-1123 subdomain") {
+		t.Fatalf("invalid name: %v", err)
+	}
+}
+
 func TestLoadAgent_IdentityMode(t *testing.T) {
 	cfg, err := loadAgent(env(agentEnv(nil)))
 	if err != nil {

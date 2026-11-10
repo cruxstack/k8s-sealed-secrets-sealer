@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -64,6 +65,10 @@ type AWSIdentity struct {
 	endpoint string
 	signer   *v4.Signer
 	now      func() time.Time
+
+	mu sync.Mutex
+	// signedAt is the second the last request was signed in
+	signedAt time.Time
 }
 
 // AWSIdentityOptions configures an AWSIdentity.
@@ -73,7 +78,7 @@ type AWSIdentityOptions struct {
 	Region string
 	// Audience names the control plane; it is signed into the request.
 	Audience string
-	// Endpoint overrides https://sts.<region>.amazonaws.com, for tests.
+	// Endpoint overrides the region's STS endpoint, for tests.
 	Endpoint string
 	Now      func() time.Time
 }
@@ -85,7 +90,7 @@ func NewAWSIdentity(opts AWSIdentityOptions) (*AWSIdentity, error) {
 	}
 	endpoint := opts.Endpoint
 	if endpoint == "" {
-		endpoint = "https://sts." + opts.Region + ".amazonaws.com/"
+		endpoint = stsEndpoint(opts.Region)
 	}
 	now := opts.Now
 	if now == nil {
@@ -99,6 +104,16 @@ func NewAWSIdentity(opts AWSIdentityOptions) (*AWSIdentity, error) {
 		signer:   v4.NewSigner(),
 		now:      now,
 	}, nil
+}
+
+// stsEndpoint is a region's STS endpoint; the China regions have their own
+// domain.
+func stsEndpoint(region string) string {
+	domain := "amazonaws.com"
+	if strings.HasPrefix(region, "cn-") {
+		domain = "amazonaws.com.cn"
+	}
+	return "https://sts." + region + "." + domain + "/"
 }
 
 // LoginRequest signs a fresh sts:GetCallerIdentity request. Each one can be
@@ -116,7 +131,7 @@ func (a *AWSIdentity) LoginRequest(ctx context.Context) (protocol.SessionRequest
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
 	req.Header.Set(protocol.AWSAudienceHeader, a.audience)
 	sum := sha256.Sum256([]byte(body))
-	if err := a.signer.SignHTTP(ctx, creds, req, hex.EncodeToString(sum[:]), "sts", a.region, a.now().UTC()); err != nil {
+	if err := a.signer.SignHTTP(ctx, creds, req, hex.EncodeToString(sum[:]), "sts", a.region, a.signingTime()); err != nil {
 		return protocol.SessionRequest{}, fmt.Errorf("failed to sign sts request: %w", err)
 	}
 	headers := map[string]string{}
@@ -127,4 +142,19 @@ func (a *AWSIdentity) LoginRequest(ctx context.Context) (protocol.SessionRequest
 		Method: protocol.MethodAWSSTS,
 		AWS:    &protocol.SignedRequest{URL: a.endpoint, Headers: headers, Body: body},
 	}, nil
+}
+
+// signingTime is the time to sign a request at: now, or the second after the
+// last request's when that was signed in this second. Signatures carry whole
+// seconds, so two requests signed in one second are the same request, and
+// the control plane accepts a signed request only once.
+func (a *AWSIdentity) signingTime() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t := a.now().UTC()
+	if !t.Truncate(time.Second).After(a.signedAt) {
+		t = a.signedAt.Add(time.Second)
+	}
+	a.signedAt = t.Truncate(time.Second)
+	return t
 }

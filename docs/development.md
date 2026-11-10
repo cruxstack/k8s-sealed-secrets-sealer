@@ -343,7 +343,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_IDENTITY_AUDIENCE`            | agent         | `APP_CONTROL_PLANE_URL`            |
 | `APP_IDENTITY_TOKEN_FILE`          | agent         | the chart's projected token        |
 | `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region               |
-| `APP_CAPABILITIES`                 | agent         | `seal`                             |
+| `APP_CAPABILITIES`                 | agent         | `seal` (`none` for none)           |
 | `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)                   |
 | `APP_CONTROLLER_NAMESPACE`         | agent         | required                           |
 | `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |

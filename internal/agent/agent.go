@@ -18,6 +18,10 @@ import (
 // cycleTimeout bounds one inventory and check-in.
 const cycleTimeout = 30 * time.Second
 
+// keysWarnAt is how many keys make the agent warn that its key set nears the
+// most a check-in may report (protocol.MaxKeys).
+const keysWarnAt = protocol.MaxKeys * 4 / 5
+
 // Collector reads the controller.
 type Collector interface {
 	Collect(ctx context.Context) (Report, error)
@@ -33,6 +37,12 @@ type Escrower interface {
 	Escrow(ctx context.Context, fingerprints []string)
 }
 
+// KeyLoader gets the controller to load keys restored into it; active is the
+// key it seals with.
+type KeyLoader interface {
+	LoadRestored(ctx context.Context, active string)
+}
+
 // Options configures an Agent.
 type Options struct {
 	Inventory    Collector
@@ -41,9 +51,11 @@ type Options struct {
 	Capabilities []string
 	// Commands are the command types the agent runs.
 	Commands []string
-	// Escrow uploads keys after a check-in asks for them; nil without the
-	// keys capability.
+	// Escrow uploads keys after a check-in asks for them, and Loader
+	// restarts the controller while restored keys are not loaded; both are
+	// nil without the keys capability.
 	Escrow  Escrower
+	Loader  KeyLoader
 	Logger  *slog.Logger
 	Version string
 	// Now overrides the clock, for tests.
@@ -58,6 +70,7 @@ type Agent struct {
 	capabilities []string
 	commands     []string
 	escrow       Escrower
+	loader       KeyLoader
 	logger       *slog.Logger
 	version      string
 	now          func() time.Time
@@ -65,6 +78,7 @@ type Agent struct {
 	mu          sync.RWMutex
 	active      string
 	lastCheckIn time.Time
+	keyCount    int
 }
 
 // New returns an Agent. It makes no network calls.
@@ -84,6 +98,7 @@ func New(opts Options) *Agent {
 		capabilities: opts.Capabilities,
 		commands:     opts.Commands,
 		escrow:       opts.Escrow,
+		loader:       opts.Loader,
 		logger:       logger,
 		version:      opts.Version,
 		now:          now,
@@ -117,15 +132,21 @@ func (a *Agent) cycle(ctx context.Context) {
 		return
 	}
 	a.noteActiveKey(ctx, report)
+	a.noteKeyCount(ctx, len(report.Keys))
 
-	commands := a.commands
+	// an agent with no capabilities still checks in, reporting its
+	// controller's active key; empty lists, not null
+	capabilities, commands := a.capabilities, a.commands
+	if capabilities == nil {
+		capabilities = []string{}
+	}
 	if commands == nil {
 		commands = []string{}
 	}
 	resp, err := a.controlPlane.CheckIn(ctx, protocol.CheckIn{
 		Protocol:     protocol.Version,
 		AgentVersion: a.version,
-		Capabilities: a.capabilities,
+		Capabilities: capabilities,
 		Commands:     commands,
 		Controller:   report.Controller,
 		Keys:         report.Keys,
@@ -146,6 +167,28 @@ func (a *Agent) cycle(ctx context.Context) {
 	}
 	if a.escrow != nil && len(resp.EscrowNeeded) > 0 {
 		a.escrow.Escrow(ctx, resp.EscrowNeeded)
+	}
+	if a.loader != nil && len(report.Pending) > 0 {
+		a.loader.LoadRestored(ctx, report.Controller.ActiveFingerprint)
+	}
+}
+
+// noteKeyCount warns when the key set reaches keysWarnAt keys, and again
+// whenever the count changes from there: a check-in reporting more than
+// protocol.MaxKeys is refused.
+func (a *Agent) noteKeyCount(ctx context.Context, n int) {
+	a.mu.Lock()
+	changed := a.keyCount != n
+	a.keyCount = n
+	a.mu.Unlock()
+	switch {
+	case !changed || n < keysWarnAt:
+	case n > protocol.MaxKeys:
+		a.logger.ErrorContext(ctx, "controller holds more sealing keys than a check-in may report; the control plane refuses them",
+			"event", "controller.too_many_keys", "keys", n, "limit", protocol.MaxKeys)
+	default:
+		a.logger.WarnContext(ctx, "controller holds nearly as many sealing keys as a check-in may report",
+			"event", "controller.many_keys", "keys", n, "limit", protocol.MaxKeys)
 	}
 }
 

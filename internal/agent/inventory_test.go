@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -40,13 +41,48 @@ func keySecret(name string, cert []byte, labeled bool) *corev1.Secret {
 	return s
 }
 
+// controllerLabels select the controller's pods.
+var controllerLabels = map[string]string{"app.kubernetes.io/name": "sealed-secrets"}
+
 func controllerDeployment(args ...string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sealed-secrets-controller", Namespace: ns},
-		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "controller", Command: []string{"controller"}, Args: args}},
-		}}},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: controllerLabels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: controllerLabels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "controller", Command: []string{"controller"}, Args: args}},
+				},
+			},
+		},
 	}
+}
+
+// controllerPod is a running controller pod created at created.
+func controllerPod(name string, created time.Time, ready bool) *corev1.Pod {
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Labels: controllerLabels,
+			UID: types.UID(name), CreationTimestamp: metav1.NewTime(created),
+		},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
+		},
+	}
+}
+
+// restoredSecret is a key Secret the agent restored at created.
+func restoredSecret(name string, cert []byte, created time.Time) *corev1.Secret {
+	s := keySecret(name, cert, true)
+	s.CreationTimestamp = metav1.NewTime(created)
+	s.Annotations = map[string]string{annotationRestoredFrom: escrowedRestoredFromValue}
+	return s
 }
 
 func inventory(certs CertSource, listKeys bool, objs ...runtime.Object) *Inventory {
@@ -105,6 +141,23 @@ func TestInventory_ActiveOnlyWithoutKeysCapability(t *testing.T) {
 	}
 }
 
+// The controller also takes its settings from SEALED_SECRETS_ variables.
+func TestInventory_SettingsFromVariables(t *testing.T) {
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now())
+	d := controllerDeployment("--update-status")
+	d.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", Value: "SecretCreationTimestamp"},
+		{Name: "SEALED_SECRETS_ROTATE_PERIOD", Value: "0"},
+	}
+	r, err := inventory(staticCerts{pem: active}, false, d).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Controller.KeyRenewPeriod != "0s" || r.Controller.KeyOrderPriority != "SecretCreationTimestamp" {
+		t.Errorf("flags = %q / %q", r.Controller.KeyRenewPeriod, r.Controller.KeyOrderPriority)
+	}
+}
+
 func TestInventory_UnknownFlagsWhenDeploymentForbidden(t *testing.T) {
 	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now())
 	inv := inventory(staticCerts{pem: active}, false)
@@ -140,18 +193,79 @@ func TestInventory_FailsWithoutActiveCert(t *testing.T) {
 	}
 }
 
-func TestFlagValue(t *testing.T) {
-	args := []string{"controller", "--update-status", "--key-renew-period", "24h", "-key-order-priority=CertNotBefore", "--key-prefix"}
-	if v, ok := flagValue(args, "key-renew-period"); !ok || v != "24h" {
-		t.Errorf("key-renew-period = %q %v", v, ok)
+// A key the agent restored is held only once a controller pod started after
+// it; until then it is left out of the report and listed as pending.
+func TestInventory_LeavesOutRestoredKeysNotLoaded(t *testing.T) {
+	now := time.Now()
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), now.Add(-48*time.Hour))
+	restored := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), now.Add(-time.Hour))
+	restoredKey, _ := toProtocolKey(restored)
+	objs := []runtime.Object{
+		keySecret("own", active, true),
+		restoredSecret("restored", restored, now.Add(-time.Minute)),
+		controllerDeployment(),
 	}
-	if v, ok := flagValue(args, "key-order-priority"); !ok || v != "CertNotBefore" {
-		t.Errorf("key-order-priority = %q %v", v, ok)
+
+	inv := inventory(staticCerts{pem: active}, true, append(objs, controllerPod("old", now.Add(-time.Hour), true))...)
+	r, err := inv.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := flagValue(args, "key-prefix"); ok {
-		t.Error("a trailing flag without a value was found")
+	if containsKey(r.Keys, restoredKey.Fingerprint) || len(r.Keys) != 1 || len(r.Pending) != 1 || r.Pending[0] != restoredKey.Fingerprint {
+		t.Fatalf("keys = %d, pending = %v", len(r.Keys), r.Pending)
 	}
-	if _, ok := flagValue(args, "missing"); ok {
-		t.Error("missing flag found")
+
+	inv = inventory(staticCerts{pem: active}, true, append(objs, controllerPod("new", now, true))...)
+	if r, err = inv.Collect(context.Background()); err != nil || !containsKey(r.Keys, restoredKey.Fingerprint) || len(r.Pending) != 0 {
+		t.Fatalf("after a restart: err = %v, keys = %d, pending = %v", err, len(r.Keys), r.Pending)
 	}
+
+	// pods that cannot be listed prove nothing
+	inv = inventory(staticCerts{pem: active}, true, append(objs, controllerPod("new", now, true))...)
+	inv.kube.(*fake.Clientset).PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("rbac"))
+	})
+	if r, err = inv.Collect(context.Background()); err != nil || containsKey(r.Keys, restoredKey.Fingerprint) {
+		t.Fatalf("with pods unreadable: err = %v, keys = %d", err, len(r.Keys))
+	}
+}
+
+// While the controller restarts it serves nothing; the sealer seals with
+// the keys it reported last, for a while.
+func TestInventory_FallbackWhileControllerUnreachable(t *testing.T) {
+	now := time.Now()
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), now.Add(-time.Hour))
+	certs := &switchableCerts{pem: active}
+	inv := NewInventory(InventoryOptions{
+		Certs: certs, Kube: fake.NewClientset(controllerDeployment()), Namespace: ns,
+		Name: "sealed-secrets-controller", Deployment: "sealed-secrets-controller",
+		Now: func() time.Time { return now },
+	})
+	keys := inv.Fallback(time.Minute)
+	if _, err := keys.Collect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	certs.err = errors.New("no endpoints available")
+	if r, err := keys.Collect(context.Background()); err != nil || len(r.Keys) != 1 {
+		t.Fatalf("within the window: err = %v, keys = %d", err, len(r.Keys))
+	}
+	if _, err := inv.Collect(context.Background()); err == nil {
+		t.Fatal("Collect itself must not fall back: check-ins report what is there")
+	}
+	now = now.Add(2 * time.Minute)
+	if _, err := keys.Collect(context.Background()); err == nil {
+		t.Fatal("fell back to a report older than the window")
+	}
+}
+
+type switchableCerts struct {
+	pem []byte
+	err error
+}
+
+func (s *switchableCerts) ActiveCert(context.Context) ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.pem, nil
 }

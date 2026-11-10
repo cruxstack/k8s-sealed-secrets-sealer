@@ -15,9 +15,10 @@ import (
 
 // Timing shared by agents and the control plane.
 const (
-	CheckInInterval = 15 * time.Second
+	CheckInInterval = protocol.DefaultCheckInInterval
 	// HealthyWithin is how recent an agent's last check-in must be for it to
-	// count as healthy: three missed check-ins make it unhealthy.
+	// count as healthy at the default interval; protocol.HealthWindow gives
+	// it for an agent's own.
 	HealthyWithin = 3 * CheckInInterval
 )
 
@@ -88,7 +89,7 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 		ctrl := s.Controller
 		a.CheckedIn = true
 		a.LastCheckIn = &last
-		a.Healthy = now.Sub(last) <= HealthyWithin
+		a.Healthy = now.Sub(last) <= protocol.HealthWindow(s.CheckInInterval())
 		a.AgentVersion = s.AgentVersion
 		a.Capabilities = s.Capabilities
 		a.Commands = s.Commands

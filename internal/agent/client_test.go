@@ -1,14 +1,20 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,6 +184,30 @@ func TestClient_EscrowPathIsOneSegment(t *testing.T) {
 	}
 }
 
+// Check-ins carry the agent's interval, so the control plane counts it
+// healthy for three of them.
+func TestClient_ReportsItsCheckInInterval(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "session:"+r.Header.Get(protocol.CheckInIntervalHeader))
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a"})
+	})
+	mux.HandleFunc("POST /agent/v1/checkin", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "checkin:"+r.Header.Get(protocol.CheckInIntervalHeader))
+		_ = json.NewEncoder(w).Encode(protocol.CheckInResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)}, CheckInInterval: time.Minute})
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "session:,checkin:60" {
+		t.Fatalf("interval headers = %v", got)
+	}
+}
+
 // Every request names the agent's env, so a control plane serving several
 // envs sends it to this one.
 func TestClient_NamesItsEnv(t *testing.T) {
@@ -203,5 +233,143 @@ func TestClient_NamesItsEnv(t *testing.T) {
 	}
 	if strings.Join(envs, ",") != "prod,prod" {
 		t.Fatalf("env headers = %q", envs)
+	}
+}
+
+func tokenFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The check-in and command loops start together; their logins must not
+// race, or the control plane refuses the second signed request as a replay.
+func TestClient_OneLoginAtATime(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		logins.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a", Env: "dev"})
+	})
+	mux.HandleFunc("POST /agent/v1/checkin", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(protocol.CheckInResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)}})
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("logins = %d, want 1", n)
+	}
+}
+
+// A redirect would resend a signed login or an escrowed key elsewhere.
+func TestClient_DoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/elsewhere", func(http.ResponseWriter, *http.Request) { followed.Store(true) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)}, HTTPClient: srv.Client()})
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("err = %v", err)
+	}
+	if followed.Load() {
+		t.Fatal("the redirect was followed")
+	}
+}
+
+// A response cut at the size limit must fail as too large, not as JSON
+// that does not parse.
+func TestClient_RefusesOversizedResponse(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a"})
+	})
+	mux.HandleFunc("GET /agent/v1/commands", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"commands":[{"id":"%s"}]}`, strings.Repeat("x", maxResponseBytes))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)}})
+	if _, err := c.Commands(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Sessions and commands expire in the control plane's time, so a clock that
+// is off must not make every session look expired.
+func TestClient_UsesTheControlPlanesClock(t *testing.T) {
+	cpNow := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	local := cpNow.Add(20 * time.Minute) // this agent's clock is 20 minutes fast
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		logins.Add(1)
+		w.Header().Set("Date", cpNow.Format(http.TimeFormat))
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: cpNow.Add(15 * time.Minute), AgentID: "a"})
+	})
+	mux.HandleFunc("POST /agent/v1/checkin", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Date", cpNow.Format(http.TimeFormat))
+		_ = json.NewEncoder(w).Encode(protocol.CheckInResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	var logs bytes.Buffer
+	c := NewClient(ClientOptions{
+		BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: tokenFile(t)},
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return local },
+	})
+	for range 3 {
+		if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("logins = %d, want 1: the session looked expired by the agent's clock", n)
+	}
+	if got := c.Now(); !got.Equal(cpNow) {
+		t.Fatalf("Now = %s, want the control plane's %s", got, cpNow)
+	}
+	if !strings.Contains(logs.String(), "event=agent.clock_skew") {
+		t.Errorf("skew not logged:\n%s", logs.String())
+	}
+}
+
+func TestRetryable(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"unreachable":   {&url.Error{Op: "Post", URL: "https://cp", Err: errors.New("connection refused")}, true},
+		"server error":  {&statusError{code: http.StatusBadGateway}, true},
+		"throttled":     {&statusError{code: http.StatusTooManyRequests}, true},
+		"refused":       {&statusError{code: http.StatusConflict}, false},
+		"bad request":   {&statusError{code: http.StatusBadRequest}, false},
+		"unauthorized":  {errUnauthorized, false},
+		"not found":     {fmt.Errorf("x: %w", errNotFound), false},
+		"shutting down": {&url.Error{Op: "Post", URL: "https://cp", Err: context.Canceled}, false},
+		"other":         {errors.New("failed to decode"), false},
+	}
+	for name, tc := range cases {
+		if got := retryable(tc.err); got != tc.want {
+			t.Errorf("%s: retryable = %v, want %v", name, got, tc.want)
+		}
 	}
 }
