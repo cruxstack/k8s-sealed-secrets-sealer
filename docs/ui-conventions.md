@@ -36,6 +36,14 @@ whether sealing works from the dot on the env badge, with a summary in its
 tooltip; when it doesn't, the workspace says so above the files, since seals
 would fail.
 
+Under its agents, the fleet lists the env's keys, newest first: how many
+clusters hold each, its escrowed copies, and its status as a badge (env key,
+active, revoked, future-dated). Revoking a key is a ghost button on its row
+that opens a dialog saying what revoking does and does not do, with a
+destructive confirm; a revoked key's row is dimmed and offers Reinstate. A
+notice under the env key warns when a cluster's keys reach half or 80% of
+the key limit, or go past it.
+
 Someone who may use several envs gets a switcher in place of the badge: the
 same dot and name, opening a menu of their envs (the current one checked,
 those they administer marked), the env's sealing summary, and its fleet for
