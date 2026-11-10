@@ -6,6 +6,8 @@ export interface AuthUser {
   login: string;
   name?: string;
   avatar_url?: string;
+  /** Admins (members of an admin team) may see the fleet. */
+  admin?: boolean;
 }
 
 /** GET /api/v1/auth/me */
@@ -60,6 +62,14 @@ export interface Fleet {
   agents: FleetAgent[] | null;
 }
 
+/** GET /api/v1/status: whether values can be sealed in the env. */
+export interface SealingStatus {
+  env: string;
+  sealing: "ready" | "degraded" | "unavailable";
+  message: string;
+  clusters: { ready: number; total: number };
+}
+
 /** Body of every API error response. */
 export interface ApiErrorEnvelope {
   error: string;
@@ -93,6 +103,12 @@ export interface SealedSecretDocument {
   keys: string[];
   /** Why values cannot be sealed into it; absent when they can. */
   problem?: string;
+  /** Optional hints from the document's annotations, for people. */
+  description?: string;
+  /** The keys the document should hold. */
+  expected_keys?: string[];
+  /** An http(s) link to the secret's docs. */
+  docs?: string;
 }
 
 /** A file holding SealedSecret documents for this env. */

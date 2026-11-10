@@ -27,7 +27,7 @@ validate deploy/helm/control-plane "${control_plane[@]}"
 validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-east-1 \
   --set agentAudience=https://agents.example.com --set dynamodb.endpoint=http://dynamodb:8000 \
   --set dynamodb.createTable=true --set 'aws.stsHosts={sts.us-east-1.amazonaws.com}' \
-  --set 'github.allowedTeams={sealers,admins}' --set github.allowInsecure=true \
+  --set 'github.allowedTeams={sealers,admins}' --set 'github.adminTeams={admins}' --set github.allowInsecure=true \
   --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token \
   --set github.installationID=777 --set 'discovery.fileGlobs={*.sealed.yaml,secrets/*/*.yaml}' \
   --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080

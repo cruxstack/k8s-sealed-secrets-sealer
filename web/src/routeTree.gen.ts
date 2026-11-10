@@ -13,7 +13,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as FleetRouteImport } from './routes/fleet'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ReposIndexRouteImport } from './routes/repos.index'
+import { Route as SecretsIndexRouteImport } from './routes/secrets.index'
 import { Route as ReposOwnerRepoRouteImport } from './routes/repos.$owner.$repo'
+import { Route as SecretsOwnerRepoRouteImport } from './routes/secrets.$owner.$repo'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -35,9 +37,19 @@ const ReposIndexRoute = ReposIndexRouteImport.update({
   path: '/repos/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecretsIndexRoute = SecretsIndexRouteImport.update({
+  id: '/secrets/',
+  path: '/secrets/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ReposOwnerRepoRoute = ReposOwnerRepoRouteImport.update({
   id: '/repos/$owner/$repo',
   path: '/repos/$owner/$repo',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecretsOwnerRepoRoute = SecretsOwnerRepoRouteImport.update({
+  id: '/secrets/$owner/$repo',
+  path: '/secrets/$owner/$repo',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -46,14 +58,18 @@ export interface FileRoutesByFullPath {
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos/': typeof ReposIndexRoute
+  '/secrets/': typeof SecretsIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
+  '/secrets/$owner/$repo': typeof SecretsOwnerRepoRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos': typeof ReposIndexRoute
+  '/secrets': typeof SecretsIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
+  '/secrets/$owner/$repo': typeof SecretsOwnerRepoRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -61,14 +77,38 @@ export interface FileRoutesById {
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos/': typeof ReposIndexRoute
+  '/secrets/': typeof SecretsIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
+  '/secrets/$owner/$repo': typeof SecretsOwnerRepoRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/fleet' | '/login' | '/repos/' | '/repos/$owner/$repo'
+  fullPaths:
+    | '/'
+    | '/fleet'
+    | '/login'
+    | '/repos/'
+    | '/secrets/'
+    | '/repos/$owner/$repo'
+    | '/secrets/$owner/$repo'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/fleet' | '/login' | '/repos' | '/repos/$owner/$repo'
-  id: '__root__' | '/' | '/fleet' | '/login' | '/repos/' | '/repos/$owner/$repo'
+  to:
+    | '/'
+    | '/fleet'
+    | '/login'
+    | '/repos'
+    | '/secrets'
+    | '/repos/$owner/$repo'
+    | '/secrets/$owner/$repo'
+  id:
+    | '__root__'
+    | '/'
+    | '/fleet'
+    | '/login'
+    | '/repos/'
+    | '/secrets/'
+    | '/repos/$owner/$repo'
+    | '/secrets/$owner/$repo'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -76,7 +116,9 @@ export interface RootRouteChildren {
   FleetRoute: typeof FleetRoute
   LoginRoute: typeof LoginRoute
   ReposIndexRoute: typeof ReposIndexRoute
+  SecretsIndexRoute: typeof SecretsIndexRoute
   ReposOwnerRepoRoute: typeof ReposOwnerRepoRoute
+  SecretsOwnerRepoRoute: typeof SecretsOwnerRepoRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -109,11 +151,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ReposIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/secrets/': {
+      id: '/secrets/'
+      path: '/secrets'
+      fullPath: '/secrets/'
+      preLoaderRoute: typeof SecretsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/repos/$owner/$repo': {
       id: '/repos/$owner/$repo'
       path: '/repos/$owner/$repo'
       fullPath: '/repos/$owner/$repo'
       preLoaderRoute: typeof ReposOwnerRepoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/secrets/$owner/$repo': {
+      id: '/secrets/$owner/$repo'
+      path: '/secrets/$owner/$repo'
+      fullPath: '/secrets/$owner/$repo'
+      preLoaderRoute: typeof SecretsOwnerRepoRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -124,7 +180,9 @@ const rootRouteChildren: RootRouteChildren = {
   FleetRoute: FleetRoute,
   LoginRoute: LoginRoute,
   ReposIndexRoute: ReposIndexRoute,
+  SecretsIndexRoute: SecretsIndexRoute,
   ReposOwnerRepoRoute: ReposOwnerRepoRoute,
+  SecretsOwnerRepoRoute: SecretsOwnerRepoRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

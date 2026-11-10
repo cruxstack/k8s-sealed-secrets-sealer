@@ -90,12 +90,15 @@ type ControlPlane struct {
 	// GitHub sign-in. GitHubURL is the web host (the authorize page users
 	// are sent to); GitHubAPIURL and GitHubOAuthTokenURL are called by the
 	// control plane. AllowInsecureGitHub permits http, for local mocks only.
-	GitHubURL               string
-	GitHubAPIURL            string
-	GitHubOAuthTokenURL     string
-	AllowInsecureGitHub     bool
-	GitHubOrg               string
-	GitHubAllowedTeams      []string
+	GitHubURL           string
+	GitHubAPIURL        string
+	GitHubOAuthTokenURL string
+	AllowInsecureGitHub bool
+	GitHubOrg           string
+	GitHubAllowedTeams  []string
+	// GitHubAdminTeams are teams whose members are admins and may see the
+	// fleet; empty means nobody is.
+	GitHubAdminTeams        []string
 	GitHubOAuthClientID     string
 	GitHubOAuthClientSecret string
 	// UserSessionKey signs user session cookies; UserSessionTTL is their
@@ -239,6 +242,11 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 	for _, team := range strings.Split(r.str("APP_GITHUB_ALLOWED_TEAMS", ""), ",") {
 		if team = strings.TrimSpace(team); team != "" {
 			cfg.GitHubAllowedTeams = append(cfg.GitHubAllowedTeams, team)
+		}
+	}
+	for _, team := range strings.Split(r.str("APP_GITHUB_ADMIN_TEAMS", ""), ",") {
+		if team = strings.TrimSpace(team); team != "" {
+			cfg.GitHubAdminTeams = append(cfg.GitHubAdminTeams, team)
 		}
 	}
 	cfg.GitHubOAuthClientID = r.required(r.str("APP_GITHUB_OAUTH_CLIENT_ID", ""), "APP_GITHUB_OAUTH_CLIENT_ID")

@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { useShortcut } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
+import { fileHints, missingKeys } from "./hints";
 
 export type FileStatus = "ready" | "blocked" | "unreadable";
 
@@ -16,6 +17,8 @@ export function fileStatus(file: RepositoryFile): FileStatus {
   if (docs.length === 0 || docs.some((d) => d.problem)) return "blocked";
   return "ready";
 }
+
+const NONE: ReadonlySet<string> = new Set();
 
 const STATUS: Record<FileStatus, { label: string; dot: string }> = {
   ready: { label: "Ready", dot: "bg-success" },
@@ -64,8 +67,8 @@ export function FileList({
 }: {
   files: RepositoryFile[];
   selected: string | undefined;
-  /** Pending changes per file path. */
-  pending: Map<string, number>;
+  /** Keys with a value waiting in the session, per file path. */
+  pending: Map<string, Set<string>>;
   globs: string[];
   onSelect: (path: string) => void;
 }) {
@@ -75,8 +78,13 @@ export function FileList({
   useShortcut("/", () => filterRef.current?.focus());
 
   const needle = filter.trim().toLowerCase();
+  // a file matches on its path or on what it is for
   const shown = needle
-    ? files.filter((f) => f.path.toLowerCase().includes(needle))
+    ? files.filter(
+        (f) =>
+          f.path.toLowerCase().includes(needle) ||
+          fileHints(f).description?.toLowerCase().includes(needle),
+      )
     : files;
 
   const buttons = () =>
@@ -146,7 +154,10 @@ export function FileList({
           {shown.map((f, i) => {
             const status = fileStatus(f);
             const isSelected = f.path === selected;
-            const count = pending.get(f.path) ?? 0;
+            const keys = pending.get(f.path) ?? NONE;
+            const count = keys.size;
+            const { description } = fileHints(f);
+            const missing = status === "unreadable" ? [] : missingKeys(f, keys);
             return (
               <li key={f.path}>
                 <button
@@ -171,19 +182,42 @@ export function FileList({
                     />
                     <span className="min-w-0 flex-1">
                       <FilePath path={f.path} />
-                      <span className="mt-0.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                        {summary(f)}
-                        {count > 0 && (
-                          <Badge className="shrink-0">
-                            {count}{" "}
-                            <span className="sr-only">
-                              {count === 1
-                                ? "pending change"
-                                : "pending changes"}
-                            </span>
-                            <span aria-hidden="true">pending</span>
-                          </Badge>
-                        )}
+                      {description && (
+                        <span
+                          className="mt-0.5 block truncate text-xs text-foreground/80"
+                          title={description}
+                        >
+                          {description}
+                        </span>
+                      )}
+                      {/* the badges wrap below the summary as one group */}
+                      <span className="mt-0.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                        <span className="whitespace-nowrap">{summary(f)}</span>
+                        <span className="flex shrink-0 items-center gap-1">
+                          {missing.length > 0 && (
+                            <Badge
+                              variant="outline"
+                              className="border-dashed border-warning/60 text-warning"
+                              title={`Expected but not set: ${missing.join(", ")}`}
+                            >
+                              {missing.length} missing
+                              <span className="sr-only">
+                                {missing.length === 1 ? " key" : " keys"}
+                              </span>
+                            </Badge>
+                          )}
+                          {count > 0 && (
+                            <Badge className="shrink-0">
+                              {count}{" "}
+                              <span className="sr-only">
+                                {count === 1
+                                  ? "pending change"
+                                  : "pending changes"}
+                              </span>
+                              <span aria-hidden="true">pending</span>
+                            </Badge>
+                          )}
+                        </span>
                       </span>
                     </span>
                   </span>

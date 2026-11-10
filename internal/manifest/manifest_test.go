@@ -146,3 +146,51 @@ func TestFind_Rejects(t *testing.T) {
 		t.Errorf("small alias use refused: %v", err)
 	}
 }
+
+func TestFind_Hints(t *testing.T) {
+	in := `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: billing
+  namespace: apps
+  annotations:
+    example.com/env: dev
+    example.com/description: |
+      Billing service credentials,
+      rotated ` + "\u202e" + `quarterly.` + "\u200b" + `
+    example.com/keys: "api-token, db-password api-token bad/key"
+    example.com/docs: https://docs.example.com/runbooks/billing
+spec:
+  encryptedData: {}
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: other
+  namespace: apps
+  annotations:
+    example.com/env: dev
+    example.com/docs: "javascript:alert(1)"
+    example.com/description: "` + strings.Repeat("x", 400) + `"
+spec:
+  encryptedData: {}
+`
+	ann := Annotations{Env: "example.com/env"}
+	if ann.Hint("keys") != "example.com/keys" || (Annotations{Env: "env"}).Hint("docs") != DefaultPrefix+"/docs" {
+		t.Fatalf("hint keys: %s, %s", ann.Hint("keys"), (Annotations{Env: "env"}).Hint("docs"))
+	}
+	docs, err := Find([]byte(in), ann, "dev")
+	if err != nil || len(docs) != 2 {
+		t.Fatalf("Find = %+v, %v", docs, err)
+	}
+	d := docs[0]
+	if d.Description != "Billing service credentials, rotated quarterly." ||
+		strings.Join(d.ExpectedKeys, ",") != "api-token,db-password" ||
+		d.Docs != "https://docs.example.com/runbooks/billing" || d.Problem != "" {
+		t.Fatalf("hints = %q %q %q", d.Description, d.ExpectedKeys, d.Docs)
+	}
+	// an unsafe link is dropped and a long description cut
+	if docs[1].Docs != "" || len([]rune(docs[1].Description)) != maxDescriptionRunes || !strings.HasSuffix(docs[1].Description, "…") {
+		t.Fatalf("other hints = %q (%d), %q", docs[1].Description, len(docs[1].Description), docs[1].Docs)
+	}
+}

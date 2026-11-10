@@ -383,10 +383,24 @@ agents:
 	if rec := get("/api/v1/fleet", agentSession); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("fleet with an agent session as cookie = %d", rec.Code)
 	}
-	session, _, _ := userSessions.Issue(userauth.User{ID: 1001, Login: "alice"})
-	rec := get("/api/v1/fleet", session)
+	// the fleet is for admins
+	session, _, _ := userSessions.Issue(userauth.User{ID: 1004, Login: "dave"})
+	if rec := get("/api/v1/fleet", session); rec.Code != http.StatusForbidden {
+		t.Fatalf("fleet for a user who is not an admin = %d", rec.Code)
+	}
+	admin, _, _ := userSessions.Issue(userauth.User{ID: 1001, Login: "alice", Admin: true})
+	rec := get("/api/v1/fleet", admin)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"use1-blue"`) {
 		t.Fatalf("fleet = %d %s", rec.Code, rec.Body)
+	}
+	// everyone sees whether sealing works, without agent names
+	rec = get("/api/v1/status", session)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"sealing":"unavailable"`) ||
+		!strings.Contains(rec.Body.String(), `"total":1`) || strings.Contains(rec.Body.String(), "use1-blue") {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+	if rec := get("/api/v1/status", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status without a session = %d", rec.Code)
 	}
 
 	if rec := get("/api/v1/nope", session); rec.Code != http.StatusNotFound || !strings.Contains(rec.Header().Get("Content-Type"), "json") {

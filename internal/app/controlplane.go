@@ -84,6 +84,7 @@ func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog
 		Env:          cfg.EnvName,
 		Org:          cfg.GitHubOrg,
 		Teams:        cfg.GitHubAllowedTeams,
+		AdminTeams:   cfg.GitHubAdminTeams,
 		Logger:       logger,
 	})
 
@@ -115,7 +116,7 @@ func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog
 
 	logger.InfoContext(ctx, "starting control plane",
 		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
-		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams)
+		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams, "github_admin_teams", cfg.GitHubAdminTeams)
 	srv := controlplane.New(controlplane.Options{
 		Logger:   logger,
 		Version:  version.Version,

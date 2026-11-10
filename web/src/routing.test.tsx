@@ -10,7 +10,7 @@ import {
 import apiClient, { navigation } from "@/api/client";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { routeTree } from "@/routeTree.gen";
-import { ME, fakeApi } from "@/test/fake-api";
+import { ADMIN, ME, fakeApi, listing } from "@/test/fake-api";
 
 function renderApp(path: string) {
   const queryClient = new QueryClient({
@@ -99,7 +99,7 @@ describe("auth routing", () => {
     expect(link).toHaveAttribute("href", "/api/v1/auth/login");
   });
 
-  it("sends a signed-in user from /login to their repositories", async () => {
+  it("sends a signed-in user from /login to their secrets", async () => {
     const api = fakeApi({ me: ME });
     apiClient.defaults.adapter = api.adapter;
     const { router, navigations } = renderApp("/login");
@@ -108,10 +108,51 @@ describe("auth routing", () => {
       await screen.findByRole("button", { name: /account menu for octocat/i }),
     ).toBeInTheDocument();
     await waitFor(() => expect(router.state.status).toBe("idle"));
-    expect(router.state.location.pathname).toBe("/repos");
+    expect(router.state.location.pathname).toBe("/secrets");
     expect(navigations()).toBeLessThanOrEqual(4);
     expect(
       screen.queryByRole("link", { name: /sign in with github/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps old /repos links working, with their file", async () => {
+    apiClient.defaults.adapter = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+    }).adapter;
+    const { router } = renderApp(
+      "/repos/example-org/apps?file=deploy%2Flegacy%2Fsealed-secret.yaml",
+    );
+
+    await screen.findByRole("region", {
+      name: "deploy/legacy/sealed-secret.yaml",
+    });
+    expect(router.state.location.pathname).toBe("/secrets/example-org/apps");
+    expect(router.state.location.search).toEqual({
+      file: "deploy/legacy/sealed-secret.yaml",
+    });
+  });
+
+  it("tells people who are not admins that the fleet is for admins", async () => {
+    const api = fakeApi({ me: ME });
+    apiClient.defaults.adapter = api.adapter;
+    renderApp("/fleet");
+
+    expect(
+      await screen.findByRole("heading", { name: "The fleet is for admins" }),
+    ).toBeInTheDocument();
+    expect(api.calls.map((c) => c.url)).not.toContain("/fleet");
+  });
+
+  it("shows admins the fleet", async () => {
+    apiClient.defaults.adapter = fakeApi({ me: ADMIN }).adapter;
+    renderApp("/fleet");
+
+    expect(
+      await screen.findByRole("heading", { name: "Agents" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The fleet is for admins"),
     ).not.toBeInTheDocument();
   });
 });

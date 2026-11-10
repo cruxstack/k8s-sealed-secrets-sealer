@@ -47,6 +47,8 @@ function renderAt(path: string, api: FakeApi) {
   );
 }
 
+/** The apps repository's page, and its API path. */
+const PAGE = "/secrets/example-org/apps";
 const APPS = "/repos/example-org/apps";
 const BILLING = "deploy/billing/sealed-secret.yaml";
 
@@ -75,7 +77,7 @@ describe("sealing", () => {
 
   it("seals a value into every document of a file and lists the change", async () => {
     const api = fakeApi({ me: ME, files: { "example-org/apps": listing() } });
-    renderAt(APPS, api);
+    renderAt(PAGE, api);
 
     const { form, key, value, seal } = await openForm();
     expect(within(form).getByText(/each of the 2 documents/)).toBeVisible();
@@ -139,7 +141,7 @@ describe("sealing", () => {
 
   it("keeps the value when a seal fails, and says why", async () => {
     renderAt(
-      APPS,
+      PAGE,
       fakeApi({
         me: ME,
         files: { "example-org/apps": listing() },
@@ -161,7 +163,7 @@ describe("sealing", () => {
 
   it("checks the key, and notes when it replaces one", async () => {
     renderAt(
-      APPS,
+      PAGE,
       fakeApi({ me: ME, files: { "example-org/apps": listing() } }),
     );
     const { form, key, value, seal } = await openForm();
@@ -208,7 +210,7 @@ describe("sealing", () => {
         },
       },
     });
-    renderAt(APPS, api);
+    renderAt(PAGE, api);
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
@@ -247,7 +249,7 @@ describe("sealing", () => {
 
   it("offers no sealing to read-only users", async () => {
     renderAt(
-      "/repos/example-org/platform",
+      "/secrets/example-org/platform",
       fakeApi({
         me: ME,
         files: {
@@ -262,7 +264,7 @@ describe("sealing", () => {
 
   it("marks repositories with pending changes", async () => {
     renderAt(
-      "/repos",
+      "/secrets",
       fakeApi({
         me: ME,
         repos: [REPO_APPS, REPO_PLATFORM],
@@ -295,7 +297,7 @@ describe("sealing", () => {
         },
       },
     });
-    renderAt(APPS, api);
+    renderAt(PAGE, api);
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
@@ -373,7 +375,7 @@ describe("sealing", () => {
         error: `${BILLING}: its documents for the dev env no longer match what api-token was sealed for; seal it again`,
       },
     });
-    renderAt(APPS, api);
+    renderAt(PAGE, api);
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
@@ -406,7 +408,7 @@ describe("sealing", () => {
       sessions: { "example-org/apps": { ...SESSION } },
       sealStatuses: ["queued", "sealing", "sealing", "sealing", "sealed"],
     });
-    renderAt(APPS, api);
+    renderAt(PAGE, api);
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
@@ -432,7 +434,7 @@ describe("sealing", () => {
 
   it("jumps to a file from the file list or a pending change", async () => {
     renderAt(
-      APPS,
+      PAGE,
       fakeApi({
         me: ME,
         files: { "example-org/apps": listing() },
@@ -471,5 +473,99 @@ describe("sealing", () => {
     });
     // a file the user picks is ready to type into
     expect(within(form).getByLabelText("Key")).toHaveFocus();
+  });
+});
+
+/** The listing, with hints on the billing file's documents. */
+function hinted() {
+  const base = listing();
+  const [billing, ...rest] = base.files;
+  return listing({
+    files: [
+      {
+        ...billing!,
+        documents: (billing!.documents ?? []).map((d) => ({
+          ...d,
+          description: "Credentials for the payment provider",
+          docs: "https://docs.example.com/runbooks/billing",
+          expected_keys: ["api-key", "db-password"],
+        })),
+      },
+      ...rest,
+    ],
+  });
+}
+
+describe("hints", () => {
+  const originalAdapter = apiClient.defaults.adapter;
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter;
+  });
+
+  it("shows what a file is for, its docs, and the keys it still lacks", async () => {
+    renderAt(
+      PAGE,
+      fakeApi({ me: ME, files: { "example-org/apps": hinted() } }),
+    );
+
+    const panel = await screen.findByRole("region", { name: BILLING });
+    expect(
+      within(panel).getByText("Credentials for the payment provider"),
+    ).toBeVisible();
+    const docs = within(panel).getByRole("link", { name: /docs/i });
+    expect(docs).toHaveAttribute(
+      "href",
+      "https://docs.example.com/runbooks/billing",
+    );
+    expect(docs).toHaveAttribute("rel", "noopener noreferrer");
+
+    // the first document lacks both keys, the second only db-password
+    const [first, second] = within(panel)
+      .getAllByRole("list", { name: "Keys" })
+      .map((l) => l.textContent);
+    expect(first).toBe("api-keymissingdb-passwordmissing");
+    expect(second).toBe("api-keydb-passwordmissing");
+
+    // the file list says so too, and matches on the description
+    const files = screen.getByRole("list", { name: "Files" });
+    const item = within(files).getByRole("button", { name: /billing/ });
+    expect(item).toHaveTextContent("Credentials for the payment provider");
+    expect(item).toHaveTextContent("2 missing");
+    fireEvent.change(screen.getByLabelText("Filter files"), {
+      target: { value: "payment" },
+    });
+    expect(within(files).getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("fills an expected key from its chip and warns about unexpected ones", async () => {
+    renderAt(
+      PAGE,
+      fakeApi({ me: ME, files: { "example-org/apps": hinted() } }),
+    );
+    const { form, key, value } = await openForm();
+
+    const chips = within(form).getByRole("list", { name: "Expected keys" });
+    expect(within(form).getByText(/2 missing/)).toBeVisible();
+    fireEvent.click(within(chips).getByRole("button", { name: /db-password/ }));
+    expect(key).toHaveValue("db-password");
+    expect(value).toHaveFocus();
+    expect(
+      within(chips).getByRole("button", { name: /db-password/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    // expected keys are suggested first
+    const options = Array.from(
+      document.querySelectorAll(
+        `#${CSS.escape(key.getAttribute("list") ?? "")} option`,
+      ),
+    ).map((o) => o.getAttribute("value"));
+    expect(options).toEqual(["api-key", "db-password"]);
+
+    fireEvent.change(key, { target: { value: "db-pasword" } });
+    const note = within(form).getByText(/does not expect it/);
+    expect(note).toHaveClass("text-warning");
+    // a warning, not a block
+    fireEvent.change(value, { target: { value: "v" } });
+    expect(within(form).getByRole("button", { name: "Seal" })).toBeEnabled();
   });
 });

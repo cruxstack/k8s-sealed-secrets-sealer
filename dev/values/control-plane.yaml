@@ -10,11 +10,12 @@ env: dev
 # OAuth redirects work for worktree and e2e stacks too
 publicURL: http://localhost:4100
 
-# the GitHub mock (dev/k3d/mock-github.yaml): alice may sign in, bob is not
-# in the allowed team, carol is not in the org
+# the GitHub mock (dev/k3d/mock-github.yaml): alice and dave may sign in and
+# alice is an admin, bob is not in the allowed team, carol is not in the org
 github:
   org: example-org
   allowedTeams: [sealers]
+  adminTeams: [sealer-admins]
   oauthClientID: local-client-id
   # the mock's App; Tilt generates its key pair (APP_GITHUB_APP_PRIVATE_KEY)
   appID: "1"

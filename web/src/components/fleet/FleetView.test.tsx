@@ -4,10 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import apiClient from "@/api/client";
 import type { Fleet } from "@/api/types";
 import { FleetView } from "./FleetView";
-import { KEY_A, KEY_B, ME, agent, fakeApi } from "@/test/fake-api";
+import { ADMIN, KEY_A, KEY_B, agent, fakeApi } from "@/test/fake-api";
 
 function renderFleet(fleet: Fleet | null, fleetStatus?: number) {
-  apiClient.defaults.adapter = fakeApi({ me: ME, fleet, fleetStatus }).adapter;
+  apiClient.defaults.adapter = fakeApi({
+    me: ADMIN,
+    fleet,
+    fleetStatus,
+  }).adapter;
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });

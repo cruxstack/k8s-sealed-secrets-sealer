@@ -141,11 +141,23 @@ sign_in() {
 
 [[ "$(sign_in alice)" == "${control_plane}/fleet" ]] || die "alice could not sign in"
 me="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me")"
-[[ "$(jq -r .user.login <<<"$me")" == alice ]] || die "/me after sign-in: ${me}"
+[[ "$(jq -r '.user.login + ":" + (.user.admin | tostring)' <<<"$me")" == alice:true ]] || die "/me after sign-in: ${me}"
 csrf="$(jq -r .csrf_token <<<"$me")"
 agents="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/fleet" | jq '.agents | length')"
 [[ "$agents" == "$(stack_clusters | wc -l | tr -d ' ')" ]] || die "the signed-in fleet has ${agents} agents"
 check "alice (org member, allowed team) signs in and sees the fleet"
+
+# dave may sign in but is not an admin: the fleet is closed to him, and he
+# sees only whether sealing works
+[[ "$(sign_in dave)" == "${control_plane}/fleet" ]] || die "dave could not sign in"
+[[ "$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/auth/me" | jq -r .user.admin)" == false ]] \
+  || die "dave signed in as an admin"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-dave" "${control_plane}/api/v1/fleet")" == 403 ]] \
+  || die "dave, who is not an admin, read the fleet"
+status="$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/status")"
+jq -e '(.sealing | IN("ready", "degraded", "unavailable")) and .clusters.total == 3 and (tostring | test("dev-use") | not)' \
+  <<<"$status" >/dev/null || die "status for dave: ${status}"
+check "dave (not an admin) signs in, cannot read the fleet, and sees whether sealing works"
 
 # --- repositories, through the GitHub App, limited to alice's own access ---
 repos="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos")"
