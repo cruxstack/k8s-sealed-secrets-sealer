@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -29,14 +30,18 @@ const (
 	// its work for up to retryAfterFailure after, and a minute covers
 	// clocks that differ between instances.
 	keyCommandLookback = keyCommandTTL + max(settleAfterSuccess, retryAfterFailure) + time.Minute
+	// maxCopiesPerCheckIn bounds the further copies of already escrowed
+	// keys one check-in asks an agent for; keys with no copy are not held
+	// back.
+	maxCopiesPerCheckIn = 20
 )
 
 // keySyncPlan is what one agent's check-in leads to.
 type keySyncPlan struct {
-	// EscrowNeeded lists the agent's keys with no escrowed copy.
+	// EscrowNeeded lists the agent's keys it should escrow a copy of.
 	EscrowNeeded []string
-	// Restore lists escrowed keys the agent's cluster is missing; empty
-	// queues nothing.
+	// Restore lists escrowed keys the agent's cluster is missing, newest
+	// first; empty queues nothing.
 	Restore []string
 	// EnableRenewal queues renewal.enable.v1 for the agent.
 	EnableRenewal bool
@@ -46,18 +51,31 @@ type keySyncPlan struct {
 // need escrow, which escrowed keys it should restore, and whether it should
 // turn on key renewal. It is pure, so the rules are tested directly.
 //
+// An agent escrows a copy of each key it holds until the key has
+// maxEscrowCopies copies, so a bad copy uploaded first is not the only one.
+// Revoked and future-dated keys are neither escrowed nor restored.
+//
 // Every decision is about the checking-in agent only, and each agent checks
 // in serially, so concurrent check-ins from different agents cannot queue
 // the same command twice.
-func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, escrowed map[string]bool, now time.Time) keySyncPlan {
+func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
 	var plan keySyncPlan
 	if !canRun(self, state, protocol.CommandKeysRestore) {
 		// without the keys capability the agent can neither upload nor
 		// restore; it may not even see its whole key set
 		return planRenewal(plan, f, self, state, firstCheckIn, commands, now)
 	}
+	copies := 0
 	for _, k := range state.Keys {
-		if !escrowed[k.Fingerprint] {
+		up := keys.Escrow[k.Fingerprint]
+		switch {
+		case !fleet.Usable(k, keys.Revoked, now) || slices.Contains(up, self.ID) || len(up) >= maxEscrowCopies:
+		case len(up) == 0:
+			plan.EscrowNeeded = append(plan.EscrowNeeded, k.Fingerprint)
+		case copies < maxCopiesPerCheckIn:
+			// further copies of keys already escrowed can wait, so an agent
+			// holding many is not kept busy uploading them all at once
+			copies++
 			plan.EscrowNeeded = append(plan.EscrowNeeded, k.Fingerprint)
 		}
 	}
@@ -71,12 +89,20 @@ func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, fi
 	if me != nil && me.InScope && state.KeysComplete {
 		busy := busyFingerprints(commands, now)
 		for _, fp := range me.MissingKeys {
-			if escrowed[fp] && !busy[fp] {
+			if len(keys.Escrow[fp]) > 0 && !busy[fp] {
 				plan.Restore = append(plan.Restore, fp)
 			}
 		}
-		if len(plan.Restore) > protocol.MaxKeys {
-			plan.Restore = plan.Restore[:protocol.MaxKeys]
+		// the newest first, so a long list restores the env key early
+		notBefore := map[string]time.Time{}
+		for _, k := range f.Keys {
+			notBefore[k.Fingerprint] = k.NotBefore
+		}
+		sort.SliceStable(plan.Restore, func(i, j int) bool {
+			return notBefore[plan.Restore[i]].After(notBefore[plan.Restore[j]])
+		})
+		if len(plan.Restore) > protocol.MaxRestoreKeys {
+			plan.Restore = plan.Restore[:protocol.MaxRestoreKeys]
 		}
 	}
 	return planRenewal(plan, f, self, state, firstCheckIn, commands, now)
@@ -175,36 +201,17 @@ func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]
 	return busy
 }
 
-// agentStates reads every registered agent's latest state.
-func (s *Server) agentStates(ctx context.Context) (map[string]store.AgentState, error) {
-	reg := s.currentRegistry()
-	ids := make([]string, 0, len(reg.Agents))
-	for _, a := range reg.Agents {
-		ids = append(ids, a.ID)
-	}
-	return s.store.GetAgentStates(ctx, ids)
-}
-
 // syncKeys runs the key sync plan for an agent that just checked in, queues
-// its commands, and returns the keys it should escrow.
-func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, states map[string]store.AgentState) ([]string, error) {
-	reg := s.currentRegistry()
-	// states were read before this check-in was stored
-	_, seen := states[self.ID]
-	states[self.ID] = state
-	now := s.now().UTC()
-	f := fleet.Compute(s.env, reg, states, now)
-
-	fps := make([]string, 0, len(state.Keys))
-	for _, a := range f.Agents {
-		for _, k := range a.Keys {
-			fps = append(fps, k.Fingerprint)
-		}
-	}
-	escrowed, err := s.escrowed(ctx, fps)
+// its commands, and returns the keys it should escrow. snap was read before
+// the check-in was stored and holds its new state; seen says whether the
+// agent had checked in before.
+func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, snap fleetSnapshot, seen bool) ([]string, error) {
+	keys, err := s.fleetKeys(ctx, snap, &state)
 	if err != nil {
 		return nil, err
 	}
+	now := s.now().UTC()
+	f := fleet.Compute(s.env, snap.reg, snap.states, keys, now)
 	// only the commands recent enough to count; their IDs (ULIDs) are
 	// stamped with the wall clock
 	commands, err := s.store.CommandsSince(ctx, self.ID, time.Now().Add(-keyCommandLookback))
@@ -212,7 +219,7 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 		return nil, err
 	}
 
-	plan := planKeySync(f, self, state, !seen, commands, escrowed, now)
+	plan := planKeySync(f, self, state, !seen, commands, keys, now)
 	if len(plan.Restore) > 0 {
 		if err := s.queue(ctx, self, protocol.CommandKeysRestore, protocol.KeysRestorePayload{Fingerprints: plan.Restore}, now); err != nil {
 			return nil, err
@@ -231,43 +238,6 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 			"period", period)
 	}
 	return plan.EscrowNeeded, nil
-}
-
-// escrowed reports which fingerprints have an escrowed copy. Escrow records
-// are never deleted, so hits are cached.
-func (s *Server) escrowed(ctx context.Context, fps []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	var unknown []string
-	s.knownMu.Lock()
-	for _, fp := range fps {
-		if s.knownEscrow[fp] {
-			out[fp] = true
-		} else if !slices.Contains(unknown, fp) {
-			unknown = append(unknown, fp)
-		}
-	}
-	s.knownMu.Unlock()
-	if len(unknown) == 0 {
-		return out, nil
-	}
-	found, err := s.store.Escrowed(ctx, unknown)
-	if err != nil {
-		return nil, err
-	}
-	for fp := range found {
-		out[fp] = true
-		s.markEscrowed(fp)
-	}
-	return out, nil
-}
-
-func (s *Server) markEscrowed(fp string) {
-	s.knownMu.Lock()
-	defer s.knownMu.Unlock()
-	if len(s.knownEscrow) > 10_000 {
-		s.knownEscrow = map[string]bool{}
-	}
-	s.knownEscrow[fp] = true
 }
 
 // queue writes a command for an agent.

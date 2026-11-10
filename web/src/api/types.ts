@@ -55,8 +55,31 @@ export interface FleetAgent {
   controller?: ControllerInfo;
   keys?: KeyRef[] | null;
   keys_complete: boolean;
+  /** How many keys the agent reported; more than `keys` past the limit. */
+  keys_reported: number;
+  /** How many of them, the oldest, were left out over the key limit. */
+  keys_dropped: number;
   missing_keys?: string[] | null;
+  /**
+   * Set while the cluster, new or rebuilt, is left out of the env key as it
+   * restores the env's keys (for up to 30 minutes after it joined).
+   */
+  joining: boolean;
+  joined_at?: string;
   issues?: string[] | null;
+}
+
+/** One of the env's sealing keys. */
+export interface FleetKey extends KeyRef {
+  /** The agents whose clusters report the key. */
+  holders: string[] | null;
+  escrow_copies: number;
+  env_key: boolean;
+  status: "active" | "revoked";
+  revoked_by?: string;
+  revoked_at?: string;
+  /** Valid only from more than an hour ahead: not used until then. */
+  future_dated: boolean;
 }
 
 /** GET /api/v1/fleet */
@@ -65,7 +88,19 @@ export interface Fleet {
   /** The newest key every in-scope cluster holds; null when there is none. */
   env_key: KeyRef | null;
   keys_in_sync: boolean;
+  /** How many keys of a cluster the control plane keeps track of. */
+  key_limit: number;
+  /** The keys clusters report and the revoked keys, newest first. */
+  keys: FleetKey[] | null;
   agents: FleetAgent[] | null;
+}
+
+/** POST /api/v1/keys/{fingerprint}/revoke and .../reinstate */
+export interface KeyStatus {
+  fingerprint: string;
+  status: "active" | "revoked";
+  status_by?: string;
+  status_at?: string;
 }
 
 /** GET /api/v1/status: whether values can be sealed in the env. */

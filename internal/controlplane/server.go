@@ -122,11 +122,11 @@ type Server struct {
 	nextReload atomic.Int64
 
 	// knownKeys caches fingerprints already recorded, so repeated check-ins
-	// do not repeat conditional writes; knownEscrow caches fingerprints with
-	// an escrowed copy. Losing either only costs reads and writes.
+	// do not repeat conditional writes; knownEscrow caches who escrowed a
+	// copy of each key. Losing either only costs reads and writes.
 	knownMu     sync.Mutex
 	knownKeys   map[string]bool
-	knownEscrow map[string]bool
+	knownEscrow map[string][]string
 }
 
 // New returns a Server. It makes no network calls.
@@ -165,7 +165,7 @@ func New(opts Options) *Server {
 		pollInterval:   pollInterval,
 		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
-		knownEscrow:    map[string]bool{},
+		knownEscrow:    map[string][]string{},
 	}
 	s.agents.Store(&agentAccess{reg: opts.Registry, logins: opts.Logins})
 	s.nextReload.Store(now().Add(RegistryReloadInterval).UnixNano())
@@ -237,13 +237,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentPutEscrow))
 	mux.HandleFunc("GET /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentGetEscrow))
 
+	const revoke, reinstate = "/keys/{fingerprint}/revoke", "/keys/{fingerprint}/reinstate"
 	if s.adminToken != "" {
 		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.fleet))
+		mux.HandleFunc("POST /api/v1/admin"+revoke, s.requireAdmin(s.setKeyStatus(store.KeyRevoked)))
+		mux.HandleFunc("POST /api/v1/admin"+reinstate, s.requireAdmin(s.setKeyStatus(store.KeyActive)))
 	}
 
 	if u := s.users; u != nil {
 		// the fleet is for admins; everyone sees whether sealing works
 		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(u.RequireAdmin(s.fleet)))
+		admin := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireCSRF(u.RequireAdmin(h))) }
+		mux.HandleFunc("POST /api/v1"+revoke, admin(s.setKeyStatus(store.KeyRevoked)))
+		mux.HandleFunc("POST /api/v1"+reinstate, admin(s.setKeyStatus(store.KeyActive)))
 		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
 		// calls that cost GitHub requests, KMS or agent work are rate
 		// limited per user, after sign-in and CSRF checks

@@ -589,6 +589,25 @@ certificates only). From those reports the control plane computes:
   cluster's key set. Certificates have one-second precision, so keys made in
   the same second tie; the tie goes to the greater fingerprint, so the env
   key never depends on the order agents report in.
+- **Keys left out:** a key an admin revoked, and a key whose `NotBefore` is
+  more than an hour ahead of the control plane's clock, are never the env
+  key, never count as held, are never missing anywhere and are never
+  restored. A future-dated key is used once its time comes; the fleet view
+  flags it, and `key.future_dated` is logged. Without this bound, anyone who
+  can create a Secret in one controller namespace could plant a key dated
+  2099 that would become the env key everywhere and outrank every renewal.
+- **Joining clusters:** a cluster that just joined the env, or was rebuilt
+  (its whole key set changed), reports only its controller's fresh key.
+  For up to 30 minutes after it joined, it is left out of the env key while
+  restore gives it the env's keys, if its agent has the `keys` capability
+  and the newest key the other clusters share is escrowed. Its own key is
+  not the env key meanwhile, and it does not seal, since it lacks the env
+  key. The 30 minutes cover a restore (a check-in, a command and a
+  controller restart, about a minute), a key command that expires unleased
+  (10 minutes) and two retries after failures, 5 minutes apart. After
+  that, or when it cannot restore, it counts again, and the fleet view says
+  it holds back the env key. The first clusters of an env have no one to
+  catch up with, so they are never joining.
 
 To choose the agent for a seal:
 
@@ -624,8 +643,9 @@ controller's newest key. This handles the cases that matter:
 - A controller that just generated a key keeps advertising it as its newest,
   but it is not used until every cluster holds it.
 - An agent that is down is skipped; any other agent holding the env key seals.
-- A new cluster joins with its own fresh key. Sync gives it the existing keys,
-  and the env key stays the same until its key has reached every cluster.
+- A new cluster joins with its own fresh key. It is joining, so the env key
+  stays the same while sync gives it the existing keys, and until its own key
+  has reached every cluster.
 
 An agent without the `keys` capability cannot read key secrets, so it reports
 only its controller's active certificate (from `/v1/cert.pem`) as its key set.
@@ -652,23 +672,34 @@ the control plane: it names that env on every request (the
 `X-K8s-Sealed-Secrets-Sealer-Env` header), and refuses to log in to a
 control plane that answers for another env.
 
-**Upload.** Each check-in response lists the agent's keys that have no
-escrow record (`escrow_needed`), for agents with the `keys` capability. The
-agent first checks each key Secret as a restore would (step 2 below), so a
-key the controller could not use is never uploaded, then encrypts and
-uploads it. The control plane parses the public
+**Upload.** Each check-in response lists the agent's keys it should escrow
+(`escrow_needed`), for agents with the `keys` capability: those it has not
+escrowed a copy of, while the key has fewer than three copies, and at most
+20 a check-in of keys that have one already. Revoked and future-dated keys
+are left out. The agent first checks each key Secret as a restore would
+(step 2 below), so a key the controller could not use is never uploaded,
+then encrypts and uploads it. The control plane parses the public
 certificate, checks that its fingerprint matches the URL, that the agent's
 latest check-in reported that key, and that the envelope's context is this
-env and key, and stores the record with a conditional write (the first upload
-wins). It can check the certificate but cannot read or verify the private
-key. Fingerprints are base64, which can contain `/`, so in URLs they use the
-URL-safe alphabet (`+` as `-`, `/` as `_`).
+env and key, and stores the copy with a conditional write: one copy per
+agent, three at most, never replaced. It can check the certificate but
+cannot read or verify the private key, so a copy may not open: an agent
+with `keys` can report another cluster's certificate (certificates are
+public) and upload anything under it. That is why a key keeps copies from
+up to three agents, and why restores try them in turn. `key.escrowed` is
+logged for a key's first copy and `key.escrow_copied` for the others, each
+naming the uploader. Fingerprints are base64, which can contain `/`, so in
+URLs they use the URL-safe alphabet (`+` as `-`, `/` as `_`).
 
 **Restore.** When an in-scope cluster's agent checks in missing an escrowed
 key, the control plane queues `keys.restore.v1` for that agent with the
-missing fingerprints. The agent, for each one not already present (a key
-Secret with that fingerprint under any value of the key label counts, so a
-key relabeled, for example as `compromised`, is never brought back):
+missing fingerprints, newest first, 100 at most per command. A download
+returns one copy: the first, or the next one each time that agent's
+restores of the key have failed, so a copy that does not open is skipped
+on the next try. A revoked key is not returned. The agent, for each one not
+already present (a key Secret with that fingerprint under any value of the
+key label counts, so a key relabeled, for example as `compromised`, is
+never brought back):
 
 1. downloads the escrow record and decrypts it with KMS, naming its own
    configured escrow key and the expected context (neither is taken from the
@@ -710,7 +741,8 @@ restore for a key that an open restore command already covers, nor for 2
 minutes after one succeeded (until the agent's next inventory shows the key)
 or 5 minutes after one failed. Each decision is about the agent that is
 checking in, and an agent checks in serially, so concurrent check-ins from
-different agents cannot queue duplicate commands.
+different agents cannot queue duplicate commands. Each check-in plans with
+its own new state and every other agent's latest, read afresh.
 
 ```mermaid
 sequenceDiagram
@@ -728,11 +760,12 @@ sequenceDiagram
   H->>H: encrypt tls.crt and tls.key
   H->>CP: PUT /agent/v1/escrow/K
   CP->>CP: certificate fingerprint matches K
-  CP->>DB: store if absent (first upload wins)
+  CP->>DB: store H's copy (one per agent, three at most)
   M->>CP: check-in without K
   CP->>DB: queue keys.restore.v1 [K] for M
   M->>CP: lease keys.restore.v1
   M->>CP: GET /agent/v1/escrow/K
+  CP-->>M: a copy (the next after each failed restore)
   M->>KMS: Decrypt with its escrow key, {env, fingerprint K, purpose}
   M->>M: private key matches certificate,<br/>certificate matches K
   M->>C: create the key Secret (label active)
@@ -764,7 +797,8 @@ and refuses to restore keys, since it cannot tell the key order.
 **Authenticity.** Only agent roles can encrypt under the escrow key, and
 AES-GCM with a bound encryption context detects tampering. The control plane
 can't read keys or forge escrow records. The worst it can do is withhold or
-delete them.
+delete them. An agent's copy can still hold the wrong key; the restoring
+agent's checks catch that, and another agent's copy is tried next.
 
 **Restore is automatic,** with alerts through structured log events at `warn`
 level or above:
@@ -777,14 +811,23 @@ level or above:
 | `key.restored`              | An agent restores a key into its controller.    |
 | `key.restore_skipped`       | A key to restore is held under another label.   |
 | `key.sync_failed`           | An upload or restore fails.                     |
+| `key.escrow_refused`        | A restore asked for a revoked key.              |
 | `key.order_mismatch`        | A controller does not order keys by NotBefore.  |
+| `key.future_dated`          | A check-in reports a key dated in the future.   |
+| `key.revoked`               | An admin revoked a key.                         |
+| `key.reinstated`            | An admin reinstated a revoked key.              |
+| `keys.near_limit`           | A cluster's keys reach 50% or 80% of the limit. |
+| `keys.truncated`            | A cluster reports more keys than are kept.      |
 | `keys.out_of_sync`          | A seal was refused because no env key exists.   |
 | `renewal.enable_queued`     | No cluster renews; one is asked to.             |
 | `renewal.enabled`           | An agent turned on key renewal.                 |
 | `controller.restarted`      | An agent restarted its controller.              |
 | `controller.restart_failed` | An agent could not restart its controller.      |
 
-Every event names the env, agent, cluster and fingerprint.
+Every event names the env and what it is about: the agent and cluster, the
+fingerprint, the user. Events about a check-in (`key.order_mismatch`,
+`key.future_dated`, `keys.near_limit`, `keys.truncated`) are logged once,
+at the check-in where the condition first shows for that agent.
 
 **Backups.** The table has point-in-time recovery and a scheduled AWS Backup
 plan. The escrow key is a multi-Region KMS key with a replica in another
@@ -835,6 +878,33 @@ times should not be the one. Renewal in one cluster is better because:
   restarts that cluster's controller once. N renewing clusters cause about
   N×(N−1) controller restarts per period instead of N−1.
 
+**Key limit.** Sync spreads every key to every cluster, so with renewal on
+everywhere an env gains about 12 keys a year per cluster. The control plane
+keeps track of 250 keys per cluster, the newest by `NotBefore`, revoked keys
+last. A check-in with more is accepted: the oldest are left out of the
+agent's stored state and of key sync, and the fleet view says so. A key
+older than every key left out of a cluster's report is not counted as
+missing there, since the cluster may hold it, so it is never restored again.
+A cluster that joins later does not get keys every cluster leaves out.
+`keys.near_limit` is logged when a cluster's keys reach 50% and 80% of the
+limit, and `keys.truncated` once some are left out; the fleet view warns at
+the same points. Renewal on in one cluster keeps an env far from the limit.
+
+The limit was 100 and a check-in over it was refused, which stopped the
+whole env. It is 250 now; the numbers, for 4096-bit keys:
+
+| What                               | Per key  | At 250 keys | Bound   |
+| ---------------------------------- | -------- | ----------- | ------- |
+| Check-in body                      | 1.9 KB   | 465 KB      | 2 MiB   |
+| Agent state item in DynamoDB       | 127 B    | 32 KB       | 400 KB  |
+| Strongly consistent read of it     |          | 8 RCU       |         |
+
+Check-ins read every agent's state, so the item's size multiplies with the
+number of agents, which is the reason not to go higher. A check-in body over
+2 MiB, about 1,100 keys, is still refused. A restore command names at most
+100 keys, because agents built when the limit was 100 refuse more; the rest
+follow in later commands.
+
 ## 10. Security model
 
 | Threat                | What it can do                 | Mitigations                    |
@@ -851,9 +921,11 @@ times should not be the one. Renewal in one cluster is better because:
 | cluster               | can anyone with secret read in | Transit `Decrypt` limited to   |
 |                       | the controller namespace) and  | its own commands. Every        |
 |                       | so decrypt the env's secrets;  | `key.escrowed` names the       |
-|                       | upload a key it generated so   | source cluster. After an       |
-|                       | it becomes the env key;        | incident, rotate and retire    |
-|                       | report false key sets.         | keys.                          |
+|                       | upload a key it generated so   | source cluster. Keys dated in  |
+|                       | it becomes the env key;        | the future are not used.       |
+|                       | report false key sets; escrow  | Escrow keeps a copy per agent. |
+|                       | copies that do not open.       | After an incident, revoke the  |
+|                       |                                | key and rotate values.         |
 | Rogue agent           | Nothing.                       | Registry in IaC, identity      |
 |                       |                                | verified, no self-enrollment.  |
 | Stolen DynamoDB data  | Ciphertext only.               | Transit and escrow need KMS    |
@@ -882,7 +954,26 @@ run anything else on a cluster.
 **A compromised cluster** already holds every env key, so injecting a key
 gives it nothing new while it is compromised. An injected key would, however,
 keep being used afterwards, which is why every escrow upload names its source
-and why incident response includes rotating to a new key and retiring the old.
+and why incident response includes revoking keys.
+
+**Revoking a key.** An env admin revokes a key from the fleet page, or a
+script does with the admin token:
+
+```sh
+curl -X POST -H "Authorization: Bearer $APP_ADMIN_TOKEN" \
+  https://sealer.example.com/api/v1/envs/dev/admin/keys/SHA256:abc.../revoke
+```
+
+The fingerprint is in the URL-safe alphabet, and `.../reinstate` undoes it.
+A revoked key is never the env key, never restored to a cluster, never counted
+as missing and never counts as held. `key.revoked` and `key.reinstated` name
+the admin. Revoking changes only what the control plane does: clusters keep
+the key and still decrypt with it, and so can anyone who has a copy. Values
+sealed with a key that may be compromised must be rotated (sealed again with
+new values), because git history keeps the old ciphertext; resealing the
+same values would not help. The key's escrowed copies are kept, so a key
+revoked by mistake can be reinstated. Taking a key out of the clusters is
+key retirement (section 16).
 
 **Controller namespace.** The controller runs in its own namespace, not
 `kube-system`. RBAC cannot limit `list secrets` by label, so an agent with the
@@ -928,6 +1019,8 @@ shows creating one.
 | Command        | `AGENT#<id>`       | `CMD#<ulid>`        | expiry + 1 hour       |
 | Key            | `KEY#<fp>`         | `META`              | none                  |
 | Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
+| Escrow copy    | `KEY#<fp>`         | `ESCROW#<agent id>` | none                  |
+| Revoked key    | `KEYS`             | `REVOKED#<fp>`      | none                  |
 | Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
 | Session count  | `USER#<user id>`   | `SESSIONS`          | session's maximum age |
 | Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
@@ -937,8 +1030,10 @@ shows creating one.
 | Rate window    | `RATE#<key>#<end>` | `RATE`              | window end            |
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
-  controller settings, key set. Commands in flight are counted from the
-  agent's commands.
+  controller settings, key set (the newest 250), how many keys were
+  reported and the newest `NotBefore` of those left out, and when the agent
+  joined (its first check-in, or the first after its cluster was rebuilt).
+  Commands in flight are counted from the agent's commands.
 - **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`;
   past its expiry without a result it counts as expired), lease and finish
   times, expiry, payload, result. The expiry is also kept as epoch
@@ -950,10 +1045,18 @@ shows creating one.
   minutes, and key sync among those of the last 16, which covers commands
   that finished recently: command IDs are ULIDs, so each is a range of sort
   keys.
-- **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
-  Which clusters hold a key is derived from agent state.
+- **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time),
+  status (`active` or `revoked`) and who set it when. Which clusters hold a
+  key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
-  encryption context, uploading agent and time.
+  encryption context, uploading agent and time. The first upload is
+  `ESCROW` and lists the agents of the other copies (`copies`), so one read
+  tells who escrowed a key; each other agent's copy is `ESCROW#<agent id>`,
+  three in all at most. Copies are written with the list in one
+  transaction.
+- **Revoked key:** fingerprint, `NotBefore`, `NotAfter`, who revoked it and
+  when, written with the key's status in one transaction, so every
+  check-in reads all revoked keys with one query.
 - **Session:** owner (GitHub user ID and login), repository (lowercased in
   the key, so there is one per user and repository), base branch and commit,
   idle expiry and maximum age. Using a session (sealing, removing a change)
@@ -1372,7 +1475,9 @@ else.
   per-cluster counts and a last-seen-in-use time.
 - **Key retirement.** A manual action, allowed once a key has had zero use in
   every cluster for N days, removes it from every controller. The escrow copy
-  is kept until backups that contain it have aged out.
+  is kept until backups that contain it have aged out. Revoking (section 10)
+  already stops the control plane using and spreading a key; retirement
+  would also take it out of the clusters and the key limit.
 
 ## 17. Build order
 

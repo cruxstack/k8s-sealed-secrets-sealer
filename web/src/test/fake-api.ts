@@ -3,6 +3,7 @@ import type {
   FileListing,
   Fleet,
   FleetAgent,
+  FleetKey,
   MeResponse,
   PendingChange,
   Repository,
@@ -85,6 +86,8 @@ export function fakeApi(opts: {
   sealError?: string;
   /** Answers a pull request with this error instead of opening one. */
   pullRequestError?: { status: number; error: string };
+  /** Answers revoking or reinstating a key with this error. */
+  keyStatusError?: { status: number; error: string };
 }): FakeApi {
   const calls: Recorded[] = [];
   // copies, so the routes never change the caller's fixtures
@@ -135,6 +138,26 @@ export function fakeApi(opts: {
       if (opts.fleetStatus)
         return reply(opts.fleetStatus, { error: "internal error" });
       return reply(200, opts.fleet ?? emptyFleet());
+    }
+    const keyStatus = /^\/keys\/([^/]+)\/(revoke|reinstate)$/.exec(url);
+    if (keyStatus && method === "POST") {
+      if (!opts.me?.envs.find((e) => e.name === env)?.admin) {
+        return reply(403, { error: "only admins can do this" });
+      }
+      if (opts.keyStatusError) {
+        return reply(opts.keyStatusError.status, {
+          error: opts.keyStatusError.error,
+        });
+      }
+      const fingerprint = decodeURIComponent(keyStatus[1]!)
+        .replace(/-/g, "+")
+        .replace(/_/g, "/");
+      return reply(200, {
+        fingerprint,
+        status: keyStatus[2] === "revoke" ? "revoked" : "active",
+        status_by: opts.me.user.login,
+        status_at: new Date().toISOString(),
+      });
     }
     if (url === "/status") {
       if (!opts.me) return reply(401, { error: "unauthorized" });
@@ -252,7 +275,14 @@ export function fakeApi(opts: {
 }
 
 export function emptyFleet(): Fleet {
-  return { env: "dev", env_key: null, keys_in_sync: false, agents: [] };
+  return {
+    env: "dev",
+    env_key: null,
+    keys_in_sync: false,
+    key_limit: 250,
+    keys: [],
+    agents: [],
+  };
 }
 
 const NOW = Date.now();
@@ -291,8 +321,27 @@ export function agent(
     },
     keys: [KEY_A],
     keys_complete: true,
+    keys_reported: 1,
+    keys_dropped: 0,
     missing_keys: [],
+    joining: false,
     issues: [],
+    ...overrides,
+  };
+}
+
+/** A key of the fleet, held by the given agents. */
+export function fleetKey(
+  key: typeof KEY_A,
+  overrides: Partial<FleetKey> = {},
+): FleetKey {
+  return {
+    ...key,
+    holders: ["use1-blue"],
+    escrow_copies: 1,
+    env_key: false,
+    status: "active",
+    future_dated: false,
     ...overrides,
   };
 }

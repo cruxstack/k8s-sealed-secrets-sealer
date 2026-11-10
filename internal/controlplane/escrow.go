@@ -2,9 +2,11 @@ package controlplane
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/keys"
@@ -23,6 +25,17 @@ const (
 	maxEscrowFieldSize = 48 << 10
 )
 
+// maxEscrowCopies is how many escrowed copies of a key are kept, one per
+// uploading agent. The control plane cannot check a copy's private key, so
+// a copy that does not open (one an agent made from a key it does not hold,
+// say) must not be the only one; restores try the others in turn.
+const maxEscrowCopies = 3
+
+// restoreFailureLookback is how far back a download counts the agent's
+// failed restores of a key, to choose the copy it returns: long enough to
+// step through every copy at the pace restores are retried.
+const restoreFailureLookback = time.Hour
+
 // escrowContext is the encryption context every escrowed key is sealed with.
 func escrowContext(env, fingerprint string) map[string]string {
 	return map[string]string{
@@ -35,7 +48,8 @@ func escrowContext(env, fingerprint string) map[string]string {
 // agentPutEscrow stores an agent's escrowed copy of a key it holds. The
 // control plane cannot read the private key; it checks what it can see: the
 // certificate is the key named in the path, the agent holds that key, and
-// the envelope is bound to this env and key. The first upload wins.
+// the envelope is bound to this env and key. Each agent stores one copy at
+// most, and a key keeps maxEscrowCopies; a copy is never replaced.
 func (s *Server) agentPutEscrow(w http.ResponseWriter, r *http.Request, agent *registry.Agent) {
 	ctx := r.Context()
 	fp := protocol.ParseFingerprintPath(r.PathValue("fingerprint"))
@@ -64,23 +78,29 @@ func (s *Server) agentPutEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		return
 	}
 
-	stored, err := s.store.PutEscrowIfAbsent(ctx, protocol.EscrowRecord{
+	stored, first, err := s.store.PutEscrow(ctx, protocol.EscrowRecord{
 		Fingerprint: fp,
 		Certificate: in.Certificate,
 		Envelope:    in.Envelope,
 		UploadedBy:  agent.ID,
 		UploadedAt:  s.now().UTC(),
-	})
+	}, maxEscrowCopies)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to escrow sealing key",
 			"event", "key.sync_failed", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.markEscrowed(fp)
-	if stored {
+	switch {
+	case first:
+		s.markEscrowed(fp, agent.ID)
 		s.logger.WarnContext(ctx, "sealing key escrowed",
 			"event", "key.escrowed", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster,
+			"fingerprint", fp, "kms_key_id", in.Envelope.KeyID)
+	case stored:
+		s.markEscrowed(fp, agent.ID)
+		s.logger.InfoContext(ctx, "another copy of a sealing key escrowed",
+			"event", "key.escrow_copied", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster,
 			"fingerprint", fp, "kms_key_id", in.Envelope.KeyID)
 	}
 	httpserver.WriteJSON(w, http.StatusOK, map[string]bool{"stored": stored})
@@ -120,7 +140,14 @@ func validateEscrow(in protocol.EscrowUpload, env, fp string) string {
 }
 
 // agentGetEscrow returns an escrowed key to an agent with the keys
-// capability. The record is ciphertext; only agent roles can decrypt it.
+// capability. The record is ciphertext; only agent roles can decrypt it. A
+// revoked key is not returned, so it is never restored.
+//
+// The agent checks a restored key before installing it: the envelope opens
+// under its own escrow key and context, and the private key matches the
+// certificate. A key with several copies returns the next one each time
+// the agent's restores of it have failed, so a copy that does not open is
+// skipped on the next try.
 func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *registry.Agent) {
 	ctx := r.Context()
 	fp := protocol.ParseFingerprintPath(r.PathValue("fingerprint"))
@@ -128,17 +155,61 @@ func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		writeError(w, http.StatusForbidden, "agent is not registered for the keys capability")
 		return
 	}
-	rec, ok, err := s.store.Escrow(ctx, fp)
+	key, _, err := s.store.GetKey(ctx, fp)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to read key", "agent_id", agent.ID, "fingerprint", fp, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if key.Status == store.KeyRevoked {
+		s.logger.WarnContext(ctx, "refused to return a revoked key from escrow",
+			"event", "key.escrow_refused", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp)
+		writeError(w, http.StatusGone, "key is revoked")
+		return
+	}
+	recs, err := s.store.Escrow(ctx, fp)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to read escrow", "agent_id", agent.ID, "fingerprint", fp, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if !ok {
+	if len(recs) == 0 {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	// failures older than that no longer move the choice; command IDs
+	// (ULIDs) are stamped with the wall clock
+	commands, err := s.store.CommandsSince(ctx, agent.ID, time.Now().Add(-restoreFailureLookback))
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to read commands", "agent_id", agent.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	n := restoreFailures(commands, fp) % len(recs)
+	rec := recs[n]
 	s.logger.InfoContext(ctx, "escrowed key downloaded",
-		"event", "key.escrow_read", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp)
+		"event", "key.escrow_read", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp,
+		"uploaded_by", rec.UploadedBy, "copy", n+1, "copies", len(recs))
 	httpserver.WriteJSON(w, http.StatusOK, rec)
+}
+
+// restoreFailures counts an agent's restores of a key that failed, from its
+// keys.restore.v1 results.
+func restoreFailures(commands []store.CommandRecord, fp string) int {
+	n := 0
+	for _, c := range commands {
+		if c.Type != protocol.CommandKeysRestore || c.Result == "" {
+			continue
+		}
+		var res protocol.KeysRestoreResult
+		if json.Unmarshal([]byte(c.Result), &res) != nil {
+			continue
+		}
+		for _, f := range res.Failed {
+			if f.Fingerprint == fp {
+				n++
+			}
+		}
+	}
+	return n
 }

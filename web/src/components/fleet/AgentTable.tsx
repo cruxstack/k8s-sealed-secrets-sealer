@@ -14,6 +14,37 @@ export function agentHealth(agent: FleetAgent): {
   return { label: "Healthy", variant: "success" };
 }
 
+/**
+ * How many keys an agent reports, in the warning color from half the key
+ * limit, with how many were left out past it.
+ */
+function KeyCount({
+  agent,
+  keyLimit,
+}: {
+  agent: FleetAgent;
+  keyLimit?: number;
+}) {
+  const n = agent.keys_reported || (agent.keys ?? []).length;
+  if (!keyLimit || n * 2 < keyLimit) return <>{n}</>;
+  const dropped = agent.keys_dropped;
+  return (
+    <span
+      className="font-semibold text-warning"
+      title={
+        dropped > 0
+          ? `More than the ${keyLimit} kept per cluster: the ${dropped} oldest are left out of key sync`
+          : `${Math.floor((n * 100) / keyLimit)}% of the ${keyLimit} kept per cluster`
+      }
+    >
+      {n}
+      {dropped > 0 && (
+        <span className="ml-1 text-xs font-normal">({dropped} left out)</span>
+      )}
+    </span>
+  );
+}
+
 function Dash() {
   return (
     <span className="text-muted-foreground" aria-label="none">
@@ -25,14 +56,15 @@ function Dash() {
 function AgentRow({
   agent,
   envKey,
+  keyLimit,
   now,
 }: {
   agent: FleetAgent;
   envKey?: string;
+  keyLimit?: number;
   now: Date;
 }) {
   const health = agentHealth(agent);
-  const keys = agent.keys ?? [];
   const missing = agent.missing_keys ?? [];
   const issues = agent.issues ?? [];
   const capabilities =
@@ -89,7 +121,7 @@ function AgentRow({
       <td className="px-4 py-3 text-right tabular-nums">
         {agent.checked_in ? (
           <>
-            {keys.length}
+            <KeyCount agent={agent} keyLimit={keyLimit} />
             {!agent.keys_complete && (
               <span className="ml-1 text-xs text-muted-foreground">
                 (active only)
@@ -100,7 +132,20 @@ function AgentRow({
           <Dash />
         )}
       </td>
-      <td className="px-4 py-3 text-right tabular-nums">
+      <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">
+        {agent.joining && (
+          <Badge
+            variant="warning"
+            className="mr-2"
+            title={
+              agent.joined_at
+                ? `Joined ${timeAgo(agent.joined_at, now)}; left out of the env key for up to 30 minutes while it restores the env's keys`
+                : undefined
+            }
+          >
+            Joining
+          </Badge>
+        )}
         {agent.in_scope ? (
           missing.length > 0 ? (
             <span
@@ -155,11 +200,14 @@ function AgentRow({
 export function AgentTable({
   agents,
   envKey,
+  keyLimit,
   now = new Date(),
 }: {
   agents: FleetAgent[];
   /** The env key's fingerprint, to mark the agents whose active key it is. */
   envKey?: string;
+  /** How many keys of a cluster are kept, to warn as a cluster nears it. */
+  keyLimit?: number;
   now?: Date;
 }) {
   return (
@@ -199,7 +247,13 @@ export function AgentTable({
         </thead>
         <tbody>
           {agents.map((agent) => (
-            <AgentRow key={agent.id} agent={agent} envKey={envKey} now={now} />
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              envKey={envKey}
+              keyLimit={keyLimit}
+              now={now}
+            />
           ))}
         </tbody>
       </table>

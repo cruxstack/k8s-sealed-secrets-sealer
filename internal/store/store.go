@@ -19,12 +19,24 @@ type AgentState struct {
 	Capabilities []string            `dynamodbav:"capabilities"`
 	Commands     []string            `dynamodbav:"commands"`
 	Controller   protocol.Controller `dynamodbav:"controller"`
-	// Keys holds no certificates; those are stored once per key.
+	// Keys holds no certificates; those are stored once per key. It holds
+	// at most protocol.MaxKeys keys: the newest the agent reported.
 	Keys         []KeyRef `dynamodbav:"keys"`
 	KeysComplete bool     `dynamodbav:"keys_complete"`
 	// CheckInIntervalSeconds is the agent's check-in interval, 0 when the
 	// agent did not report it.
 	CheckInIntervalSeconds int `dynamodbav:"checkin_interval_seconds,omitempty"`
+	// KeysReported is how many keys the agent reported, more than Keys
+	// holds when some were left out; zero in states stored before it was
+	// recorded. DroppedUpTo is the newest NotBefore among the keys left
+	// out that were not revoked, nil when there were none: a key no newer
+	// than that may be held although Keys does not list it.
+	KeysReported int        `dynamodbav:"keys_reported,omitempty"`
+	DroppedUpTo  *time.Time `dynamodbav:"dropped_up_to,omitempty"`
+	// JoinedAt is when the agent first checked in, or first checked in
+	// holding none of the keys it held before (its cluster was rebuilt).
+	// It is nil for agents first seen before it was recorded.
+	JoinedAt *time.Time `dynamodbav:"joined_at,omitempty"`
 }
 
 // CheckInInterval is the agent's check-in interval, 0 when it did not report
@@ -48,6 +60,11 @@ type KeyRecord struct {
 	NotAfter       time.Time `dynamodbav:"not_after"`
 	FirstSeenAgent string    `dynamodbav:"first_seen_agent"`
 	FirstSeenAt    time.Time `dynamodbav:"first_seen_at"`
+	// Status is KeyActive (also when empty) or KeyRevoked; StatusBy and
+	// StatusAt say who set it and when.
+	Status   string     `dynamodbav:"status,omitempty"`
+	StatusBy string     `dynamodbav:"status_by,omitempty"`
+	StatusAt *time.Time `dynamodbav:"status_at,omitempty"`
 }
 
 // Store is the control plane's persistence.
@@ -60,6 +77,14 @@ type Store interface {
 	// PutKeyIfAbsent records a key the first time any agent reports it and
 	// reports whether this call created the record.
 	PutKeyIfAbsent(ctx context.Context, k KeyRecord) (bool, error)
+	// GetKey returns the env's record of a key.
+	GetKey(ctx context.Context, fingerprint string) (KeyRecord, bool, error)
+	// SetKeyStatus records k's Status, StatusBy and StatusAt on its record
+	// and, in the same write, lists a revoked key for RevokedKeys or takes a
+	// reinstated one off. It reports whether the key has a record.
+	SetKeyStatus(ctx context.Context, k KeyRecord) (bool, error)
+	// RevokedKeys returns the env's revoked keys, by fingerprint.
+	RevokedKeys(ctx context.Context) (map[string]RevokedKey, error)
 	// PutReplayIfAbsent records a one-time key (such as a signed login
 	// request's signature) until expires, and reports whether this call
 	// recorded it. A false result means the key was already used.
@@ -87,13 +112,18 @@ type Store interface {
 	// reports whether this call did; a result is accepted at most once.
 	FinishCommand(ctx context.Context, agentID, id, status, result, errMsg string, now time.Time) (bool, error)
 
-	// PutEscrowIfAbsent stores an escrowed key unless one is stored already,
-	// and reports whether this call stored it (the first upload wins).
-	PutEscrowIfAbsent(ctx context.Context, rec protocol.EscrowRecord) (bool, error)
-	// Escrow returns an escrowed key.
-	Escrow(ctx context.Context, fingerprint string) (protocol.EscrowRecord, bool, error)
-	// Escrowed reports which of the fingerprints have an escrowed key.
-	Escrowed(ctx context.Context, fingerprints []string) (map[string]bool, error)
+	// PutEscrow stores an agent's escrowed copy of a key: the first upload
+	// as the key's primary record, a later one from another agent as a
+	// further copy, up to maxCopies in all. It reports whether this call
+	// stored one (not when the uploader has a copy already or the key has
+	// maxCopies), and whether it was the key's first.
+	PutEscrow(ctx context.Context, rec protocol.EscrowRecord, maxCopies int) (stored, first bool, err error)
+	// Escrow returns a key's escrowed copies, the primary record first and
+	// the others by uploader; none when the key has no escrowed copy.
+	Escrow(ctx context.Context, fingerprint string) ([]protocol.EscrowRecord, error)
+	// EscrowUploaders returns, for each of the fingerprints with an
+	// escrowed copy, the agents that uploaded one, the primary's first.
+	EscrowUploaders(ctx context.Context, fingerprints []string) (map[string][]string, error)
 
 	// CreateSession stores a session unless its user already has a live
 	// one for the repository, which it returns instead, reporting whether
