@@ -45,6 +45,10 @@ github:
 # how long a user stays signed in
 userSessionTTL: 8h
 
+# the key renewal period the control plane asks one controller to use when no
+# cluster in the env renews its sealing key
+keyRenewPeriod: 720h
+
 dynamodb:
   # (required)
   table: ""

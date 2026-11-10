@@ -128,3 +128,18 @@ func TestCompute_NoCheckIns(t *testing.T) {
 		t.Fatalf("fleet = %+v", f)
 	}
 }
+
+func TestCompute_EnvKeyTieGoesToGreaterFingerprint(t *testing.T) {
+	reg := testRegistry(t, "a", "b")
+	// keys made in the same second, reported in different orders
+	k1, k2, k3 := key("SHA256:aaa", 1), key("SHA256:ccc", 1), key("SHA256:bbb", 1)
+	for range 20 {
+		f := Compute("dev", reg, map[string]store.AgentState{
+			"a": state("a", time.Second, k1, k2, k3),
+			"b": state("b", time.Second, k3, k2, k1),
+		}, now)
+		if f.EnvKey == nil || f.EnvKey.Fingerprint != "SHA256:ccc" {
+			t.Fatalf("env key = %+v, want SHA256:ccc", f.EnvKey)
+		}
+	}
+}

@@ -64,9 +64,17 @@ controller.
 
 The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
-and an `escrow` key (`dev/k3d/emulators.yaml`). local-kms does not enforce
-key policies, so "the control plane cannot decrypt" is tested with the
-Terraform module, not here.
+and an `escrow` key (`dev/local-kms/seed.yaml`; throwaway key material, local
+use only). Agents use the escrow key through `alias/sealer-escrow`. local-kms
+does not enforce key policies, so "the control plane cannot decrypt" is
+tested with the Terraform module, not here.
+
+Every simulated controller starts with its own key and with key renewal off
+(`--key-renew-period 0`). Within a minute or so of `atmos dev up`, the agents
+escrow their keys, each cluster restores the others' keys from escrow (its
+controller restarts once per restore), and the control plane turns renewal on
+in one cluster, `dev-use1-blue`. `atmos dev status` then shows the same env
+key everywhere.
 
 | Endpoint       | Default                 |
 | -------------- | ----------------------- |
@@ -118,7 +126,8 @@ and waits until it is ready. Several can run beside `atmos dev up`. Use
 | Command                  | What it does                                               |
 | ------------------------ | ---------------------------------------------------------- |
 | `atmos test unit`        | Go unit tests with the race detector                       |
-| `atmos test integration` | The DynamoDB store against DynamoDB Local in Docker        |
+| `atmos test integration` | The store against DynamoDB Local and envelope encryption   |
+|                          | against local KMS, both in Docker                          |
 | `atmos web test`         | Web UI tests (vitest)                                      |
 | `atmos web check`        | Web UI lint, type check and formatting                     |
 | `atmos test e2e`         | Whole stack in a throwaway cluster, then end-to-end checks |
@@ -131,12 +140,15 @@ with a running development stack. Pass `--keep` to leave the cluster up after
 the run for inspection. Besides bringing the stack up, it checks that:
 
 - only registered service accounts can log in, only with tokens for the
-  control plane's audience, and that check-ins need a session token;
+  control plane's audience, and that check-ins, commands and escrow need a
+  session token;
+- keys converge: every cluster restores the others' keys from escrow, each
+  key is escrowed once, every controller seals with the same env key, and
+  key renewal is turned on in exactly one cluster;
 - every agent checks in with its controller's whole key set and flags, and
   can reach only its own controller;
-- each controller decrypts a value sealed with its certificate;
-- the fleet shows keys out of sync, with each cluster missing the others'
-  keys (until key sync exists, every simulated cluster has its own key);
+- a value sealed with the env key's certificate, taken from one cluster,
+  unseals in every cluster;
 - the UI is served with a strict content security policy, the fleet API
   requires sign-in, alice can sign in while bob and carol are refused, and
   sign-out requires the CSRF token.

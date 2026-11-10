@@ -29,7 +29,8 @@ commands:
             golang/go: 1.27.3
         description: |
           Run the tests that need AWS service emulators but no cluster: the
-          DynamoDB store against DynamoDB Local in Docker.
+          DynamoDB store against DynamoDB Local, and envelope encryption
+          against local KMS, both in Docker.
 
             atmos test integration
         steps:

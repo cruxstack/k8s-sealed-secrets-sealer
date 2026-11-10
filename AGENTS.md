@@ -11,13 +11,14 @@
 - **Packages**:
   - `internal/config/` - reads and validates all configuration; nothing else reads the environment
   - `internal/protocol/` - the agent API's messages and capabilities; a change here is a protocol change
-  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API), shared by the server and Lambda entry points
+  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API), shared by the server and Lambda entry points; key sync planning (escrow, restore, renewal) runs on each check-in
   - `internal/agentauth/` - agent login (k8s-oidc: projected service-account tokens via go-oidc; aws-sts: signed sts:GetCallerIdentity forwarded to STS, with a host allowlist and replay protection) and agent session tokens
   - `internal/registry/` - the agent registry file: who may log in, with which identity and capabilities
   - `internal/fleet/` - pure computation of agent health, the env key and missing keys (design section 7)
   - `internal/store/` - persistence: DynamoDB, plus an in-memory store for tests
   - `internal/keys/` - sealing key fingerprints (the controller's own format) from certificates
-  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes
+  - `internal/envelope/` - KMS envelope encryption (data key + AES-256-GCM, bound to an encryption context), with a fake KMS for tests
+  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes, the command runner, key escrow and restore, and turning on key renewal
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time

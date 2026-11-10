@@ -10,7 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 
@@ -67,13 +69,43 @@ func run() error {
 	client := agent.NewClient(agent.ClientOptions{
 		BaseURL:  cfg.ControlPlaneURL,
 		Identity: identity,
+		Env:      cfg.EnvName,
 		Version:  version.Version,
 	})
+
+	// a handler is registered only for capabilities this agent has
+	commands := agent.NewCommands(client, logger, nil)
+	var escrow agent.Escrower
+	if cfg.HasCapability(protocol.CapabilityKeys) {
+		kmsClient, err := newKMS(cfg)
+		if err != nil {
+			return err
+		}
+		keySync := agent.NewKeySync(agent.KeySyncOptions{
+			Kube:        kube,
+			Namespace:   cfg.ControllerNamespace,
+			Deployment:  cfg.ControllerDeployment,
+			KMS:         kmsClient,
+			EscrowKeyID: cfg.KMSEscrowKeyID,
+			Env:         cfg.EnvName,
+			Escrow:      client,
+			Logger:      logger,
+		})
+		escrow = keySync
+		commands.Handle(protocol.CommandKeysRestore, keySync.Restore)
+	}
+	if cfg.HasCapability(protocol.CapabilityRenewal) {
+		renewal := agent.NewRenewal(kube, cfg.ControllerNamespace, cfg.ControllerDeployment, logger)
+		commands.Handle(protocol.CommandRenewalEnable, renewal.Enable)
+	}
+
 	a := agent.New(agent.Options{
 		Inventory:    inventory,
 		ControlPlane: client,
 		Interval:     cfg.CheckInInterval,
 		Capabilities: cfg.Capabilities,
+		Commands:     commands.Types(),
+		Escrow:       escrow,
 		Logger:       logger,
 		Version:      version.Version,
 	})
@@ -82,12 +114,35 @@ func run() error {
 	defer stop()
 
 	logger.InfoContext(ctx, "starting agent",
-		"version", version.Version, "control_plane", cfg.ControlPlaneURL, "identity", cfg.IdentityMode,
-		"capabilities", cfg.Capabilities)
+		"version", version.Version, "env", cfg.EnvName, "control_plane", cfg.ControlPlaneURL,
+		"identity", cfg.IdentityMode, "capabilities", cfg.Capabilities, "commands", commands.Types())
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return a.Run(ctx) })
+	g.Go(func() error { return commands.Run(ctx) })
 	g.Go(func() error { return httpserver.Serve(ctx, cfg.HTTPAddr, a.Handler(), logger) })
 	return g.Wait()
+}
+
+// newKMS returns the KMS client for the escrow key. Credentials come from the
+// SDK's default chain: EKS Pod Identity or IRSA in a cluster.
+func newKMS(cfg *config.Agent) (*kms.Client, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
+	}
+	region := cfg.KMSRegion
+	if region == "" {
+		region = awsCfg.Region
+	}
+	if region == "" {
+		return nil, errors.New("the keys capability needs a KMS region: set APP_KMS_REGION or AWS_REGION")
+	}
+	return kms.NewFromConfig(awsCfg, func(o *kms.Options) {
+		o.Region = region
+		if cfg.KMSEndpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.KMSEndpoint)
+		}
+	}), nil
 }
 
 // newIdentity returns how the agent logs in. In AWS mode the credentials

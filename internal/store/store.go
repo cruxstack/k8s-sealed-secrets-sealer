@@ -55,4 +55,23 @@ type Store interface {
 	// request's signature) until expires, and reports whether this call
 	// recorded it. A false result means the key was already used.
 	PutReplayIfAbsent(ctx context.Context, key string, expires time.Time) (bool, error)
+
+	// PutCommand queues a command.
+	PutCommand(ctx context.Context, c CommandRecord) error
+	// Commands returns an agent's commands, oldest first.
+	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
+	// LeaseCommand moves a queued, unexpired command to leased, and reports
+	// whether this call did; a command is leased at most once.
+	LeaseCommand(ctx context.Context, agentID, id string, now time.Time) (bool, error)
+	// FinishCommand records the outcome of a leased, unexpired command, and
+	// reports whether this call did; a result is accepted at most once.
+	FinishCommand(ctx context.Context, agentID, id, status, result, errMsg string, now time.Time) (bool, error)
+
+	// PutEscrowIfAbsent stores an escrowed key unless one is stored already,
+	// and reports whether this call stored it (the first upload wins).
+	PutEscrowIfAbsent(ctx context.Context, rec protocol.EscrowRecord) (bool, error)
+	// Escrow returns an escrowed key.
+	Escrow(ctx context.Context, fingerprint string) (protocol.EscrowRecord, bool, error)
+	// Escrowed reports which of the fingerprints have an escrowed key.
+	Escrowed(ctx context.Context, fingerprints []string) (map[string]bool, error)
 }

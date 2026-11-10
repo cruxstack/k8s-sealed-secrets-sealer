@@ -16,13 +16,17 @@ controller:
   # the controller's Deployment; defaults to controller.name
   deploymentName: ""
 
+# The env this agent's cluster belongs to (required), e.g. "dev". The agent
+# refuses a control plane serving another env, and binds escrowed keys to it.
+env: ""
+
 # Capabilities decide which RBAC is installed and which commands the agent
 # accepts. The control plane cannot change them. See docs/design.md.
 capabilities:
   # seal values with the env key; needs only the controller's public cert
   seal: true
   # escrow and restore sealing keys; reads and creates key Secrets and
-  # restarts the controller after a restore
+  # restarts the controller after a restore; needs kms.escrowKeyId
   keys: false
   # turn on the controller's key renewal when no cluster in the env has it
   renewal: false
@@ -52,6 +56,17 @@ aws:
   # region of the STS endpoint the agent signs for (aws-sts); empty uses the
   # AWS SDK's region (AWS_REGION)
   region: ""
+
+# The KMS escrow key, used with the keys capability. The agent's IAM role
+# (EKS Pod Identity or IRSA) needs kms:GenerateDataKey and kms:Decrypt on it.
+kms:
+  # key ID, ARN or alias (required with capabilities.keys); for a
+  # multi-Region key, the replica in this cluster's region
+  escrowKeyId: ""
+  # region of the KMS endpoint; empty uses the AWS SDK's region (AWS_REGION)
+  region: ""
+  # overrides the KMS endpoint, for local emulators only
+  endpoint: ""
 
 # how often the agent reads the controller and checks in
 checkinInterval: 15s

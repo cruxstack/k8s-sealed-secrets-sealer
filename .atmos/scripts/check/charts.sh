@@ -20,7 +20,7 @@ validate() {
 control_plane=(--set env=dev --set publicURL=https://sealer.dev.example.com
   --set registry.configMapName=sealer-registry --set existingSecret=sealer
   --set dynamodb.table=sealer --set github.org=example-org --set github.oauthClientID=client-id)
-agent=(--set controlPlane.url=https://sealer.dev.example.com)
+agent=(--set controlPlane.url=https://sealer.dev.example.com --set env=dev)
 
 validate deploy/helm/control-plane "${control_plane[@]}"
 validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-east-1 \
@@ -29,7 +29,8 @@ validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-eas
   --set 'github.allowedTeams={sealers,admins}' --set github.allowInsecure=true \
   --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token
 validate deploy/helm/agent "${agent[@]}"
-validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true
+validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true \
+  --set kms.escrowKeyId=alias/sealer-escrow --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080
 validate deploy/helm/agent "${agent[@]}" --set identity.mode=aws-sts --set aws.region=us-east-1 \
   --set 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/agent'
 
@@ -40,6 +41,11 @@ if helm template check deploy/helm/agent "${agent[@]}" --set identity.mode=aws-s
 fi
 if helm template check deploy/helm/agent "${agent[@]}" --set identity.mode=password >/dev/null 2>&1; then
   echo "Error: the agent chart accepts an unknown identity mode" >&2
+  exit 1
+fi
+# the keys capability needs the escrow key
+if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.keys=true >/dev/null 2>&1; then
+  echo "Error: the agent chart enables keys without an escrow key" >&2
   exit 1
 fi
 

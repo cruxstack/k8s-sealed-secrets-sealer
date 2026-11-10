@@ -135,3 +135,45 @@ func TestClient_Errors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestClient_RefusesControlPlaneOfAnotherEnv(t *testing.T) {
+	f := &fakeServer{}
+	f.expiresIn.Store(int64(15 * time.Minute))
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: path}, Env: "prod", Version: "test"})
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err == nil || !strings.Contains(err.Error(), `serves env "dev"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if f.checkins.Load() != 0 {
+		t.Fatal("checked in with a control plane of another env")
+	}
+}
+
+func TestClient_EscrowPathIsOneSegment(t *testing.T) {
+	var gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a", Env: "dev"})
+	})
+	mux.HandleFunc("GET /agent/v1/escrow/{fp}", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		_ = json.NewEncoder(w).Encode(protocol.EscrowRecord{Fingerprint: protocol.ParseFingerprintPath(r.PathValue("fp"))})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newClient(t, srv, "t")
+
+	fp := "SHA256:ab+c/d"
+	rec, err := c.GetEscrow(context.Background(), fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/agent/v1/escrow/SHA256:ab-c_d" || rec.Fingerprint != fp {
+		t.Fatalf("path = %q, fingerprint = %q", gotPath, rec.Fingerprint)
+	}
+}

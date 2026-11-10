@@ -61,8 +61,22 @@ spec:
             - name: APP_AWS_STS_REGION
               value: {{ . | quote }}
             {{- end }}
+            - name: APP_ENV_NAME
+              value: {{ required "env is required" .Values.env | quote }}
             - name: APP_CAPABILITIES
               value: {{ include "agent.capabilities" . | quote }}
+            {{- if .Values.capabilities.keys }}
+            - name: APP_KMS_ESCROW_KEY_ID
+              value: {{ required "kms.escrowKeyId is required with the keys capability" .Values.kms.escrowKeyId | quote }}
+            {{- with .Values.kms.region }}
+            - name: APP_KMS_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.kms.endpoint }}
+            - name: APP_KMS_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             - name: APP_CHECKIN_INTERVAL
               value: {{ .Values.checkinInterval | quote }}
             - name: APP_LOG_LEVEL
