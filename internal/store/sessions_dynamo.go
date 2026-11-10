@@ -187,11 +187,7 @@ func (d *Dynamo) TouchSession(ctx context.Context, userID int64, repoKey, id str
 	switch {
 	case errors.As(err, &failed):
 		// gone, or locked
-		s, ok, err := d.Session(ctx, userID, repoKey, now)
-		if err == nil && ok && s.ID == id && s.Locked(now) {
-			err = ErrSessionBusy
-		}
-		return false, err
+		return false, d.busy(ctx, userID, repoKey, id, now)
 	case err != nil:
 		return false, fmt.Errorf("failed to update session %s: %w", id, err)
 	}
@@ -250,6 +246,36 @@ func (d *Dynamo) DeleteSession(ctx context.Context, userID int64, repoKey, id st
 		return false, fmt.Errorf("failed to delete session %s: %w", id, err)
 	}
 	return true, nil
+}
+
+func (d *Dynamo) DiscardSession(ctx context.Context, userID int64, repoKey, id string, now time.Time) (bool, error) {
+	_, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:           &d.table,
+		Key:                 itemKey(userPK(userID), sessionPrefix+repoKey),
+		ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now AND " + unlocked),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":id":  &types.AttributeValueMemberS{Value: id},
+			":now": millis(now),
+		},
+	})
+	var failed *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &failed):
+		return false, d.busy(ctx, userID, repoKey, id, now)
+	case err != nil:
+		return false, fmt.Errorf("failed to discard session %s: %w", id, err)
+	}
+	return true, nil
+}
+
+// busy returns ErrSessionBusy when a conditional write on a session failed
+// because the session is locked, and nil when it is gone.
+func (d *Dynamo) busy(ctx context.Context, userID int64, repoKey, id string, now time.Time) error {
+	s, ok, err := d.Session(ctx, userID, repoKey, now)
+	if err == nil && ok && s.ID == id && s.Locked(now) {
+		err = ErrSessionBusy
+	}
+	return err
 }
 
 func (d *Dynamo) PutSeal(ctx context.Context, s Seal) error {
@@ -340,16 +366,59 @@ func (d *Dynamo) Changes(ctx context.Context, sessionID string, ciphertexts bool
 	return out, nil
 }
 
-func (d *Dynamo) DeleteChange(ctx context.Context, sessionID, id string) (bool, error) {
-	res, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName:    &d.table,
-		Key:          itemKey(sessionPrefix+sessionID, changePrefix+id),
-		ReturnValues: types.ReturnValueAllOld,
+func (d *Dynamo) RemoveChange(ctx context.Context, userID int64, repoKey, sessionID, id string, now time.Time) (bool, error) {
+	// one transaction, so a pull request cannot lock the session between
+	// the check and the delete
+	_, err := d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{ConditionCheck: &types.ConditionCheck{
+				TableName:           &d.table,
+				Key:                 itemKey(userPK(userID), sessionPrefix+repoKey),
+				ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now AND " + unlocked),
+				ExpressionAttributeValues: map[string]types.AttributeValue{
+					":id":  &types.AttributeValueMemberS{Value: sessionID},
+					":now": millis(now),
+				},
+			}},
+			{Delete: &types.Delete{
+				TableName:           &d.table,
+				Key:                 itemKey(sessionPrefix+sessionID, changePrefix+id),
+				ConditionExpression: aws.String("attribute_exists(pk)"),
+			}},
+		},
 	})
-	if err != nil {
-		return false, fmt.Errorf("failed to delete change %s: %w", id, err)
+	var canceled *types.TransactionCanceledException
+	switch {
+	case errors.As(err, &canceled):
+		reasons := canceled.CancellationReasons
+		if len(reasons) > 0 && aws.ToString(reasons[0].Code) == "ConditionalCheckFailed" {
+			return false, d.busy(ctx, userID, repoKey, sessionID, now)
+		}
+		if len(reasons) > 1 && aws.ToString(reasons[1].Code) == "ConditionalCheckFailed" {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to remove change %s: %w", id, err)
+	case err != nil:
+		return false, fmt.Errorf("failed to remove change %s: %w", id, err)
 	}
-	return len(res.Attributes) > 0, nil
+	return true, nil
+}
+
+func (d *Dynamo) PruneChange(ctx context.Context, sessionID, id, commandID string) (bool, error) {
+	_, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:                 &d.table,
+		Key:                       itemKey(sessionPrefix+sessionID, changePrefix+id),
+		ConditionExpression:       aws.String("command_id = :cmd"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":cmd": &types.AttributeValueMemberS{Value: commandID}},
+	})
+	var failed *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &failed):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to prune change %s: %w", id, err)
+	}
+	return true, nil
 }
 
 // query reads every item under pk whose sort key starts with prefix,

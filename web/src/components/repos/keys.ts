@@ -15,9 +15,37 @@ export function regionList(regions: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
-/** Names a document within its file: its namespace and name. */
-export function docId(d: { namespace: string; name: string }): string {
-  return `${d.namespace}/${d.name}`;
+/**
+ * Names a document within its file for people: its namespace and name, and
+ * its region when it has one, since copies of a secret in several regions
+ * often share a namespace and name.
+ */
+export function docId(d: {
+  namespace: string;
+  name: string;
+  region?: string;
+}): string {
+  const id = `${d.namespace}/${d.name}`;
+  return d.region ? `${id} in ${d.region}` : id;
+}
+
+interface DocRef {
+  index?: number;
+  namespace: string;
+  name: string;
+  region?: string;
+}
+
+/**
+ * Identifies a document within its file by its position, as changes record
+ * it; changes stored before they did name it by region, namespace and name.
+ */
+function docRef(d: DocRef): string {
+  return d.index === undefined ? byName(d) : `#${d.index}`;
+}
+
+function byName(d: DocRef): string {
+  return `${d.region ?? ""}/${d.namespace}/${d.name}`;
 }
 
 /**
@@ -37,10 +65,20 @@ export function pendingDocs(
   for (const c of changes) {
     if (c.path !== path) continue;
     const docs = out.get(c.key) ?? new Set<string>();
-    for (const t of c.targets) docs.add(docId(t));
+    for (const t of c.targets) docs.add(docRef(t));
     out.set(c.key, docs);
   }
   return out;
+}
+
+/** Whether a value for key waits in the session for the document. */
+export function isPending(
+  pending: PendingDocs,
+  key: string,
+  d: SealedSecretDocument,
+): boolean {
+  const docs = pending.get(key);
+  return !!docs && (docs.has(docRef(d)) || docs.has(byName(d)));
 }
 
 /**
@@ -58,7 +96,7 @@ export function docKeyState(
   key: string,
   pending: PendingDocs,
 ): DocKeyState {
-  if (pending.get(key)?.has(docId(d))) return "pending";
+  if (isPending(pending, key, d)) return "pending";
   if (d.keys.includes(key)) return "set";
   const expected = d.expected_keys ?? [];
   return expected.length === 0 || expected.includes(key)
@@ -99,7 +137,7 @@ export interface KeyStatus {
   pending: number;
   /** How many documents need it: those whose hints don't leave it out. */
   needed: number;
-  /** The documents that lack it, as namespace/name. */
+  /** The documents that lack it, as `docId` names them. */
   lacking: string[];
   /**
    * Where it stands per region, when the file's documents are in more than

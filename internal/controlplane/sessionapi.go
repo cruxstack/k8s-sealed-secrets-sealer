@@ -63,6 +63,8 @@ type changeView struct {
 }
 
 type targetView struct {
+	// Index is the document's position in the file, when recorded.
+	Index     *int   `json:"index,omitempty"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	Scope     string `json:"scope"`
@@ -305,13 +307,17 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if sess.Locked(s.now()) {
-		writeError(w, http.StatusConflict, store.ErrSessionBusy.Error())
-		return
-	}
 	ctx := r.Context()
-	if _, err := s.store.DeleteSession(ctx, sess.UserID, store.RepoKey(sess.Owner, sess.Repo), sess.ID); err != nil {
+	discarded, err := s.store.DiscardSession(ctx, sess.UserID, store.RepoKey(sess.Owner, sess.Repo), sess.ID, s.now().UTC())
+	switch {
+	case errors.Is(err, store.ErrSessionBusy):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
 		s.internalError(w, r, "failed to delete session", err)
+		return
+	case !discarded:
+		writeError(w, http.StatusNotFound, "session not found; it may have expired or been discarded")
 		return
 	}
 	s.logger.InfoContext(ctx, "session discarded",
@@ -326,31 +332,27 @@ func (s *Server) deleteChange(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if sess.Locked(s.now()) {
-		writeError(w, http.StatusConflict, store.ErrSessionBusy.Error())
-		return
-	}
 	ctx := r.Context()
 	id := r.PathValue("change")
 	if !validChangeID(id) {
 		writeError(w, http.StatusNotFound, "change not found")
 		return
 	}
-	found, err := s.store.DeleteChange(ctx, sess.ID, id)
-	if err != nil {
+	// removed only while no pull request is being opened, so one that
+	// locks the session afterwards never reads it
+	found, err := s.store.RemoveChange(ctx, sess.UserID, store.RepoKey(sess.Owner, sess.Repo), sess.ID, id, s.now().UTC())
+	switch {
+	case errors.Is(err, store.ErrSessionBusy):
+		writeError(w, http.StatusConflict, "a pull request is being opened from this session; remove the change once it is open or has failed")
+		return
+	case err != nil:
 		s.internalError(w, r, "failed to delete change", err)
 		return
-	}
-	if !found {
+	case !found:
 		writeError(w, http.StatusNotFound, "change not found")
 		return
 	}
-	// removed before the session is marked used: a pull request that
-	// locked the session since may have read the change already
-	if _, err := s.touch(ctx, sess, s.now().UTC()); errors.Is(err, store.ErrSessionBusy) {
-		writeError(w, http.StatusConflict, "a pull request is being opened from this session and may include the change")
-		return
-	} else if err != nil {
+	if _, err := s.touch(ctx, sess, s.now().UTC()); err != nil && !errors.Is(err, store.ErrSessionBusy) {
 		s.logger.WarnContext(ctx, "failed to mark session used", "session_id", sess.ID, "error", err)
 	}
 	s.logger.InfoContext(ctx, "pending change removed",

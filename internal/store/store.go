@@ -100,6 +100,11 @@ type Store interface {
 	// DeleteSession ends a session if it is still id, and reports whether
 	// it did. Its seals and changes are left to expire.
 	DeleteSession(ctx context.Context, userID int64, repoKey, id string) (bool, error)
+	// DiscardSession ends a live session (still id) unless it is locked,
+	// and reports whether it did. It fails with ErrSessionBusy while the
+	// session is locked, so a pull request being opened from it is never
+	// left with a session discarded under it.
+	DiscardSession(ctx context.Context, userID int64, repoKey, id string, now time.Time) (bool, error)
 
 	// PutSeal records a requested seal.
 	PutSeal(ctx context.Context, s Seal) error
@@ -112,6 +117,13 @@ type Store interface {
 	// Changes returns a session's pending changes, with their ciphertexts
 	// only when asked for.
 	Changes(ctx context.Context, sessionID string, ciphertexts bool) ([]Change, error)
-	// DeleteChange removes a pending change and reports whether it existed.
-	DeleteChange(ctx context.Context, sessionID, id string) (bool, error)
+	// RemoveChange removes a pending change of a live session (still
+	// sessionID) unless the session is locked, and reports whether the
+	// change existed. It fails with ErrSessionBusy while the session is
+	// locked: a pull request being opened may have read the change.
+	RemoveChange(ctx context.Context, userID int64, repoKey, sessionID, id string, now time.Time) (bool, error)
+	// PruneChange removes a pending change if it still holds the seal of
+	// commandID, and reports whether it did. A change a newer seal
+	// replaced in the meantime stays.
+	PruneChange(ctx context.Context, sessionID, id, commandID string) (bool, error)
 }

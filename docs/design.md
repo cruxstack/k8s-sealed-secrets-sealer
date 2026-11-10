@@ -330,7 +330,8 @@ v1 has no command that deletes or disables anything.
    fingerprint) with an expiry of 2 minutes, storing the encrypted value
    beside the payload rather than in it, and returns `202` with the command
    ID. The UI polls the seal's status every second: queued, sealing, sealed,
-   failed or expired.
+   failed or expired, or superseded when a newer seal of the key replaced
+   the value in the session.
 7. The agent leases the command. Leasing removes the encrypted value from the
    stored command, so it reaches the agent once. The agent re-validates the
    command itself: valid key name, namespace and name present, scope `strict`
@@ -346,7 +347,7 @@ v1 has no command that deletes or disables anything.
    sealing the same key into the same file for the same regions again
    replaces it, and a seal that finishes late never replaces a newer one.
    Changes of one key for different regions can overlap; the newest wins for
-   each document, and a change a newer one covers entirely is removed. The UI
+   each document, and a change one newer change covers entirely is removed. The UI
    shows which agent and key sealed it. Users never see ciphertext.
 9. When the user opens a pull request, the control plane locks the session,
    so nothing is sealed into it or removed from it meanwhile and it opens one
@@ -444,8 +445,12 @@ each region:
 - A key's pending changes may overlap, such as one for every document
   followed by one for `use1`. For each document, the newest seal wins:
   `use1` gets the second value and the rest keep the first. Removing the
-  `use1` change brings the first value back there. A change a newer one
-  covers entirely is removed.
+  `use1` change brings the first value back there. A change one newer
+  change covers entirely is removed; one that newer changes only cover
+  between them stays, so removing either brings it back where that one
+  applied.
+- A document is identified by its place in the file, since copies of a
+  secret in several regions often share a namespace and name.
 - The pull request names each change's regions and the documents it ends up
   setting.
 
@@ -807,7 +812,8 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   derived from the path, key and regions, so sealing a key for the same
   regions again replaces the change; a seal that finishes late does not
   replace a newer one (command IDs are ULIDs). Overlapping changes of a key
-  are resolved when read: the newest wins for each document. Ciphertexts are stored apart from the targets so listings
+  are resolved when read: the newest wins for each document, identified
+  by its position in the file at the session's commit. Ciphertexts are stored apart from the targets so listings
   leave them out; they are never returned to clients. Never plaintext.
   Discarding a session leaves its seals and changes to expire unreachable.
 - **Audit entry:** who (user or agent), what (seal, PR, command, key event),
