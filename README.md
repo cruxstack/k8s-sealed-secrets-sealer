@@ -6,10 +6,11 @@ clusters and regions that environment spans. Users pick a repository and a
 file, type a value, and get a pull request. They never pick a cluster, a
 region or a certificate.
 
-> **Status:** early development. People sign in with GitHub and see the
-> fleet: every agent, its controller's keys and the env's key state.
-> Sealing is next. See [the design](docs/design.md) for
-> where it is going.
+> **Status:** early development. People sign in with GitHub, see the fleet
+> (every agent, its controller's keys and the env's key state), and browse
+> the SealedSecrets for their env in the repositories they can read. Agents
+> keep every cluster holding the same keys. Sealing is next. See
+> [the design](docs/design.md) for where it is going.
 
 ## How it works
 

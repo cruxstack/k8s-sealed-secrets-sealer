@@ -159,7 +159,26 @@ setup_objects.append({
     "metadata": {"name": "local-kms-seed", "namespace": SYSTEM_NAMESPACE},
     "data": {"seed.yaml": str(read_file("dev/local-kms/seed.yaml"))},
 })
-setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
+def github_app_key_pair():
+    # The mock GitHub App's key pair: made once per stack, kept out of Git.
+    # The control plane signs App JWTs with the private key; the mock checks
+    # them with the public key.
+    folder = ".tools/dev/" + k8s_context()
+    key = folder + "/github-app.pem"
+    local("mkdir -p %s && { [ -s %s ] || openssl genrsa -out %s 2048 2>/dev/null; }" % (
+        shlex.quote(folder), shlex.quote(key), shlex.quote(key)), quiet=True)
+    public = local("openssl rsa -in %s -pubout 2>/dev/null" % shlex.quote(key), quiet=True)
+    return str(read_file(key)), str(public)
+
+GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PUBLIC_KEY = github_app_key_pair()
+
+def control_plane_secret():
+    objs = decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml"))
+    for obj in objs:
+        obj["stringData"]["APP_GITHUB_APP_PRIVATE_KEY"] = GITHUB_APP_PRIVATE_KEY
+    return objs
+
+setup_objects.extend(control_plane_secret())
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
 def mock_github():
     # register this stack's callback URL with the mock, as an OAuth app would
@@ -171,6 +190,8 @@ def mock_github():
             for e in container.get("env", []):
                 if e["name"] == "MOCK_GITHUB_CALLBACK_URLS":
                     e["value"] = PUBLIC_URL + "/api/v1/auth/callback"
+                if e["name"] == "MOCK_GITHUB_APP_PUBLIC_KEY":
+                    e["value"] = GITHUB_APP_PUBLIC_KEY
     return objs
 
 add(mock_github())

@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import apiClient, { navigation } from "@/api/client";
 import { AuthProvider } from "@/lib/auth";
 import { ThemeProvider } from "@/lib/theme-provider";
@@ -25,12 +31,21 @@ describe("Header", () => {
       defaultOptions: { queries: { retry: false } },
     });
 
-    render(
-      <ThemeProvider defaultTheme="light" storageKey="test-theme">
-        <QueryClientProvider client={queryClient}>
+    // the header's navigation links need a router
+    const router = createRouter({
+      routeTree: createRootRoute({
+        component: () => (
           <AuthProvider>
             <Header />
           </AuthProvider>
+        ),
+      }),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    render(
+      <ThemeProvider defaultTheme="light" storageKey="test-theme">
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
         </QueryClientProvider>
       </ThemeProvider>,
     );

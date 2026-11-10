@@ -16,6 +16,8 @@ github:
   org: example-org
   allowedTeams: [sealers]
   oauthClientID: local-client-id
+  # the mock's App; Tilt generates its key pair (APP_GITHUB_APP_PRIVATE_KEY)
+  appID: "1"
   url: http://localhost:4104
   apiURL: http://mock-github.sealer-system.svc.cluster.local:8080
   oauthTokenURL: http://mock-github.sealer-system.svc.cluster.local:8080/login/oauth/access_token

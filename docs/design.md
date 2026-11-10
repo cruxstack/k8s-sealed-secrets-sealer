@@ -721,7 +721,21 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   every operation is first checked against the signed-in user's own permission
   on that repository: read to list and discover, write to create a session,
   seal and open a pull request. Write access is re-checked on every seal and
-  PR. Results are cached briefly (per Lambda instance).
+  PR. The permission comes from
+  `GET /repos/{owner}/{repo}/collaborators/{login}/permission`, and the answer
+  must name the signed-in user's GitHub ID (logins can change hands). Results
+  are cached for 2 minutes per Lambda instance. A repository the user cannot
+  read is reported as not found, so private repository names are not
+  disclosed. Archived repositories are not listed and cannot be written.
+- **Least-privilege tokens.** The control plane mints each installation
+  token with only the permissions its use needs: `contents: read` and
+  `metadata: read` to list repositories, read files and look up permissions;
+  write permissions only to open a pull request. The App itself needs
+  repository permissions Contents (read and write), Metadata (read) and Pull
+  requests (read and write), and, when it also signs users in, organization
+  permission Members (read). One GitHub App can provide both: its client ID
+  and secret sign users in, and its App ID and private key read
+  repositories.
 - **Env allowlist.** A deployment can require membership in one or more GitHub
   teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
   is checked at sign-in; removing someone from the team takes effect when
@@ -747,6 +761,24 @@ A document belongs to the env when its env annotation equals the deployment's
 env name. The region annotation is a preference hint for choosing an agent and
 is shown in the UI. Files that already use other annotation names keep working
 by configuring the keys to match them.
+
+**Discovery.** A repository's SealedSecret files are found on the head of its
+default branch: the commit's tree is listed once, files whose name matches
+the discovery globs (`*sealed*.yaml` and `*sealed*.yml` by default; a glob
+with a slash matches the whole path) are read, at most 500 of them and none
+over 1 MiB, and parsed. Parse results are cached by blob ID, which is
+immutable. A file is listed when it has at least one document for the env;
+one that matches but cannot be parsed is listed with the reason.
+
+Each document's decryption label comes from its own metadata, the same place
+the controller reads it. A document cannot be sealed into when its scope is
+`cluster-wide`, it has no namespace or name, it uses the legacy `spec.data`
+format or another `apiVersion`, or its `encryptedData` is not a mapping; the
+UI shows why. A file with a duplicate key in any mapping is refused as a
+whole, because tools may resolve the duplicate differently (a second
+`namespace:` read first here and last by another parser would change the
+label). Documents are numbered as the YAML parser sees them: empty documents
+are not counted.
 
 ## 14. Local development
 

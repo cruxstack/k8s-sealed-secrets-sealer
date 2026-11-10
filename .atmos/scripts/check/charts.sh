@@ -19,7 +19,8 @@ validate() {
 # the minimum each chart requires
 control_plane=(--set env=dev --set publicURL=https://sealer.dev.example.com
   --set registry.configMapName=sealer-registry --set existingSecret=sealer
-  --set dynamodb.table=sealer --set github.org=example-org --set github.oauthClientID=client-id)
+  --set dynamodb.table=sealer --set github.org=example-org --set github.oauthClientID=client-id
+  --set github.appID=12345)
 agent=(--set controlPlane.url=https://sealer.dev.example.com --set env=dev)
 
 validate deploy/helm/control-plane "${control_plane[@]}"
@@ -27,7 +28,8 @@ validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-eas
   --set agentAudience=https://agents.example.com --set dynamodb.endpoint=http://dynamodb:8000 \
   --set dynamodb.createTable=true --set 'aws.stsHosts={sts.us-east-1.amazonaws.com}' \
   --set 'github.allowedTeams={sealers,admins}' --set github.allowInsecure=true \
-  --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token
+  --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token \
+  --set github.installationID=777 --set 'discovery.fileGlobs={*.sealed.yaml,secrets/*/*.yaml}'
 validate deploy/helm/agent "${agent[@]}"
 validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true \
   --set kms.escrowKeyId=alias/sealer-escrow --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080

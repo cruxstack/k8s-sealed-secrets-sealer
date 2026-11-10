@@ -16,6 +16,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -39,6 +40,9 @@ type Options struct {
 	AdminToken string
 	// Users signs people in and enables the user API. Nil disables both.
 	Users *userauth.Handler
+	// Repos gives signed-in users access to repositories; nil disables the
+	// repository API.
+	Repos *repos.Service
 	// WebUI serves the web UI at /. Nil serves nothing there.
 	WebUI http.Handler
 	// HSTS sets Strict-Transport-Security, for deployments served over https.
@@ -71,6 +75,7 @@ type Server struct {
 	store      store.Store
 	adminToken string
 	users      *userauth.Handler
+	repos      *repos.Service
 	webUI      http.Handler
 	hsts       bool
 	now        func() time.Time
@@ -114,6 +119,7 @@ func New(opts Options) *Server {
 		store:      opts.Store,
 		adminToken: opts.AdminToken,
 		users:      opts.Users,
+		repos:      opts.Repos,
 		webUI:      opts.WebUI,
 		hsts:       opts.HSTS,
 		now:        now,
@@ -148,6 +154,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/v1/auth/me", u.Me)
 		mux.HandleFunc("POST /api/v1/auth/logout", u.RequireUser(u.RequireCSRF(u.Logout)))
 		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(s.fleet))
+		if s.repos != nil {
+			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.listRepos))
+			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.listFiles))
+		}
 	}
 
 	notFound := func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") }

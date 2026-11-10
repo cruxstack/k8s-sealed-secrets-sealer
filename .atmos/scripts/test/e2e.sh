@@ -147,6 +147,24 @@ agents="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/fleet" | 
 [[ "$agents" == "$(stack_clusters | wc -l | tr -d ' ')" ]] || die "the signed-in fleet has ${agents} agents"
 check "alice (org member, allowed team) signs in and sees the fleet"
 
+# --- repositories, through the GitHub App, limited to alice's own access ---
+repos="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos")"
+[[ "$(jq -c '[.repositories[] | .full_name + ":" + .access]' <<<"$repos")" == '["example-org/apps:write","example-org/platform:read"]' ]] \
+  || die "alice's repositories: ${repos}"
+check "alice sees only the repositories she can read, with her access"
+
+files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos/example-org/apps/files")"
+jq -e '
+  (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml"]
+  and (.files[0].documents | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"]
+  and (.files[1].documents[0].problem | test("cluster-wide"))
+' <<<"$files" >/dev/null || die "SealedSecret discovery in example-org/apps: ${files}"
+check "discovery finds the dev SealedSecrets in example-org/apps, and flags cluster-wide scope"
+
+restricted="$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-alice" "${control_plane}/api/v1/repos/example-org/restricted/files")"
+[[ "$restricted" == 404 ]] || die "alice read a repository she has no access to: ${restricted}"
+check "a repository alice cannot read is not found"
+
 [[ "$(sign_in bob)" == "${control_plane}/login?error=not_in_team" ]] || die "bob was not refused as outside the allowed team"
 [[ "$(sign_in carol)" == "${control_plane}/login?error=not_member" ]] || die "carol was not refused as outside the org"
 check "sign-in refuses users outside the allowed team or the org"

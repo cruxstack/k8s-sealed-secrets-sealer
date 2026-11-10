@@ -22,18 +22,24 @@ registry:
   configMapName: ""
 
 # Secret with APP_AGENT_SESSION_KEY and APP_USER_SESSION_KEY (each at least
-# 32 random bytes), APP_GITHUB_OAUTH_CLIENT_SECRET and, to enable the admin
-# API, APP_ADMIN_TOKEN (required)
+# 32 random bytes), APP_GITHUB_OAUTH_CLIENT_SECRET, APP_GITHUB_APP_PRIVATE_KEY
+# (PEM) and, to enable the admin API, APP_ADMIN_TOKEN (required)
 existingSecret: ""
 
-# GitHub sign-in (a GitHub OAuth app). Users must belong to org and, when
+# GitHub: sign-in and repository access. One GitHub App can provide both: its
+# client ID and secret sign users in, and its App ID and private key read
+# repositories and open pull requests. Users must belong to org and, when
 # allowedTeams is set, to at least one of those teams. Use teams for prod.
 github:
   # (required)
   org: ""
   allowedTeams: []
-  # the OAuth app's client ID (required); its secret goes in existingSecret
+  # the OAuth client ID (required); its secret goes in existingSecret
   oauthClientID: ""
+  # the GitHub App's ID (required); its private key goes in existingSecret
+  appID: ""
+  # the App's installation on org; looked up when empty
+  installationID: ""
   # GitHub's web and API hosts; change for GitHub Enterprise Server
   url: https://github.com
   apiURL: https://api.github.com
@@ -44,6 +50,18 @@ github:
 
 # how long a user stays signed in
 userSessionTTL: 8h
+
+# The annotation keys that place a SealedSecret document in an env (the
+# document belongs to this deployment when it equals env) and a region (a
+# preference for which cluster seals).
+annotations:
+  env: k8s-sealed-secrets-sealer/env
+  region: k8s-sealed-secrets-sealer/region
+
+discovery:
+  # file name globs (or path globs, with a slash) read when looking for
+  # SealedSecrets; empty uses the default, *sealed*.yaml and *sealed*.yml
+  fileGlobs: []
 
 # the key renewal period the control plane asks one controller to use when no
 # cluster in the env renews its sealing key

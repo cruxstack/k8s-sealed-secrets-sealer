@@ -1,8 +1,13 @@
-// Package mockgithub is a small stand-in for GitHub's OAuth and user APIs,
-// for tests and the local stack. It is never part of a release.
+// Package mockgithub is a small stand-in for GitHub, for tests and the local
+// stack: OAuth sign-in and the user and org APIs, and a GitHub App with
+// installation tokens and the repository APIs the sealer uses. It is never
+// part of a release.
 //
 // /login/oauth/authorize shows a page listing the mock users; choosing one
 // (or passing login=<user>) redirects back with a code, as GitHub does.
+// Installation tokens carry the permissions they were minted with, and every
+// repository call checks them, so a token minted too narrowly fails here as
+// it would on GitHub.
 package mockgithub
 
 import (
@@ -37,6 +42,10 @@ type Options struct {
 	CallbackURLs []string
 	Org          string
 	Users        []User
+	// App is the GitHub App; repository routes need its tokens.
+	App App
+	// Repos are the repositories the App is installed on.
+	Repos []Repo
 }
 
 // DefaultUsers are the local stack's users: alice may sign in, bob is in the
@@ -53,14 +62,26 @@ func DefaultUsers() []User {
 type Server struct {
 	opts Options
 
-	mu     sync.Mutex
-	codes  map[string]string // code -> login
-	tokens map[string]string // access token -> login
+	mu            sync.Mutex
+	codes         map[string]string // code -> login
+	tokens        map[string]string // access token -> login
+	installTokens map[string]installationToken
+	repos         map[string]*repoState // lowercase "owner/name"
 }
 
 // New returns a Server.
 func New(opts Options) *Server {
-	return &Server{opts: opts, codes: map[string]string{}, tokens: map[string]string{}}
+	s := &Server{
+		opts:          opts,
+		codes:         map[string]string{},
+		tokens:        map[string]string{},
+		installTokens: map[string]installationToken{},
+		repos:         map[string]*repoState{},
+	}
+	for _, r := range opts.Repos {
+		s.repos[strings.ToLower(r.Owner+"/"+r.Name)] = newRepoState(r)
+	}
+	return s
 }
 
 // Handler returns the mock's routes.
@@ -72,6 +93,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /user", s.withUser(s.getUser))
 	mux.HandleFunc("GET /orgs/{org}/members/{username}", s.withUser(s.orgMember))
 	mux.HandleFunc("GET /orgs/{org}/teams/{team}/memberships/{username}", s.withUser(s.teamMembership))
+
+	mux.HandleFunc("GET /orgs/{org}/installation", s.withApp(s.orgInstallation))
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", s.withApp(s.accessTokens))
+	mux.HandleFunc("GET /installation/repositories", s.withInstallation("metadata", s.installationRepositories))
+	mux.HandleFunc("GET /repos/{owner}/{repo}", s.withInstallation("metadata", s.getRepo))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/collaborators/{username}/permission", s.withInstallation("metadata", s.collaboratorPermission))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/ref/{ref...}", s.withInstallation("contents", s.gitRef))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{sha}", s.withInstallation("contents", s.gitTree))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", s.withInstallation("contents", s.gitBlob))
 	return mux
 }
 

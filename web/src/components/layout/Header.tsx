@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { FileLock, LogOut } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import {
@@ -12,6 +13,31 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { useLogout } from "@/api/queries/auth";
+
+function NavLink({
+  to,
+  exact = false,
+  children,
+}: {
+  to: "/" | "/repos";
+  exact?: boolean;
+  children: string;
+}) {
+  return (
+    <Link
+      to={to}
+      activeOptions={{ exact }}
+      className="rounded-md px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground"
+      inactiveProps={{ className: "text-muted-foreground" }}
+      activeProps={{
+        className: "bg-muted text-foreground",
+        "aria-current": "page",
+      }}
+    >
+      {children}
+    </Link>
+  );
+}
 
 export function Header() {
   const { user, env } = useAuth();
@@ -32,6 +58,14 @@ export function Header() {
             <Badge variant="outline" aria-label={`Environment ${env}`}>
               {env}
             </Badge>
+          )}
+          {user && (
+            <nav aria-label="Main" className="ml-4 flex items-center gap-1">
+              <NavLink to="/" exact>
+                Fleet
+              </NavLink>
+              <NavLink to="/repos">Repositories</NavLink>
+            </nav>
           )}
         </div>
 
