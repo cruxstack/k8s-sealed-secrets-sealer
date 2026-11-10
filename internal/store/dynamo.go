@@ -229,15 +229,27 @@ func (d *Dynamo) PutCommand(ctx context.Context, c CommandRecord) error {
 }
 
 func (d *Dynamo) Commands(ctx context.Context, agentID string) ([]CommandRecord, error) {
+	return d.commands(ctx, agentID, "begins_with(sk, :cmd)", map[string]types.AttributeValue{
+		":cmd": &types.AttributeValueMemberS{Value: cmdPrefix},
+	})
+}
+
+func (d *Dynamo) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]CommandRecord, error) {
+	return d.commands(ctx, agentID, "sk BETWEEN :from AND :to", map[string]types.AttributeValue{
+		":from": &types.AttributeValueMemberS{Value: cmdPrefix + commandIDFloor(since)},
+		":to":   &types.AttributeValueMemberS{Value: cmdPrefix + commandIDCeiling},
+	})
+}
+
+// commands reads an agent's commands whose sort keys meet skCondition.
+func (d *Dynamo) commands(ctx context.Context, agentID, skCondition string, values map[string]types.AttributeValue) ([]CommandRecord, error) {
 	var out []CommandRecord
+	values[":pk"] = &types.AttributeValueMemberS{Value: agentPrefix + agentID}
 	in := &dynamodb.QueryInput{
-		TableName:              &d.table,
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :cmd)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk":  &types.AttributeValueMemberS{Value: agentPrefix + agentID},
-			":cmd": &types.AttributeValueMemberS{Value: cmdPrefix},
-		},
-		ConsistentRead: aws.Bool(true),
+		TableName:                 &d.table,
+		KeyConditionExpression:    aws.String("pk = :pk AND " + skCondition),
+		ExpressionAttributeValues: values,
+		ConsistentRead:            aws.Bool(true),
 	}
 	for {
 		res, err := d.api.Query(ctx, in)

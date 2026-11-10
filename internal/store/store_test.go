@@ -2,13 +2,17 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/oklog/ulid/v2"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
@@ -198,6 +202,76 @@ func TestStore_Commands(t *testing.T) {
 				t.Fatalf("leased command: %+v", got[1])
 			}
 		})
+	}
+}
+
+func TestStore_CommandsSince(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			agent := "use1-blue-since-" + name
+			idAt := func(at time.Time) string { return ulid.MustNew(ulid.Timestamp(at), rand.Reader).String() }
+			old := idAt(now.Add(-time.Hour))
+			edge := idAt(now.Add(-10 * time.Minute))
+			fresh := idAt(now)
+			for _, id := range []string{fresh, old, edge} {
+				c := CommandRecord{AgentID: agent, ID: id, Type: protocol.CommandKeysRestore, Status: CommandQueued, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute), Payload: `{}`}
+				if err := s.PutCommand(ctx, c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// the agent's state shares the partition and is not a command
+			if err := s.PutAgentState(ctx, AgentState{AgentID: agent, LastCheckIn: now}); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := s.CommandsSince(ctx, agent, now.Add(-10*time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 2 || got[0].ID != edge || got[1].ID != fresh || got[1].Payload != `{}` {
+				t.Fatalf("CommandsSince = %+v", got)
+			}
+			if got, err := s.CommandsSince(ctx, agent, now.Add(time.Minute)); err != nil || len(got) != 0 {
+				t.Fatalf("CommandsSince(future) = %+v, %v", got, err)
+			}
+			if got, err := s.CommandsSince(ctx, agent, time.Time{}); err != nil || len(got) != 3 {
+				t.Fatalf("CommandsSince(zero) = %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+// queryRecorder is a DynamoDB client that records queries and finds
+// nothing.
+type queryRecorder struct {
+	DynamoAPI
+	queries []*dynamodb.QueryInput
+}
+
+func (q *queryRecorder) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	q.queries = append(q.queries, in)
+	return &dynamodb.QueryOutput{}, nil
+}
+
+// A poll reads recent commands as a key range, so DynamoDB reads (and
+// bills) only those, not every command kept until its TTL.
+func TestDynamo_CommandsSinceReadsAKeyRange(t *testing.T) {
+	api := &queryRecorder{}
+	since := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := NewDynamo(api, "t").CommandsSince(context.Background(), "use1-blue", since); err != nil {
+		t.Fatal(err)
+	}
+	in := api.queries[0]
+	from := in.ExpressionAttributeValues[":from"].(*types.AttributeValueMemberS).Value
+	to := in.ExpressionAttributeValues[":to"].(*types.AttributeValueMemberS).Value
+	if *in.KeyConditionExpression != "pk = :pk AND sk BETWEEN :from AND :to" || in.FilterExpression != nil {
+		t.Fatalf("query = %q, filter %v", *in.KeyConditionExpression, in.FilterExpression)
+	}
+	want := "CMD#" + ulid.MustNew(ulid.Timestamp(since), nil).String()
+	if from != want || !strings.HasSuffix(want, "0000000000000000") || to != "CMD#~" {
+		t.Fatalf("range = %s .. %s, want from %s", from, to, want)
 	}
 }
 

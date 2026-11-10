@@ -324,10 +324,19 @@ a creation time, an expiry and a typed payload. The rules:
   reached or answers with a server error, until the command expires.
 - **Long-poll within API Gateway limits.** The control plane holds a poll for
   up to 20 seconds, under the API Gateway integration timeout, checking
-  DynamoDB for new commands in the meantime. The cost is roughly one held
-  Lambda invocation per agent ([docs/operations.md](operations.md#cost-and-scale)
-  has the numbers). An API Gateway WebSocket API is a possible later
-  optimization; the protocol does not depend on the transport.
+  DynamoDB for new commands in the meantime. Each check reads only the
+  commands queued in the last 11 minutes (the longest a command lives, and a
+  minute for clocks), a range of command IDs, not every command kept. The
+  cost is roughly one held Lambda invocation per agent
+  ([docs/operations.md](operations.md#cost-and-scale) has the numbers). An
+  API Gateway WebSocket API is a possible later optimization; the protocol
+  does not depend on the transport.
+- **A leased command is sent.** A command leased into a response that is
+  never written is lost until it expires. A poll ends within 25 seconds,
+  store calls included, and leases a command only while 3 seconds are left to
+  respond. One poll leases at most 16 commands and 512 KiB, well within what
+  agents read (1 MiB) and Lambda returns; the rest wait for the next poll. If
+  a lease fails after others, the poll still sends those.
 - **Capabilities come from the agent's Helm values,** never from the control
   plane. Values decide which RBAC is installed and which handlers the agent
   enables. An agent refuses a command for a capability it does not have, and
@@ -903,7 +912,11 @@ shows creating one.
   milliseconds (`deadline`), so leasing and results are conditional writes
   that check it. A seal's encrypted value is kept in its own attribute and
   removed when the command is leased; a seal's result keeps only a summary,
-  since its ciphertexts go to the pending change.
+  since its ciphertexts go to the pending change. Polls, seals and pull
+  requests look for open commands only among those queued in the last 11
+  minutes, and key sync among those of the last 16, which covers commands
+  that finished recently: command IDs are ULIDs, so each is a range of sort
+  keys.
 - **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
   Which clusters hold a key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
@@ -1186,7 +1199,7 @@ SBOMs.
 **On Lambda** the control plane is the same HTTP handler as in a container,
 behind an API Gateway HTTP API (payload format 2.0, `$default` stage) or a
 function URL; CloudFront and WAF sit in front. The function's timeout must
-exceed the agents' longest command poll (20 seconds), and API Gateway's 30
+exceed the agents' longest command poll (25 seconds), and API Gateway's 30
 seconds bound every request. The function keeps no state between requests:
 anything durable is in DynamoDB, and the remote JWKS of Kubernetes issuers
 are cached per instance. Secrets come from SSM Parameter Store: any setting

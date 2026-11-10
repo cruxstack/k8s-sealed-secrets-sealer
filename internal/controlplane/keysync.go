@@ -24,6 +24,11 @@ const (
 	settleAfterSuccess = 2 * time.Minute
 	// retryAfterFailure holds off re-issuing work a command failed to do.
 	retryAfterFailure = 5 * time.Minute
+	// keyCommandLookback is how far back key sync reads an agent's
+	// commands: a key command finishes within keyCommandTTL and holds off
+	// its work for up to retryAfterFailure after, and a minute covers
+	// clocks that differ between instances.
+	keyCommandLookback = keyCommandTTL + max(settleAfterSuccess, retryAfterFailure) + time.Minute
 )
 
 // keySyncPlan is what one agent's check-in leads to.
@@ -191,7 +196,9 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 	if err != nil {
 		return nil, err
 	}
-	commands, err := s.store.Commands(ctx, self.ID)
+	// only the commands recent enough to count; their IDs (ULIDs) are
+	// stamped with the wall clock
+	commands, err := s.store.CommandsSince(ctx, self.ID, time.Now().Add(-keyCommandLookback))
 	if err != nil {
 		return nil, err
 	}

@@ -331,15 +331,11 @@ func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Ti
 		if !a.Healthy {
 			continue
 		}
-		cmds, err := s.store.Commands(ctx, a.ID)
+		cmds, err := s.openCommands(ctx, a.ID, now)
 		if err != nil {
 			return fleet.Agent{}, "", err
 		}
-		for _, c := range cmds {
-			if c.Open(now) {
-				inFlight[a.ID]++
-			}
-		}
+		inFlight[a.ID] = len(cmds)
 	}
 	agent, err := fleet.ChooseSealer(f, regions, inFlight)
 	if err != nil {

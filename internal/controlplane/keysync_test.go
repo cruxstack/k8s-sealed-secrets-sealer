@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
@@ -358,6 +360,9 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		}
 	}
 
+	// commands are read by when their IDs (ULIDs) were made
+	first, expired, other := ulid.Make().String(), ulid.Make().String(), ulid.Make().String()
+
 	// a held poll returns as soon as a command is queued
 	done := make(chan []protocol.Command, 1)
 	go func() {
@@ -367,10 +372,10 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		done <- resp.Commands
 	}()
 	time.Sleep(50 * time.Millisecond)
-	put("a", "01J00000000000000000000001", protocol.CommandRenewalEnable, now.Add(time.Minute))
+	put("a", first, protocol.CommandRenewalEnable, now.Add(time.Minute))
 	select {
 	case cmds := <-done:
-		if len(cmds) != 1 || cmds[0].ID != "01J00000000000000000000001" {
+		if len(cmds) != 1 || cmds[0].ID != first {
 			t.Fatalf("held poll = %+v", cmds)
 		}
 	case <-time.After(3 * time.Second):
@@ -379,8 +384,8 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 
 	// expired commands, and commands the agent is not registered for, are
 	// never delivered
-	put("a", "01J00000000000000000000002", protocol.CommandKeysRestore, now.Add(-time.Second))
-	put("c", "01J00000000000000000000003", protocol.CommandKeysRestore, now.Add(time.Minute))
+	put("a", expired, protocol.CommandKeysRestore, now.Add(-time.Second))
+	put("c", other, protocol.CommandKeysRestore, now.Add(time.Minute))
 	if cmds := sh.poll("a"); len(cmds) != 0 {
 		t.Fatalf("a commands = %+v", cmds)
 	}
@@ -389,7 +394,7 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 	}
 
 	// results: only the leasing agent, valid status, before expiry
-	id := "01J00000000000000000000001"
+	id := first
 	cases := map[string]struct {
 		agent, id string
 		body      any
@@ -400,7 +405,7 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		"bad id":        {"a", "not-a-ulid", protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusNotFound},
 		"unknown field": {"a", id, `{"status":"succeeded","extra":1}`, http.StatusBadRequest},
 		"long error":    {"a", id, protocol.CommandResult{Status: protocol.CommandFailed, Error: strings.Repeat("e", maxResultError+1)}, http.StatusBadRequest},
-		"unleased":      {"c", "01J00000000000000000000003", protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusConflict},
+		"unleased":      {"c", other, protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusConflict},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

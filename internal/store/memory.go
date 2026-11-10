@@ -106,6 +106,22 @@ func (m *Memory) Commands(_ context.Context, agentID string) ([]CommandRecord, e
 	return out, nil
 }
 
+func (m *Memory) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]CommandRecord, error) {
+	all, err := m.Commands(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	// the ID range DynamoDB reads
+	floor := commandIDFloor(since)
+	out := []CommandRecord{}
+	for _, c := range all {
+		if c.ID >= floor && c.ID <= commandIDCeiling {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (m *Memory) Command(_ context.Context, agentID, id string) (CommandRecord, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

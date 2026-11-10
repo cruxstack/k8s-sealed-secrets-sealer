@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
@@ -21,6 +23,20 @@ const (
 // readable, and key sync sees work a command just did. The audit trail is
 // the structured logs, not the table (docs/design.md, section 11).
 const commandRetention = time.Hour
+
+// commandIDCeiling sorts after every command ID: ULIDs use only digits and
+// capital letters.
+const commandIDCeiling = "~"
+
+// commandIDFloor returns the lowest command ID made at or after since.
+// Command IDs are ULIDs, which sort by the millisecond they were made in, so
+// the commands made since then are a range of IDs.
+func commandIDFloor(since time.Time) string {
+	var id ulid.ULID
+	// a time ULIDs cannot hold leaves the floor at zero: every command
+	_ = id.SetTime(uint64(max(since.UnixMilli(), 0)))
+	return id.String()
+}
 
 // CommandRecord is a command queued for one agent.
 type CommandRecord struct {

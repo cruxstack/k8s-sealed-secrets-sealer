@@ -69,6 +69,10 @@ type Store interface {
 	PutCommand(ctx context.Context, c CommandRecord) error
 	// Commands returns an agent's commands, oldest first.
 	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
+	// CommandsSince returns an agent's commands whose IDs (ULIDs) were made
+	// at or after since, oldest first. It reads only those, not every
+	// command kept.
+	CommandsSince(ctx context.Context, agentID string, since time.Time) ([]CommandRecord, error)
 	// Command returns one of an agent's commands.
 	Command(ctx context.Context, agentID, id string) (CommandRecord, bool, error)
 	// LeaseCommand moves a queued, unexpired command to leased, and reports
