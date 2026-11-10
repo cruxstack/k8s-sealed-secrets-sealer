@@ -66,8 +66,9 @@ The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
 and an `escrow` key (`dev/local-kms/seed.yaml`; throwaway key material, local
 use only). The control plane and the agents use the transit key through
-`alias/sealer-transit`, and agents the escrow key through
-`alias/sealer-escrow`. local-kms does not enforce key policies, so "the
+`alias/sealer-transit` (prod, whose cluster doesn't run, has its own,
+`alias/sealer-transit-prod`, since envs cannot share one), and agents the
+escrow key through `alias/sealer-escrow`. local-kms does not enforce key policies, so "the
 control plane cannot decrypt" and "an agent can decrypt only its own seals"
 are left to the Terraform module (not released yet), not tested here; the
 control plane's transit client has no decrypt method either way.
