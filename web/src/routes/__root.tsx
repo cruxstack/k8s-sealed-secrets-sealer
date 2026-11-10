@@ -5,6 +5,7 @@ import {
   type ErrorComponentProps,
 } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
 import { AuthProvider } from "@/lib/auth";
 
 export const Route = createRootRouteWithContext<{
@@ -87,15 +88,17 @@ function PageSkeleton() {
 }
 
 function RootComponent() {
-  // Routes render their own layout (`/` wraps itself in AppShell). Choosing
-  // the shell here from the router location would remount the page whenever
-  // a navigation starts, before the new route has loaded.
+  // Routes render their own layout (signed-in pages wrap themselves in
+  // AppShell). Choosing the shell here from the router location would
+  // remount the page whenever a navigation starts, before the new route has
+  // loaded.
   return (
     <ErrorBoundary>
       <AuthProvider>
         <Suspense fallback={<PageSkeleton />}>
           <Outlet />
         </Suspense>
+        <Toaster />
       </AuthProvider>
     </ErrorBoundary>
   );

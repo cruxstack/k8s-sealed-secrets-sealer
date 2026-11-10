@@ -50,13 +50,11 @@ function renderAt(path: string, api: FakeApi) {
 const APPS = "/repos/example-org/apps";
 const BILLING = "deploy/billing/sealed-secret.yaml";
 
-async function openForm() {
-  const billing = await screen.findByRole("region", { name: BILLING });
-  fireEvent.click(
-    within(billing).getByRole("button", { name: "Seal a value" }),
-  );
-  const form = within(billing).getByRole("form", {
-    name: `Seal a value into ${BILLING}`,
+/** The seal form of the selected file, the billing file by default. */
+async function openForm(path = BILLING) {
+  const panel = await screen.findByRole("region", { name: path });
+  const form = within(panel).getByRole("form", {
+    name: `Seal a value into ${path}`,
   });
   return {
     form,
@@ -79,26 +77,25 @@ describe("sealing", () => {
     const api = fakeApi({ me: ME, files: { "example-org/apps": listing() } });
     renderAt(APPS, api);
 
-    // files that cannot be sealed into say why
-    const legacy = await screen.findByRole("region", {
-      name: "deploy/legacy/sealed-secret.yaml",
-    });
-    expect(
-      within(legacy).getByRole("button", { name: "Seal a value" }),
-    ).toBeDisabled();
-
     const { form, key, value, seal } = await openForm();
     expect(within(form).getByText(/each of the 2 documents/)).toBeVisible();
     expect(seal).toBeDisabled();
+    // Enter in the key moves to the value; Ctrl/⌘+Enter seals
     fireEvent.change(key, { target: { value: "api-token" } });
+    fireEvent.keyDown(key, { key: "Enter" });
+    expect(value).toHaveFocus();
     fireEvent.change(value, { target: { value: "s3cr3t" } });
-    fireEvent.click(seal);
+    fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
 
     expect(
       await within(form).findByText(/sealed/i, { selector: "span" }),
     ).toHaveTextContent(/Sealed api-token for 2 documents in dev-use1-blue/);
     expect(value).toHaveValue("");
     expect(key).toHaveValue("");
+    // ready for the next value, with a notice that names no value
+    expect(key).toHaveFocus();
+    const toast = await screen.findByText("Sealed api-token");
+    expect(toast.closest("li")).not.toHaveTextContent("s3cr3t");
 
     // the session opened at the commit on screen; both writes carry the
     // CSRF token, and the value went out once, to the seal request
@@ -117,17 +114,27 @@ describe("sealing", () => {
       api.calls.filter((c) => JSON.stringify(c.body ?? "").includes("s3cr3t")),
     ).toHaveLength(1);
 
-    // the pending change appears
+    // the pending change appears, and the file marks the key as new
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
     const row = await within(pending).findByRole("rowheader", {
-      name: BILLING,
+      name: "api-token",
     });
     const cells = within(row.closest("tr") as HTMLElement);
-    expect(cells.getByText("api-token")).toBeInTheDocument();
+    expect(cells.getByText(BILLING)).toBeInTheDocument();
     expect(cells.getByText("2 documents")).toBeInTheDocument();
-    expect(cells.getByText("dev-use1-blue")).toBeInTheDocument();
+    expect(cells.getByText(/dev-use1-blue/)).toBeInTheDocument();
+    const documents = within(
+      screen.getByRole("region", { name: BILLING }),
+    ).getByRole("table");
+    expect(
+      within(documents).getAllByText("api-token", { selector: "code" }),
+    ).toHaveLength(2);
+    const files = screen.getByRole("list", { name: "Files" });
+    expect(
+      within(files).getByRole("button", { name: /billing.*1 pending change/ }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the value when a seal fails, and says why", async () => {
@@ -165,12 +172,27 @@ describe("sealing", () => {
     expect(seal).toBeDisabled();
     fireEvent.change(key, { target: { value: "api-key" } });
     expect(
-      within(form).getByText("Replaces the existing value of api-key."),
+      within(form).getByText(
+        "Replaces the current value of api-key in the file.",
+      ),
     ).toBeVisible();
     expect(seal).toBeEnabled();
+    fireEvent.change(key, { target: { value: "new-key" } });
+    expect(
+      within(form).getByText("Adds new-key to spec.encryptedData."),
+    ).toBeVisible();
+    // existing keys are suggested
+    const options = Array.from(
+      document.querySelectorAll(
+        `#${CSS.escape(key.getAttribute("list") ?? "")} option`,
+      ),
+    ).map((o) => o.getAttribute("value"));
+    expect(options).toEqual(["api-key"]);
     // the value is masked until shown
     expect(value.className).toContain("[-webkit-text-security:disc]");
-    fireEvent.click(within(form).getByRole("button", { name: "Show" }));
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Show the value" }),
+    );
     expect(value.className).not.toContain("[-webkit-text-security:disc]");
   });
 
@@ -234,9 +256,8 @@ describe("sealing", () => {
       }),
     );
     await screen.findByRole("region", { name: BILLING });
-    expect(
-      screen.queryByRole("button", { name: "Seal a value" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(screen.getByText(/not write to it/)).toBeInTheDocument();
   });
 
   it("marks repositories with pending changes", async () => {
@@ -296,18 +317,30 @@ describe("sealing", () => {
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Open pull request" }),
     );
-    const banner = await screen.findByRole("status", {
-      name: "Pull request opened",
+    // a dialog says it is open, with the way to it
+    const opened = await screen.findByRole("dialog", {
+      name: "Pull request #7 is open",
     });
-    await waitFor(() =>
-      expect(banner).toHaveTextContent("Opened pull request #7"),
+    const link = within(opened).getByRole("link", {
+      name: /view pull request/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/example-org/apps/pull/7",
     );
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(
+      within(opened).getByRole("button", { name: "Keep sealing" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    // and a banner keeps the link
+    const banner = screen.getByRole("status", { name: "Pull request opened" });
+    expect(banner).toHaveTextContent("Opened pull request #7");
     expect(
       within(banner).getByRole("link", { name: /view pull request/i }),
     ).toHaveAttribute("href", "https://github.com/example-org/apps/pull/7");
-    expect(
-      within(banner).getByRole("link", { name: /view pull request/i }),
-    ).toHaveAttribute("rel", "noopener noreferrer");
     await waitFor(() =>
       expect(
         screen.queryByRole("region", { name: /pending changes/i }),
@@ -395,5 +428,48 @@ describe("sealing", () => {
     );
     expect(open).toBeDisabled();
     await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
+  });
+
+  it("jumps to a file from the file list or a pending change", async () => {
+    renderAt(
+      APPS,
+      fakeApi({
+        me: ME,
+        files: { "example-org/apps": listing() },
+        sessions: {
+          "example-org/apps": {
+            ...SESSION,
+            pending_changes: 1,
+            changes: [changeFor(SEAL)],
+          },
+        },
+      }),
+    );
+    const files = await screen.findByRole("list", { name: "Files" });
+    const billing = within(files).getByRole("button", { name: /billing/ });
+    expect(billing).toHaveAttribute("aria-current", "true");
+
+    // the filter narrows the list; Enter opens the first match
+    const filter = screen.getByRole("searchbox", { name: "Filter files" });
+    fireEvent.keyDown(document.body, { key: "/" });
+    expect(filter).toHaveFocus();
+    fireEvent.change(filter, { target: { value: "legacy" } });
+    expect(within(files).getAllByRole("button")).toHaveLength(1);
+    fireEvent.keyDown(filter, { key: "Enter" });
+    const legacy = await screen.findByRole("region", {
+      name: "deploy/legacy/sealed-secret.yaml",
+    });
+    expect(legacy).toHaveTextContent("cluster-wide scope is not allowed");
+    expect(legacy).toHaveTextContent(/can't be sealed into/);
+    expect(within(legacy).queryByRole("form")).not.toBeInTheDocument();
+
+    // a pending change's file opens that file
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    fireEvent.click(within(pending).getByRole("button", { name: BILLING }));
+    const form = await screen.findByRole("form", {
+      name: `Seal a value into ${BILLING}`,
+    });
+    // a file the user picks is ready to type into
+    expect(within(form).getByLabelText("Key")).toHaveFocus();
   });
 });

@@ -60,3 +60,16 @@ export function safeReturnPath(path: unknown): string {
   if (path.startsWith("/login")) return "/";
   return path;
 }
+
+/** Returns `url` if it is an http(s) URL, else null; for links from the API. */
+export function safeHttpUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? parsed.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}

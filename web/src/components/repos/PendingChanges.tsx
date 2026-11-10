@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { GitPullRequest, Loader2, Trash2 } from "lucide-react";
+import {
+  CheckCircle2,
+  ExternalLink,
+  GitPullRequest,
+  Loader2,
+  Trash2,
+} from "lucide-react";
+import { toast } from "sonner";
 import { extractApiError } from "@/api/client";
 import {
   discardSession,
@@ -20,62 +27,79 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatDateTime, shortFingerprint, timeAgo } from "@/lib/utils";
+import {
+  formatDateTime,
+  safeHttpUrl,
+  shortFingerprint,
+  timeAgo,
+} from "@/lib/utils";
 
 function plural(n: number, one: string, many: string) {
   return n === 1 ? `1 ${one}` : `${n} ${many}`;
 }
 
+/** The files a session changes, each with its keys, in order. */
+function filesOf(changes: PendingChange[]): [string, string[]][] {
+  const files = new Map<string, string[]>();
+  for (const c of changes)
+    files.set(c.path, [...(files.get(c.path) ?? []), c.key]);
+  return [...files];
+}
+
 function ChangeRow({
   change,
-  onRemove,
   removing,
+  onRemove,
+  onSelectFile,
 }: {
   change: PendingChange;
-  onRemove: () => void;
   removing: boolean;
+  onRemove: () => void;
+  onSelectFile: () => void;
 }) {
   const agent = change.sealed_by.cluster || change.sealed_by.id;
   const targets = change.targets
     .map((t) => `${t.namespace}/${t.name}`)
     .join("\n");
   return (
-    <tr className="border-b border-border align-top last:border-0">
+    <tr className="group border-b border-border align-middle last:border-0">
       <th
         scope="row"
-        className="truncate px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
-        title={change.path}
+        className="px-5 py-2.5 text-left font-mono text-[13px] font-medium whitespace-nowrap"
       >
-        {change.path}
+        {change.key}
       </th>
-      <td className="px-4 py-3">
-        <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-          {change.key}
-        </code>
+      <td className="max-w-0 px-3 py-2.5">
+        <button
+          type="button"
+          onClick={onSelectFile}
+          className="block max-w-full truncate rounded font-mono text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          title={`Show ${change.path}`}
+        >
+          {change.path}
+        </button>
       </td>
-      <td className="px-4 py-3 whitespace-nowrap" title={targets}>
+      <td className="px-3 py-2.5 text-xs whitespace-nowrap" title={targets}>
         {plural(change.targets.length, "document", "documents")}
       </td>
-      <td className="px-4 py-3 text-xs">
-        <div className="whitespace-nowrap">{agent}</div>
-        <div className="text-muted-foreground">
-          <code className="font-mono" title={change.fingerprint}>
-            {shortFingerprint(change.fingerprint, 8)}
-          </code>{" "}
-          ·{" "}
-          <time
-            dateTime={change.sealed_at}
-            title={formatDateTime(change.sealed_at)}
-          >
-            {timeAgo(change.sealed_at)}
-          </time>
-        </div>
+      <td className="px-3 py-2.5 text-xs whitespace-nowrap text-muted-foreground">
+        {agent} ·{" "}
+        <code className="font-mono" title={change.fingerprint}>
+          {shortFingerprint(change.fingerprint, 6)}
+        </code>{" "}
+        ·{" "}
+        <time
+          dateTime={change.sealed_at}
+          title={formatDateTime(change.sealed_at)}
+        >
+          {timeAgo(change.sealed_at)}
+        </time>
       </td>
-      <td className="px-2 py-2 text-right">
+      <td className="py-1.5 pr-3 text-right">
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8"
+          className="h-8 w-8 text-muted-foreground hover:text-destructive"
           onClick={onRemove}
           disabled={removing}
           aria-label={`Remove ${change.key} from ${change.path}`}
@@ -88,14 +112,6 @@ function ChangeRow({
   );
 }
 
-/** The files a session changes, each with its keys, in order. */
-function filesOf(changes: PendingChange[]): [string, string[]][] {
-  const files = new Map<string, string[]>();
-  for (const c of changes)
-    files.set(c.path, [...(files.get(c.path) ?? []), c.key]);
-  return [...files];
-}
-
 /**
  * The user's pending changes to a repository: open a pull request with
  * them, remove one, or discard them all.
@@ -106,6 +122,7 @@ export function PendingChanges({
   session,
   sealing = false,
   onOpened,
+  onSelectFile,
 }: {
   owner: string;
   repo: string;
@@ -113,6 +130,7 @@ export function PendingChanges({
   /** A seal is in progress on the page; its change is not listed yet. */
   sealing?: boolean;
   onOpened: (pr: PullRequest) => void;
+  onSelectFile: (path: string) => void;
 }) {
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState<"discard" | "open" | null>(null);
@@ -130,6 +148,9 @@ export function PendingChanges({
       setConfirming(null);
       queryClient.setQueryData(sessionQueryKey(owner, repo), null);
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      toast(
+        `Discarded ${plural(changes.length, "pending change", "pending changes")}`,
+      );
     },
   });
   const open = useMutation({
@@ -142,25 +163,26 @@ export function PendingChanges({
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
+  const remove = useMutation({
+    mutationFn: (change: PendingChange) =>
+      removeChange(owner, repo, session.id, change.id),
+    onSuccess: (_, change) =>
+      toast(`Removed ${change.key}`, { description: change.path }),
+    onSettled: refresh,
+  });
   const openBlocked = sealing
     ? "Wait for the seal in progress to finish."
     : changes.length === 0
       ? "Seal a value first."
       : null;
-  const remove = useMutation({
-    mutationFn: (changeId: string) =>
-      removeChange(owner, repo, session.id, changeId),
-    onSettled: refresh,
-  });
-  const error = remove.error ?? null;
 
   return (
     <section
       aria-labelledby="pending-heading"
-      className="overflow-hidden rounded-xl border bg-card"
+      className="overflow-hidden rounded-xl border bg-card shadow-xs"
     >
-      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
-        <div className="space-y-1">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+        <div className="space-y-0.5">
           <h2
             id="pending-heading"
             className="flex items-center gap-2 text-sm font-semibold"
@@ -175,7 +197,7 @@ export function PendingChanges({
             <code className="font-mono" title={session.commit}>
               {session.commit.slice(0, 7)}
             </code>
-            . Kept until{" "}
+            , kept until{" "}
             <time
               dateTime={session.expires_at}
               title={formatDateTime(session.expires_at)}
@@ -190,8 +212,9 @@ export function PendingChanges({
         </div>
         <div className="flex shrink-0 gap-2">
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
+            className="text-muted-foreground hover:text-destructive"
             onClick={() => setConfirming("discard")}
           >
             Discard
@@ -211,43 +234,46 @@ export function PendingChanges({
         </div>
       </div>
 
-      {error && (
-        <p role="alert" className="px-4 py-3 text-sm text-destructive">
-          Could not remove the change: {extractApiError(error)}
+      {remove.error && (
+        <p role="alert" className="px-5 py-3 text-sm text-destructive">
+          Could not remove the change: {extractApiError(remove.error)}
         </p>
       )}
       {changes.length === 0 ? (
-        <p className="px-4 py-3 text-sm text-muted-foreground">
-          Nothing sealed yet. Seal a value into one of the files below.
+        <p className="px-5 py-4 text-sm text-muted-foreground">
+          Nothing sealed yet. Values you seal wait here until you open a pull
+          request with them.
         </p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[48rem] table-fixed text-sm">
+          <table className="w-full min-w-[40rem] text-sm">
             <caption className="sr-only">
               Pending changes to {session.repository}
             </caption>
-            <colgroup>
-              <col className="w-[38%]" />
-              <col className="w-[18%]" />
-              <col className="w-[14%]" />
-              <col className="w-[24%]" />
-              <col className="w-[6%]" />
-            </colgroup>
-            <thead className="border-b border-border bg-muted/50 text-xs tracking-wide text-muted-foreground uppercase">
+            <thead className="border-b border-border bg-muted/40 text-xs tracking-wide text-muted-foreground uppercase">
               <tr>
-                <th scope="col" className="px-4 py-2 text-left font-semibold">
-                  File
-                </th>
-                <th scope="col" className="px-4 py-2 text-left font-semibold">
+                <th scope="col" className="px-5 py-2 text-left font-semibold">
                   Key
                 </th>
-                <th scope="col" className="px-4 py-2 text-left font-semibold">
+                <th
+                  scope="col"
+                  className="w-full px-3 py-2 text-left font-semibold"
+                >
+                  File
+                </th>
+                <th
+                  scope="col"
+                  className="px-3 py-2 text-left font-semibold whitespace-nowrap"
+                >
                   Sealed for
                 </th>
-                <th scope="col" className="px-4 py-2 text-left font-semibold">
+                <th
+                  scope="col"
+                  className="px-3 py-2 text-left font-semibold whitespace-nowrap"
+                >
                   Sealed by
                 </th>
-                <th scope="col" className="px-2 py-2">
+                <th scope="col" className="py-2 pr-3">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
@@ -257,8 +283,9 @@ export function PendingChanges({
                 <ChangeRow
                   key={c.id}
                   change={c}
-                  removing={remove.isPending && remove.variables === c.id}
-                  onRemove={() => remove.mutate(c.id)}
+                  removing={remove.isPending && remove.variables?.id === c.id}
+                  onRemove={() => remove.mutate(c)}
+                  onSelectFile={() => onSelectFile(c.path)}
                 />
               ))}
             </tbody>
@@ -289,7 +316,7 @@ export function PendingChanges({
           </DialogHeader>
           <ul
             aria-label="Files in the pull request"
-            className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-border bg-muted/40 p-3 text-sm"
+            className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-border bg-muted/40 p-3 text-sm"
           >
             {files.map(([path, keys]) => (
               <li key={path} className="space-y-1">
@@ -368,5 +395,61 @@ export function PendingChanges({
         </DialogContent>
       </Dialog>
     </section>
+  );
+}
+
+/** Says a pull request was opened, with the way to it. */
+export function OpenedDialog({
+  pr,
+  onClose,
+}: {
+  pr: PullRequest | null;
+  onClose: () => void;
+}) {
+  const url = safeHttpUrl(pr?.url);
+  return (
+    <Dialog open={pr !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md text-center">
+        {pr && (
+          <>
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success/15">
+              <CheckCircle2
+                className="h-8 w-8 text-success"
+                aria-hidden="true"
+              />
+            </div>
+            <DialogHeader className="space-y-2 pr-0 text-center">
+              <DialogTitle className="text-xl">
+                Pull request #{pr.number} is open
+              </DialogTitle>
+              <DialogDescription className="space-y-1">
+                <span className="block font-medium text-foreground">
+                  {pr.title}
+                </span>
+                <span className="block">
+                  On{" "}
+                  <code className="font-mono text-xs break-all">
+                    {pr.branch}
+                  </code>
+                </span>
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col gap-2 pt-2">
+              {url && (
+                <Button asChild size="lg">
+                  <a href={url} target="_blank" rel="noopener noreferrer">
+                    View pull request
+                    <ExternalLink className="ml-2 h-4 w-4" aria-hidden="true" />
+                  </a>
+                </Button>
+              )}
+              <Button variant="outline" onClick={onClose}>
+                Keep sealing
+              </Button>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

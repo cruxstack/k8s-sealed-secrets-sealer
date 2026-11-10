@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as FleetRouteImport } from './routes/fleet'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ReposIndexRouteImport } from './routes/repos.index'
 import { Route as ReposOwnerRepoRouteImport } from './routes/repos.$owner.$repo'
@@ -17,6 +18,11 @@ import { Route as ReposOwnerRepoRouteImport } from './routes/repos.$owner.$repo'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FleetRoute = FleetRouteImport.update({
+  id: '/fleet',
+  path: '/fleet',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -37,12 +43,14 @@ const ReposOwnerRepoRoute = ReposOwnerRepoRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos/': typeof ReposIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos': typeof ReposIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
@@ -50,20 +58,22 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/repos/': typeof ReposIndexRoute
   '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/repos/' | '/repos/$owner/$repo'
+  fullPaths: '/' | '/fleet' | '/login' | '/repos/' | '/repos/$owner/$repo'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/repos' | '/repos/$owner/$repo'
-  id: '__root__' | '/' | '/login' | '/repos/' | '/repos/$owner/$repo'
+  to: '/' | '/fleet' | '/login' | '/repos' | '/repos/$owner/$repo'
+  id: '__root__' | '/' | '/fleet' | '/login' | '/repos/' | '/repos/$owner/$repo'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  FleetRoute: typeof FleetRoute
   LoginRoute: typeof LoginRoute
   ReposIndexRoute: typeof ReposIndexRoute
   ReposOwnerRepoRoute: typeof ReposOwnerRepoRoute
@@ -76,6 +86,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fleet': {
+      id: '/fleet'
+      path: '/fleet'
+      fullPath: '/fleet'
+      preLoaderRoute: typeof FleetRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -104,6 +121,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  FleetRoute: FleetRoute,
   LoginRoute: LoginRoute,
   ReposIndexRoute: ReposIndexRoute,
   ReposOwnerRepoRoute: ReposOwnerRepoRoute,

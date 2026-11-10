@@ -1,15 +1,41 @@
 # UI Conventions
 
 Use these conventions when adding or changing pages in the web UI (`web/`).
-They describe what the fleet page already does, so new screens, such as the
-seal flow, look and behave the same.
+They describe what the repository workspace and the fleet page already do, so
+new screens look and behave the same.
 
 ## Pages
 
 Every signed-in page sits in `AppShell`: the header with the env badge, the
-theme toggle and the account menu, then the page content in a centered column.
-A page starts with what matters most for the env (the fleet page opens with
-the env key banner) and then its main table or form.
+navigation, the search button, the theme toggle and the account menu, then
+the page content in a centered column. A page starts with what matters most
+(the fleet page opens with the env key banner) and then its main table or
+form. Sealing is what people come for, so the home page (`/`) is their
+repositories; the fleet is at `/fleet`.
+
+## Workspaces
+
+A screen where people pick one thing and work on it is a workspace: the
+things to pick on the left, in a filterable list, and the picked one on the
+right, with its form. The repository page is one: files on the left, the
+file's documents and seal form on the right, and the pending changes under
+them. The pick is in the URL (`?file=`), so a reload or a shared link opens
+the same thing, and the first usable item is picked when none is.
+
+## Keyboard
+
+People who use this every day use it from the keyboard:
+
+- ⌘K (Ctrl+K) opens the command palette anywhere: repositories, pages and
+  actions. Add new destinations there.
+- `/` focuses the page's filter. Enter in a filter opens the first match,
+  and the arrow keys move through the list.
+- In a form, Enter moves to the next field and ⌘/Ctrl+Enter submits. After a
+  submit succeeds, the form clears and the first field takes focus for the
+  next one; after a failure, what was typed stays.
+- Picking an item focuses its form, but nothing steals focus on page load.
+- Show a shortcut where it applies with `Kbd`, and set `aria-keyshortcuts`
+  on the control it triggers.
 
 Pages that show live state refresh on their own with TanStack Query
 (`refetchInterval`) and say how often in small muted text beside the section
@@ -53,9 +79,10 @@ pressable.
 
 ## Buttons
 
-- One primary button per screen or dialog, for the main action (Sign in with
-  GitHub, Seal, Create pull request). Everything else is `outline` or
-  `ghost`.
+- One primary button per card or dialog, for its main action (Sign in with
+  GitHub, Seal, Open pull request). Everything else is `outline` or `ghost`.
+- A button that just succeeded may show it for a moment ("Sealed", in the
+  success color) before returning to its label.
 - Icon-only buttons (theme toggle, copy) have an `aria-label` and a tooltip
   or `title`.
 - Destructive or irreversible actions use the `destructive` variant and
@@ -65,6 +92,11 @@ pressable.
 
 ## Messages
 
+- Something that finished (a value sealed, a change removed) gets a toast
+  (`toast` from sonner) that names what happened. A toast never carries a
+  secret value, and never replaces an error that needs action.
+- The end of a flow (a pull request opened) gets a dialog with the way
+  forward ("View pull request") and the way back ("Keep sealing").
 - Errors from the API show the server's short message in an alert, never a
   stack trace or a raw status code alone.
 - Sign-in refusals map each `/login?error=` code to a sentence that says what

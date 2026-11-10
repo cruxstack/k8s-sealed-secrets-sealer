@@ -1,16 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { FleetView } from "@/components/fleet/FleetView";
-import { requireSignedIn, SignedInPage } from "@/lib/require-auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { requireSignedIn } from "@/lib/require-auth";
 
+// Sealing is what people come for: the home page is their repositories.
 export const Route = createFileRoute("/")({
-  beforeLoad: requireSignedIn,
-  component: FleetPage,
+  beforeLoad: async (opts) => {
+    await requireSignedIn(opts);
+    throw redirect({ to: "/repos", replace: true });
+  },
 });
-
-function FleetPage() {
-  return (
-    <SignedInPage>
-      <FleetView />
-    </SignedInPage>
-  );
-}
