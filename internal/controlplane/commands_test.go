@@ -358,3 +358,20 @@ func TestCommands_NoLeaseWithoutTimeToRespond(t *testing.T) {
 		t.Fatalf("leaseCommands with time = %+v, %v", cmds, err)
 	}
 }
+
+func TestCommands_ResultsMayCarryUnknownFields(t *testing.T) {
+	ph := newPollHarness(t)
+	id := ph.queue(time.Now(), 10)
+	if _, cmds, _ := ph.poll(); len(cmds) != 1 {
+		t.Fatalf("poll = %+v", cmds)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/agent/v1/commands/"+id+"/result",
+		strings.NewReader(`{"status":"succeeded","result":{"restored":[],"future_field":1},"future_field":true}`))
+	req.Header.Set("Authorization", "Bearer "+ph.token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	ph.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || ph.status(id) != store.CommandSucceeded {
+		t.Fatalf("result = %d %s; command %s", rec.Code, rec.Body, ph.status(id))
+	}
+}

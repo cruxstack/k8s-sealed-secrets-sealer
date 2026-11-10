@@ -179,7 +179,7 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 	var in protocol.CommandResult
-	if !decodeJSON(w, r, maxResultBody, &in) {
+	if !decodeAgentJSON(w, r, maxResultBody, &in) {
 		return
 	}
 	switch {

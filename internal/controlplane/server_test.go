@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -163,7 +164,6 @@ func TestSession_Rejects(t *testing.T) {
 	}{
 		"unknown method": {protocol.SessionRequest{Method: "password", Token: "blue-sa-token"}, http.StatusBadRequest},
 		"bad token":      {protocol.SessionRequest{Method: protocol.MethodK8sOIDC, Token: "stolen"}, http.StatusUnauthorized},
-		"unknown field":  {`{"method":"k8s-oidc","token":"blue-sa-token","admin":true}`, http.StatusBadRequest},
 		"too large":      {`{"method":"k8s-oidc","token":"` + strings.Repeat("a", maxSessionBody) + `"}`, http.StatusRequestEntityTooLarge},
 	}
 	for name, tc := range cases {
@@ -268,6 +268,33 @@ func TestCheckIn_RecordsTheAgentsInterval(t *testing.T) {
 	}
 }
 
+// An agent newer than the control plane may send fields it does not know
+// and list the protocol versions it speaks; older agents send only one.
+func TestAgentAPI_AcceptsNewerAgents(t *testing.T) {
+	h := newHarness(t, "")
+	if rec := h.do(http.MethodPost, "/agent/v1/session", "", `{"method":"k8s-oidc","token":"blue-sa-token","future_field":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("login with an unknown field = %d %s", rec.Code, rec.Body)
+	}
+	session := h.login()
+
+	in := checkIn(protoKey(t, time.Now().Add(-time.Hour)))
+	in.Protocol, in.Protocols = "", []string{"v2", protocol.Version}
+	var body map[string]any
+	b, _ := json.Marshal(in)
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["future_field"] = 30
+	body["controller"].(map[string]any)["future_field"] = "x"
+	if rec := h.do(http.MethodPost, "/agent/v1/checkin", session, body); rec.Code != http.StatusOK {
+		t.Fatalf("check-in with unknown fields = %d %s", rec.Code, rec.Body)
+	}
+	states, _ := h.store.GetAgentStates(context.Background(), []string{"use1-blue"})
+	if got := states["use1-blue"].Protocol; got != protocol.Version {
+		t.Fatalf("protocol = %q, want %q", got, protocol.Version)
+	}
+}
+
 func TestCheckIn_LimitsCapabilitiesToRegistry(t *testing.T) {
 	h := newHarness(t, "")
 	session := h.login()
@@ -313,7 +340,9 @@ func TestCheckIn_Rejects(t *testing.T) {
 		"no keys":              {session, mutate(func(c *protocol.CheckIn) { c.Keys = nil }), http.StatusBadRequest, "keys must not be empty"},
 		"duplicate key":        {session, mutate(func(c *protocol.CheckIn) { c.Keys = append(c.Keys, good) }), http.StatusBadRequest, "duplicate key"},
 		"garbage certificate":  {session, mutate(func(c *protocol.CheckIn) { c.Keys[0].Certificate = "nope" }), http.StatusBadRequest, "certificate"},
-		"unknown field":        {session, `{"protocol":"v1","surprise":1}`, http.StatusBadRequest, "invalid request body"},
+		"no known protocol":    {session, mutate(func(c *protocol.CheckIn) { c.Protocol, c.Protocols = "", []string{"v8", "v9"} }), http.StatusBadRequest, "unsupported protocol"},
+		"too many protocols":   {session, mutate(func(c *protocol.CheckIn) { c.Protocols = slices.Repeat([]string{"v1"}, protocol.MaxProtocols+1) }), http.StatusBadRequest, "too many protocols"},
+		"not JSON":             {session, `{"protocol":"v1",`, http.StatusBadRequest, "invalid request body"},
 		"wrong content type":   {session, nil, http.StatusUnsupportedMediaType, "content type"},
 		"oversized check-in":   {session, `{"agent_version":"` + strings.Repeat("a", maxCheckInBody) + `"}`, http.StatusRequestEntityTooLarge, "too large"},
 		"session of other env": {otherEnvSession(t), checkIn(good), http.StatusUnauthorized, "unauthorized"},

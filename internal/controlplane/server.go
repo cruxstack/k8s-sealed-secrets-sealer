@@ -281,15 +281,28 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	httpserver.WriteJSON(w, status, protocol.Error{Error: msg})
 }
 
-// decodeJSON reads a JSON body of at most limit bytes with no unknown fields.
-// On failure it writes the error response and returns false.
+// decodeJSON reads a user API body: JSON of at most limit bytes with no
+// unknown fields. On failure it writes the error response and returns false.
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	return decodeBody(w, r, limit, v, true)
+}
+
+// decodeAgentJSON reads an agent API body: JSON of at most limit bytes. It
+// ignores fields it does not know, so an agent of a newer version can send
+// more than this control plane reads (docs/design.md, section 5).
+func decodeAgentJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	return decodeBody(w, r, limit, v, false)
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, limit int64, v any, strict bool) bool {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
 		return false
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {

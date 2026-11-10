@@ -403,7 +403,7 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		"other agent":   {"b", id, protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusNotFound},
 		"bad status":    {"a", id, protocol.CommandResult{Status: "done"}, http.StatusBadRequest},
 		"bad id":        {"a", "not-a-ulid", protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusNotFound},
-		"unknown field": {"a", id, `{"status":"succeeded","extra":1}`, http.StatusBadRequest},
+		"unknown field": {"c", other, `{"status":"succeeded","extra":1}`, http.StatusConflict}, // read, then refused as unleased
 		"long error":    {"a", id, protocol.CommandResult{Status: protocol.CommandFailed, Error: strings.Repeat("e", maxResultError+1)}, http.StatusBadRequest},
 		"unleased":      {"c", other, protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusConflict},
 	}

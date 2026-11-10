@@ -561,9 +561,8 @@ func checkSealResult(cmd store.CommandRecord, raw json.RawMessage, res *protocol
 	if err := json.Unmarshal([]byte(cmd.Payload), &p); err != nil {
 		return fmt.Errorf("failed to decode the command's payload: %w", err)
 	}
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if len(raw) == 0 || dec.Decode(res) != nil {
+	// fields a newer agent adds are ignored, as in every agent message
+	if len(raw) == 0 || json.Unmarshal(raw, res) != nil {
 		return errors.New("not a seal result")
 	}
 	if res.Fingerprint != p.Fingerprint {

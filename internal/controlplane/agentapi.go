@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -33,7 +34,7 @@ const (
 
 func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 	var req protocol.SessionRequest
-	if !decodeJSON(w, r, maxSessionBody, &req) {
+	if !decodeAgentJSON(w, r, maxSessionBody, &req) {
 		return
 	}
 	verifier, ok := s.agents.Load().logins[req.Method]
@@ -90,7 +91,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *reg
 
 func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *registry.Agent) {
 	var in protocol.CheckIn
-	if !decodeJSON(w, r, maxCheckInBody, &in) {
+	if !decodeAgentJSON(w, r, maxCheckInBody, &in) {
 		return
 	}
 	now := s.now().UTC()
@@ -181,8 +182,12 @@ func validateCheckIn(in protocol.CheckIn, agent *registry.Agent, now time.Time) 
 	var errs []error
 	fail := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
-	if in.Protocol != protocol.Version {
-		fail("unsupported protocol %q", in.Protocol)
+	version, ok := protocol.Negotiate(in, protocol.Versions)
+	switch {
+	case len(in.Protocols) > protocol.MaxProtocols:
+		fail("too many protocols")
+	case !ok:
+		fail("unsupported protocol; this control plane speaks %s", strings.Join(protocol.Versions, ", "))
 	}
 	if len(in.AgentVersion) > maxShortField {
 		fail("agent_version is too long")
@@ -286,7 +291,7 @@ func validateCheckIn(in protocol.CheckIn, agent *registry.Agent, now time.Time) 
 		AgentID:      agent.ID,
 		LastCheckIn:  now,
 		AgentVersion: in.AgentVersion,
-		Protocol:     in.Protocol,
+		Protocol:     version,
 		Capabilities: capabilities,
 		Commands:     commands,
 		Controller:   ctrl,

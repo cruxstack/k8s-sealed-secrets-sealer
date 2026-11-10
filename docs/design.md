@@ -357,6 +357,25 @@ key.
 
 v1 has no command that deletes or disables anything.
 
+**Compatibility.** Messages change without breaking the other side:
+
+- The control plane ignores fields it does not know in what agents send
+  (logins, check-ins, results, escrow uploads), and agents ignore them in
+  responses. Either side can add a field.
+- Command payloads are strict: an agent refuses a payload with a field it
+  does not know. A changed payload is a new command type, such as `seal.v2`.
+  The control plane sends a type only to agents whose check-in lists it, so
+  agents not yet upgraded keep getting the old one.
+- A check-in may list the protocol versions the agent speaks in
+  `protocols`; `protocol`, the one version agents name today, is still
+  accepted beside it or alone. The control plane uses the newest version both
+  speak, and refuses a check-in with none.
+
+**Upgrades.** Upgrade the control plane first, then the agents, cluster by
+cluster. A control plane supports agents up to one minor version behind it.
+Agents newer than their control plane are not supported: they may rely on
+what it does not know yet.
+
 ## 6. Seal flow
 
 1. A signed-in user with write access opens a session for a repository. A
