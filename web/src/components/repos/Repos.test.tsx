@@ -78,6 +78,27 @@ describe("repositories", () => {
     );
   });
 
+  it("says when repositories may be missing from the list", async () => {
+    renderAt(
+      "/secrets",
+      fakeApi({ me: ME, repos: [REPO_APPS], reposIncomplete: true }),
+    );
+    expect(
+      await screen.findByRole("rowheader", { name: "example-org/apps" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /some repositories may be missing/i,
+    );
+  });
+
+  it("does not call a list with none checked in time empty", async () => {
+    renderAt("/secrets", fakeApi({ me: ME, repos: [], reposIncomplete: true }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /some repositories may be missing/i,
+    );
+    expect(screen.queryByText("No repositories")).not.toBeInTheDocument();
+  });
+
   it("explains an empty list and shows errors", async () => {
     renderAt("/secrets", fakeApi({ me: ME, repos: [] }));
     expect(await screen.findByText("No repositories")).toBeInTheDocument();

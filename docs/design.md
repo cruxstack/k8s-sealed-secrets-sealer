@@ -445,11 +445,17 @@ what it does not know yet.
 11. One commit on a new branch from the base commit,
     `sealer/<env>/<login>-<session id>`, carries every file, and a pull
     request into the default branch proposes it. The branch name is unique
-    to the session, so GitHub itself would refuse a second pull request from
-    it. The App makes the commit without an author, so GitHub signs it. The
-    commit (a `Requested-by:` trailer) and the pull request (a mention)
-    record who requested it; they name files, keys and documents, never
-    values or ciphertexts. The session then ends.
+    to the session, so a session has one pull request at most. An attempt
+    can fail part way, or GitHub can act and its answer be lost; trying
+    again keeps the branch when it holds the same files and moves it to the
+    new commit otherwise, and returns the pull request already open from
+    it, with its title and description brought up to date. The App makes
+    the commit without an author, so GitHub signs it. The commit (a
+    `Requested-by:` trailer) and the pull request (a mention) record who
+    requested it; they name files, keys and documents, never values or
+    ciphertexts. The session then ends. Opening the pull request is given
+    20 seconds and ending or unlocking the session 3 more, within the 30
+    that API Gateway gives a request.
 
 ```mermaid
 sequenceDiagram
@@ -565,7 +571,9 @@ CSRF token (section 12). `.../session` is
 |                                        | pending changes; ends the session.  |
 
 The repository's files at a session's base commit come from
-`GET {api}/repos/{owner}/{repo}/files?commit=<sha>`.
+`GET {api}/repos/{owner}/{repo}/files?commit=<sha>`. It lists the base
+commit of the user's own session or the head of the default branch, and no
+other commit.
 
 ## 7. Key selection and agent selection
 
@@ -1055,6 +1063,14 @@ one. The pull requests are a second, lasting record: each commit's
   are cached for 2 minutes per Lambda instance. A repository the user cannot
   read is reported as not found, so private repository names are not
   disclosed. Archived repositories are not listed and cannot be written.
+- **The repository list** checks the user's permission on every repository
+  the App is installed on, and shows only those they can read. It reuses a
+  permission for 10 minutes rather than 2, so a list costs GitHub calls only
+  for what was not checked lately; opening a repository checks again. A
+  list stops starting checks with a quarter of its time left. It then shows
+  the repositories known to be readable, says it is incomplete, and the
+  next list checks the rest. A repository whose permission is not known is
+  never shown.
 - **Least-privilege tokens.** The control plane mints each installation
   token with only the permissions its use needs: `contents: read` and
   `metadata: read` to list repositories, read files and look up permissions;
@@ -1104,6 +1120,16 @@ one. The pull requests are a second, lasting record: each commit's
   | Open a session            | 10 per user                 |
   | Seal a value              | 20 per session, 30 per user |
   | Open a pull request       | 5 per user                  |
+- **GitHub's rate limit.** One App's hourly budget serves every env and
+  user. Each instance keeps what GitHub told it, shared by the envs it
+  serves: the installation's repositories for 5 minutes, a repository's
+  details for 1 minute, permissions for 2 (10 for the list), and commits'
+  discovered files and parsed blobs, which never change, until it needs
+  the room. Lookups of the same thing at once make one call. The control
+  plane never retries a GitHub call. When GitHub refuses one for the rate
+  limit, the user gets `503` with `Retry-After` and when to try again, and
+  `github.rate_limited` is logged. `github.rate_limit_low` warns, once per
+  window, when a tenth of the budget is left.
 - **Secrets the control plane needs** (GitHub App private key, OAuth client
   secret, session keys, admin token) come from SSM Parameter Store, which
   suits Lambda: a setting may hold a parameter's ARN, read once at start.
@@ -1169,7 +1195,9 @@ the discovery globs (`*sealed*.yaml` and `*sealed*.yml` by default; a glob
 with a slash matches the whole path) are read, at most 500 of them and none
 over 1 MiB, and parsed. Parse results are cached by blob ID, which is
 immutable. A file is listed when it has at least one document for the env;
-one that matches but cannot be parsed is listed with the reason.
+one that matches but cannot be parsed is listed with the reason, and so is
+one GitHub failed to send. A seal into a file GitHub failed to send answers
+`502`; `422` is for files that cannot be sealed into.
 
 Each document's decryption label comes from its own metadata, the same place
 the controller reads it. A document cannot be sealed into when its scope is

@@ -70,17 +70,20 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 		Envs:         policies,
 		Logger:       logger,
 	})
-	// one GitHub App reads and writes for every env
+	// one GitHub App reads and writes for every env, so the envs share what
+	// it learns from GitHub too
 	githubApp, err := githubapp.New(githubapp.Options{
 		APIURL:         shared.GitHubAPIURL,
 		AppID:          shared.GitHubAppID,
 		PrivateKey:     shared.GitHubAppPrivateKey,
 		Org:            shared.GitHubOrg,
 		InstallationID: shared.GitHubAppInstallationID,
+		Logger:         logger,
 	})
 	if err != nil {
 		return nil, err
 	}
+	githubCache := repos.NewCache()
 
 	envs := make([]*controlplane.Server, len(cfgs))
 	registries := newEnvRegistries()
@@ -89,7 +92,7 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 		if len(cfgs) > 1 {
 			log = logger.With("env", cfg.EnvName)
 		}
-		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, registries, log); err != nil {
+		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, githubCache, registries, log); err != nil {
 			return nil, fmt.Errorf("env %s: %w", cfg.EnvName, err)
 		}
 	}
@@ -106,7 +109,7 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 
 // newEnv returns one env's server. Its registry must not register an
 // identity that another env in registries does.
-func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, registries *envRegistries, logger *slog.Logger) (*controlplane.Server, error) {
+func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, githubCache *repos.Cache, registries *envRegistries, logger *slog.Logger) (*controlplane.Server, error) {
 	sessions, err := agentauth.NewSessions(cfg.AgentSessionKey, cfg.PublicURL, cfg.EnvName, nil)
 	if err != nil {
 		return nil, err
@@ -141,6 +144,7 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 		Env:         cfg.EnvName,
 		Annotations: manifest.Annotations{Env: cfg.EnvAnnotation, Region: cfg.RegionAnnotation},
 		FileGlobs:   cfg.DiscoveryFileGlobs,
+		Cache:       githubCache,
 		Logger:      logger,
 	})
 	if err != nil {

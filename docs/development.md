@@ -147,7 +147,10 @@ diff. The end-to-end tests read the same pull request as JSON from
 memory, so they are gone when it restarts. Tilt generates the App's key pair
 for each stack (`.tools/dev/<context>/github-app.pem`, never committed): the
 control plane signs App JWTs with the private key and the mock checks them
-with the public key.
+with the public key. Calls with installation tokens get GitHub's rate limit
+headers. Go tests can give the mock a rate limit to refuse calls past
+(`Options.RateLimit`), or have it fail a request, after acting on it or not
+(`FailNext`).
 
 The UI is built into the control plane binary; Tilt rebuilds it when
 `web/` changes. For hot reload while working on the UI, run

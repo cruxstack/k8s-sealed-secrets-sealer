@@ -39,14 +39,14 @@ const (
 	// DefaultPermissionTTL is how long a permission lookup is reused: short
 	// enough that revoked access stops working quickly.
 	DefaultPermissionTTL = 2 * time.Minute
+	// listPermissionTTL is how long the repository list reuses one. A list
+	// checks every repository the App is installed on, and only shows what
+	// the user could read lately; opening a repository checks again.
+	listPermissionTTL = 10 * time.Minute
 	// maxCandidates bounds the files read for one discovery.
 	maxCandidates = 500
 	// concurrency bounds parallel GitHub calls for one request.
 	concurrency = 8
-	// cache sizes; a full cache is emptied rather than evicted piecemeal
-	maxPermissionEntries = 10_000
-	maxParsedBlobs       = 5_000
-	maxSnapshots         = 1_000
 )
 
 // DefaultFileGlobs select the files discovery reads: YAML files with
@@ -73,8 +73,11 @@ type Options struct {
 	// discovery. Empty means DefaultFileGlobs.
 	FileGlobs     []string
 	PermissionTTL time.Duration
-	Logger        *slog.Logger
-	Now           func() time.Time
+	// Cache holds GitHub's answers. The envs one process serves share one;
+	// nil means the Service gets its own.
+	Cache  *Cache
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 // Service is repository access for signed-in users.
@@ -84,13 +87,9 @@ type Service struct {
 	ann           manifest.Annotations
 	globs         []string
 	permissionTTL time.Duration
+	cache         *Cache
 	logger        *slog.Logger
 	now           func() time.Time
-
-	mu          sync.Mutex
-	permissions map[string]permissionEntry
-	parsed      map[string]parsedBlob
-	snapshots   map[string]snapshot
 }
 
 // snapshot is a commit's discovery candidates: the files whose name matches
@@ -100,9 +99,10 @@ type snapshot struct {
 	truncated  bool
 }
 
-type permissionEntry struct {
+// permission is a user's access to a repository and when GitHub said so.
+type permission struct {
 	access  Access
-	expires time.Time
+	checked time.Time
 }
 
 type parsedBlob struct {
@@ -133,17 +133,19 @@ func New(opts Options) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
+	cache := opts.Cache
+	if cache == nil {
+		cache = NewCache()
+	}
 	return &Service{
 		gh:            opts.GitHub,
 		env:           opts.Env,
 		ann:           opts.Annotations,
 		globs:         globs,
 		permissionTTL: ttl,
+		cache:         cache,
 		logger:        logger,
 		now:           now,
-		permissions:   map[string]permissionEntry{},
-		parsed:        map[string]parsedBlob{},
-		snapshots:     map[string]snapshot{},
 	}, nil
 }
 
@@ -175,12 +177,34 @@ type Repo struct {
 	Access string `json:"access"`
 }
 
+// RepoList is the repositories a user is shown.
+type RepoList struct {
+	Repositories []Repo `json:"repositories"`
+	// Incomplete is set when some repositories are left out because their
+	// permission could not be checked in time, or GitHub failed.
+	Incomplete bool `json:"incomplete,omitempty"`
+}
+
 // List returns the repositories the App is installed on that the user can
 // read. Archived repositories are left out: nothing can be sealed into them.
-func (s *Service) List(ctx context.Context, user *userauth.User) ([]Repo, error) {
-	all, err := s.gh.Repositories(ctx)
+//
+// The installation's list is reused for installedTTL by every user and env,
+// and each permission for listPermissionTTL, so a list costs GitHub calls
+// only for what was not checked lately. Checks start only while a quarter
+// of the time ctx allows is left, so the list goes out in time; a
+// repository not checked by then, or whose check failed, is left out and
+// the list marked incomplete, and a later list checks it.
+func (s *Service) List(ctx context.Context, user *userauth.User) (RepoList, error) {
+	if user == nil || user.ID == 0 || user.Login == "" {
+		return RepoList{}, errors.New("failed to list repositories: no signed-in user")
+	}
+	all, err := s.installed(ctx)
+	if err != nil && len(all) == 0 {
+		return RepoList{}, err
+	}
+	out := RepoList{Repositories: []Repo{}, Incomplete: err != nil}
 	if err != nil {
-		return nil, err
+		s.logger.WarnContext(ctx, "listing only some repositories", "listed", len(all), "error", err)
 	}
 	var candidates []githubapp.Repository
 	for _, r := range all {
@@ -189,34 +213,75 @@ func (s *Service) List(ctx context.Context, user *userauth.User) ([]Repo, error)
 		}
 	}
 
+	// checks running when the time is up finish with ctx
+	starting := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		starting, cancel = context.WithDeadline(ctx, deadline.Add(-time.Until(deadline)/4))
+		defer cancel()
+	}
 	access := make([]Access, len(candidates))
 	errs := make([]error, len(candidates))
-	forEach(ctx, len(candidates), func(i int) {
-		access[i], errs[i] = s.access(ctx, user, candidates[i].Owner, candidates[i].Name)
+	checked := make([]bool, len(candidates))
+	forEach(starting, len(candidates), func(i int) {
+		access[i], errs[i] = s.access(ctx, user, candidates[i].Owner, candidates[i].Name, s.listPermissionTTL())
+		checked[i] = true
 	})
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 
-	out := []Repo{}
-	failed := 0
+	var failure error
+	unchecked := 0
 	for i, r := range candidates {
-		if errs[i] != nil {
-			failed++
+		switch {
+		case !checked[i], errs[i] != nil && ctx.Err() != nil:
+			// time ran out before this one was known
+			unchecked++
+		case errs[i] != nil:
+			if failure == nil {
+				failure = errs[i]
+			}
 			s.logger.WarnContext(ctx, "failed to check repository permission",
 				"repository", r.FullName, "user", user.Login, "error", errs[i])
-			continue
-		}
-		if access[i].Read {
-			out = append(out, repo(r, access[i]))
+		case access[i].Read:
+			out.Repositories = append(out.Repositories, repo(r, access[i]))
 		}
 	}
-	// nothing could be checked: say so instead of showing no repositories
-	if failed > 0 && failed == len(candidates) {
-		return nil, fmt.Errorf("failed to check repository permissions: %w", errs[0])
+	if failure != nil || unchecked > 0 {
+		out.Incomplete = true
+		s.logger.WarnContext(ctx, "listing only the repositories checked in time",
+			"user", user.Login, "listed", len(out.Repositories), "unchecked", unchecked, "error", failure)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FullName < out[j].FullName })
+	// nothing to show, and GitHub failing is why: say so instead
+	if len(out.Repositories) == 0 && failure != nil {
+		return RepoList{}, fmt.Errorf("failed to check repository permissions: %w", failure)
+	}
+	sort.Slice(out.Repositories, func(i, j int) bool { return out.Repositories[i].FullName < out.Repositories[j].FullName })
 	return out, nil
+}
+
+// listPermissionTTL is how long the list reuses a permission: never less
+// than other checks do.
+func (s *Service) listPermissionTTL() time.Duration {
+	return max(listPermissionTTL, s.permissionTTL)
+}
+
+// installed returns the repositories the App is installed on. A list GitHub
+// cut short is returned with the error, and not kept.
+func (s *Service) installed(ctx context.Context) ([]githubapp.Repository, error) {
+	if all, ok := s.cache.installed.get("", s.now()); ok {
+		return all, nil
+	}
+	type listing struct {
+		repos []githubapp.Repository
+		err   error
+	}
+	l, _ := once(s.cache, "installed", func() (listing, error) {
+		all, err := s.gh.Repositories(ctx)
+		if err == nil {
+			s.cache.installed.put("", all, s.now().Add(installedTTL))
+		}
+		return listing{all, err}, nil
+	})
+	return l.repos, l.err
 }
 
 func repo(r githubapp.Repository, a Access) Repo {
@@ -237,7 +302,7 @@ func (s *Service) Require(ctx context.Context, user *userauth.User, owner, name 
 	if !githubapp.ValidName(owner) || !githubapp.ValidName(name) {
 		return Access{}, ErrNotFound
 	}
-	a, err := s.access(ctx, user, owner, name)
+	a, err := s.access(ctx, user, owner, name, s.permissionTTL)
 	if err != nil {
 		return Access{}, err
 	}
@@ -250,43 +315,44 @@ func (s *Service) Require(ctx context.Context, user *userauth.User, owner, name 
 	return a, nil
 }
 
-// access returns the user's access, from the cache when it is fresh. The
-// answer must be for the same GitHub user ID: logins can change hands.
-func (s *Service) access(ctx context.Context, user *userauth.User, owner, name string) (Access, error) {
+// access returns the user's access, from the cache when GitHub said it
+// within maxAge. The answer must be for the same GitHub user ID: logins can
+// change hands.
+func (s *Service) access(ctx context.Context, user *userauth.User, owner, name string, maxAge time.Duration) (Access, error) {
 	if user == nil || user.ID == 0 || user.Login == "" {
 		return Access{}, errors.New("failed to check repository permission: no signed-in user")
 	}
-	key := strconv.FormatInt(user.ID, 10) + "|" + strings.ToLower(owner+"/"+name)
+	key := permissionKey(user, owner, name)
 	now := s.now()
-	s.mu.Lock()
-	if e, ok := s.permissions[key]; ok && now.Before(e.expires) {
-		s.mu.Unlock()
-		return e.access, nil
+	if p, ok := s.cache.permissions.get(key, now); ok && now.Sub(p.checked) < maxAge {
+		return p.access, nil
 	}
-	s.mu.Unlock()
+	return once(s.cache, "permission|"+key, func() (Access, error) {
+		p, err := s.gh.Permission(ctx, owner, name, user.Login)
+		if errors.Is(err, githubapp.ErrNotFound) {
+			// the App cannot see the repository
+			err, p = nil, githubapp.Permission{}
+		}
+		if err != nil {
+			return Access{}, err
+		}
+		a := Access{Read: p.Read, Write: p.Write}
+		if p.UserID != user.ID && (p.Read || p.Write) {
+			s.logger.WarnContext(ctx, "github answered a permission lookup for another user; denying",
+				"event", "repo.permission_mismatch", "repository", owner+"/"+name, "user", user.Login,
+				"user_id", user.ID, "answered_for", p.UserID)
+			a = Access{}
+		}
+		checked := s.now()
+		s.cache.permissions.put(key, permission{access: a, checked: checked}, checked.Add(s.listPermissionTTL()))
+		return a, nil
+	})
+}
 
-	p, err := s.gh.Permission(ctx, owner, name, user.Login)
-	if errors.Is(err, githubapp.ErrNotFound) {
-		// the App cannot see the repository
-		return Access{}, nil
-	}
-	if err != nil {
-		return Access{}, err
-	}
-	a := Access{Read: p.Read, Write: p.Write}
-	if p.UserID != user.ID && (p.Read || p.Write) {
-		s.logger.WarnContext(ctx, "github answered a permission lookup for another user; denying",
-			"event", "repo.permission_mismatch", "repository", owner+"/"+name, "user", user.Login,
-			"user_id", user.ID, "answered_for", p.UserID)
-		a = Access{}
-	}
-	s.mu.Lock()
-	if len(s.permissions) >= maxPermissionEntries {
-		s.permissions = map[string]permissionEntry{}
-	}
-	s.permissions[key] = permissionEntry{access: a, expires: now.Add(s.permissionTTL)}
-	s.mu.Unlock()
-	return a, nil
+// permissionKey names a user's permission on a repository, by GitHub user
+// ID: logins can change hands.
+func permissionKey(user *userauth.User, owner, name string) string {
+	return strconv.FormatInt(user.ID, 10) + "|" + strings.ToLower(owner+"/"+name)
 }
 
 // File is a file with SealedSecret documents for the env.
@@ -341,13 +407,24 @@ func (s *Service) Files(ctx context.Context, user *userauth.User, owner, name, c
 	}
 
 	files := make([]File, len(snap.candidates))
+	errs := make([]error, len(snap.candidates))
 	forEach(ctx, len(snap.candidates), func(i int) {
-		files[i] = s.file(ctx, r, snap.candidates[i])
+		files[i], errs[i] = s.file(ctx, r, snap.candidates[i])
 	})
 	if err := ctx.Err(); err != nil {
 		return Listing{}, err
 	}
-	for _, f := range files {
+	for i, f := range files {
+		// a file GitHub failed to send is listed as unreadable, unless the
+		// rate limit is why: then every file would be
+		if err := errs[i]; err != nil {
+			var limited *githubapp.RateLimitError
+			if errors.As(err, &limited) {
+				return Listing{}, err
+			}
+			s.logger.WarnContext(ctx, "failed to read file", "repository", r.FullName, "path", f.Path, "error", err)
+			f.Error = "file could not be read from GitHub"
+		}
 		if len(f.Documents) > 0 || f.Error != "" {
 			listing.Files = append(listing.Files, f)
 		}
@@ -371,9 +448,9 @@ func (s *Service) Head(ctx context.Context, user *userauth.User, owner, name str
 }
 
 // File checks the user's access, read or write, and returns a discovered
-// file's documents for the env at a commit; its Error says why it could not
-// be read. ErrFileNotFound means no file at that path matches the discovery
-// globs.
+// file's documents for the env at a commit; its Error says why they cannot
+// be parsed. ErrFileNotFound means no file at that path matches the
+// discovery globs. Failing to read the file from GitHub is an error.
 func (s *Service) File(ctx context.Context, user *userauth.User, owner, name, commit, filePath string, write bool) (File, error) {
 	r, _, err := s.repository(ctx, user, owner, name, write)
 	if err != nil {
@@ -387,7 +464,7 @@ func (s *Service) File(ctx context.Context, user *userauth.User, owner, name, co
 	if i == len(snap.candidates) || snap.candidates[i].Path != filePath {
 		return File{}, ErrFileNotFound
 	}
-	return s.file(ctx, r, snap.candidates[i]), nil
+	return s.file(ctx, r, snap.candidates[i])
 }
 
 // repository checks the user's access and returns the repository and that
@@ -398,7 +475,7 @@ func (s *Service) repository(ctx context.Context, user *userauth.User, owner, na
 	if err != nil {
 		return githubapp.Repository{}, Access{}, err
 	}
-	r, err := s.gh.Repository(ctx, owner, name)
+	r, err := s.details(ctx, owner, name)
 	if errors.Is(err, githubapp.ErrNotFound) {
 		return githubapp.Repository{}, Access{}, ErrNotFound
 	}
@@ -414,56 +491,70 @@ func (s *Service) repository(ctx context.Context, user *userauth.User, owner, na
 	return r, a, nil
 }
 
+// details returns a repository's details, reused for repositoryTTL: every
+// seal and pull request needs them, and they rarely change.
+func (s *Service) details(ctx context.Context, owner, name string) (githubapp.Repository, error) {
+	key := strings.ToLower(owner + "/" + name)
+	if r, ok := s.cache.repos.get(key, s.now()); ok {
+		return r, nil
+	}
+	return once(s.cache, "repository|"+key, func() (githubapp.Repository, error) {
+		r, err := s.gh.Repository(ctx, owner, name)
+		if err == nil {
+			s.cache.repos.put(key, r, s.now().Add(repositoryTTL))
+		}
+		return r, err
+	})
+}
+
 // snapshot returns a commit's discovery candidates, from the cache when it
 // has them.
 func (s *Service) snapshot(ctx context.Context, r githubapp.Repository, commit string) (snapshot, error) {
 	if !githubapp.ValidSHA(commit) {
 		return snapshot{}, ErrCommitNotFound
 	}
-	key := strings.ToLower(r.FullName) + "@" + commit
-	s.mu.Lock()
-	if snap, ok := s.snapshots[key]; ok {
-		s.mu.Unlock()
+	// the candidates depend on the globs, which each env sets
+	key := strings.Join(s.globs, "\x00") + "\x00" + strings.ToLower(r.FullName) + "@" + commit
+	if snap, ok := s.cache.snapshots.get(key, s.now()); ok {
 		return snap, nil
 	}
-	s.mu.Unlock()
-
-	tree, err := s.gh.Tree(ctx, r.Owner, r.Name, commit)
-	if errors.Is(err, githubapp.ErrNotFound) {
-		return snapshot{}, ErrCommitNotFound
-	}
-	if err != nil {
-		return snapshot{}, err
-	}
-	snap := snapshot{truncated: tree.Truncated}
-	for _, e := range tree.Entries {
-		if e.Type == "blob" && e.Size <= manifest.MaxFileBytes && s.matches(e.Path) {
-			snap.candidates = append(snap.candidates, e)
+	return once(s.cache, "snapshot|"+key, func() (snapshot, error) {
+		tree, err := s.gh.Tree(ctx, r.Owner, r.Name, commit)
+		if errors.Is(err, githubapp.ErrNotFound) {
+			return snapshot{}, ErrCommitNotFound
 		}
-	}
-	sort.Slice(snap.candidates, func(i, j int) bool { return snap.candidates[i].Path < snap.candidates[j].Path })
-	if len(snap.candidates) > maxCandidates {
-		snap.candidates = snap.candidates[:maxCandidates]
-		snap.truncated = true
-	}
-	s.mu.Lock()
-	if len(s.snapshots) >= maxSnapshots {
-		s.snapshots = map[string]snapshot{}
-	}
-	s.snapshots[key] = snap
-	s.mu.Unlock()
-	return snap, nil
+		if err != nil {
+			return snapshot{}, err
+		}
+		snap := snapshot{truncated: tree.Truncated}
+		for _, e := range tree.Entries {
+			if e.Type == "blob" && e.Size <= manifest.MaxFileBytes && s.matches(e.Path) {
+				snap.candidates = append(snap.candidates, e)
+			}
+		}
+		sort.Slice(snap.candidates, func(i, j int) bool { return snap.candidates[i].Path < snap.candidates[j].Path })
+		if len(snap.candidates) > maxCandidates {
+			snap.candidates = snap.candidates[:maxCandidates]
+			snap.truncated = true
+		}
+		// commits never change
+		s.cache.snapshots.put(key, snap, time.Time{})
+		return snap, nil
+	})
 }
 
-// file reads and parses one candidate.
-func (s *Service) file(ctx context.Context, r githubapp.Repository, e githubapp.TreeEntry) File {
+// file reads and parses one candidate. A file whose content cannot be
+// parsed comes back with its Error set; failing to read it from GitHub is
+// an error.
+func (s *Service) file(ctx context.Context, r githubapp.Repository, e githubapp.TreeEntry) (File, error) {
 	docs, err := s.parse(ctx, r.Owner, r.Name, e.SHA)
 	f := File{Path: e.Path, Blob: e.SHA, Documents: docs}
-	if err != nil {
-		f.Error = userError(err)
-		s.logger.DebugContext(ctx, "skipping unreadable file", "repository", r.FullName, "path", e.Path, "error", err)
+	if reason, ok := contentError(err); ok {
+		f.Error = reason
+		s.logger.DebugContext(ctx, "skipping unparsable file", "repository", r.FullName, "path", e.Path, "error", err)
+		return f, nil
 	}
-	return f
+	return f, err
 }
 
 // matches reports whether a path is a discovery candidate.
@@ -482,38 +573,39 @@ func (s *Service) matches(p string) bool {
 }
 
 // parse returns a blob's documents for the env. Blobs are immutable, so the
-// result is cached by object ID.
+// result is cached by object ID, with the env and annotations it was parsed
+// for. Errors from manifest.Find are the content's; others are GitHub's.
 func (s *Service) parse(ctx context.Context, owner, name, blob string) ([]manifest.Document, error) {
-	s.mu.Lock()
-	if p, ok := s.parsed[blob]; ok {
-		s.mu.Unlock()
+	key := s.env + "\x00" + s.ann.Env + "\x00" + s.ann.Region + "\x00" + blob
+	if p, ok := s.cache.parsed.get(key, s.now()); ok {
 		return p.docs, p.err
 	}
-	s.mu.Unlock()
-
-	content, err := s.gh.Blob(ctx, owner, name, blob)
+	p, err := once(s.cache, "blob|"+key, func() (parsedBlob, error) {
+		content, err := s.gh.Blob(ctx, owner, name, blob)
+		if err != nil {
+			// not cached: a fetch can succeed next time
+			return parsedBlob{}, err
+		}
+		docs, err := manifest.Find(content, s.ann, s.env)
+		p := parsedBlob{docs: docs, err: err}
+		s.cache.parsed.put(key, p, time.Time{})
+		return p, nil
+	})
 	if err != nil {
-		// not cached: a fetch can succeed next time
 		return nil, err
 	}
-	docs, err := manifest.Find(content, s.ann, s.env)
-	s.mu.Lock()
-	if len(s.parsed) >= maxParsedBlobs {
-		s.parsed = map[string]parsedBlob{}
-	}
-	s.parsed[blob] = parsedBlob{docs: docs, err: err}
-	s.mu.Unlock()
-	return docs, err
+	return p.docs, p.err
 }
 
-// userError is the message shown for a file that could not be read.
-func userError(err error) string {
+// contentError returns the message shown for a file whose content cannot be
+// parsed, and false for any other error.
+func contentError(err error) (string, bool) {
 	for _, known := range []error{manifest.ErrInvalidYAML, manifest.ErrDuplicateKey, manifest.ErrTooLarge, manifest.ErrTooMany} {
 		if errors.Is(err, known) {
-			return known.Error()
+			return known.Error(), true
 		}
 	}
-	return "file could not be read from GitHub"
+	return "", false
 }
 
 // forEach runs fn for 0..n-1 with bounded concurrency, stopping early when

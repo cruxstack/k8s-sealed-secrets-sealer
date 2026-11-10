@@ -1,13 +1,17 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -239,5 +243,154 @@ func TestValidName(t *testing.T) {
 		if ValidName(bad) {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestClient_RateLimits(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(17 * time.Minute)
+	cases := map[string]struct {
+		status  int
+		headers map[string]string
+		message string
+		want    *RateLimitError // nil: not a rate limit
+	}{
+		"hourly budget used up": {
+			status:  http.StatusForbidden,
+			headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": strconv.FormatInt(reset.Unix(), 10)},
+			message: "API rate limit exceeded for installation.",
+			want:    &RateLimitError{Status: 403, RetryAt: reset},
+		},
+		"hourly budget used up, as 429": {
+			status:  http.StatusTooManyRequests,
+			headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": strconv.FormatInt(reset.Unix(), 10)},
+			want:    &RateLimitError{Status: 429, RetryAt: reset},
+		},
+		"secondary, with retry-after": {
+			status:  http.StatusForbidden,
+			headers: map[string]string{"Retry-After": "30", "X-RateLimit-Remaining": "4000"},
+			message: "You have exceeded a secondary rate limit.",
+			want:    &RateLimitError{Status: 403, RetryAt: now.Add(30 * time.Second), Secondary: true},
+		},
+		"secondary, naming no time": {
+			status:  http.StatusForbidden,
+			message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+			want:    &RateLimitError{Status: 403, RetryAt: now.Add(time.Minute), Secondary: true},
+		},
+		"too many requests": {
+			status: http.StatusTooManyRequests,
+			want:   &RateLimitError{Status: 429, RetryAt: now.Add(time.Minute), Secondary: true},
+		},
+		"forbidden for another reason": {
+			status:  http.StatusForbidden,
+			headers: map[string]string{"X-RateLimit-Remaining": "4000"},
+			message: "Resource not accessible by integration",
+		},
+		"server error": {status: http.StatusBadGateway, message: "Server Error"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/access_tokens") {
+					w.WriteHeader(http.StatusCreated)
+					_, _ = fmt.Fprintf(w, `{"token":"ghs_x","expires_at":%q}`, now.Add(time.Hour).Format(time.RFC3339))
+					return
+				}
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprintf(w, `{"message":%q}`, tc.message)
+			}))
+			defer srv.Close()
+			key := testcerts.RSA(t, 2048)
+			c, err := New(Options{
+				APIURL: srv.URL, AppID: "1", InstallationID: 7, Now: func() time.Time { return now },
+				PrivateKey: pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Repository(context.Background(), "example-org", "apps")
+			var limited *RateLimitError
+			if tc.want == nil {
+				var refusal *StatusError
+				if errors.As(err, &limited) || !errors.As(err, &refusal) || refusal.Status != tc.status {
+					t.Fatalf("err = %v, want a %d that is not a rate limit", err, tc.status)
+				}
+				return
+			}
+			if !errors.As(err, &limited) || limited.Status != tc.want.Status || !limited.RetryAt.Equal(tc.want.RetryAt) ||
+				limited.Secondary != tc.want.Secondary {
+				t.Fatalf("err = %#v, want %#v", err, tc.want)
+			}
+			if d := limited.RetryAfter(now); d != tc.want.RetryAt.Sub(now) {
+				t.Errorf("retry after %s", d)
+			}
+		})
+	}
+	// a reset already past still waits a little
+	if d := (&RateLimitError{RetryAt: now.Add(-time.Minute)}).RetryAfter(now); d != time.Second {
+		t.Errorf("retry after a past reset = %s", d)
+	}
+}
+
+func TestClient_WarnsOnceWhenTheRateLimitRunsLow(t *testing.T) {
+	f := newFixture(t)
+	repos, _ := mockgithub.Fixtures()
+	limited := mockgithub.New(mockgithub.Options{
+		Org: "example-org", Users: mockgithub.DefaultUsers(), Repos: repos, RateLimit: 20,
+		App: mockgithub.App{ID: "42", PublicKey: &f.key.PublicKey, InstallationID: 7},
+	})
+	f.srv.Config.Handler = limited.Handler()
+	var logs bytes.Buffer
+	c := f.client(t, func(o *Options) { o.Logger = slog.New(slog.NewTextHandler(&logs, nil)) })
+	ctx := context.Background()
+	var err error
+	for i := 0; i < 20 && err == nil; i++ {
+		_, err = c.Repository(ctx, "example-org", "apps")
+	}
+	if err != nil {
+		t.Fatalf("within the limit: %v", err)
+	}
+	// warned once two of twenty were left, and not again
+	if n := strings.Count(logs.String(), "event=github.rate_limit_low"); n != 1 || !strings.Contains(logs.String(), "remaining=2 limit=20") {
+		t.Fatalf("%d warnings:\n%s", n, logs.String())
+	}
+	_, err = c.Repository(ctx, "example-org", "apps")
+	var refused *RateLimitError
+	if !errors.As(err, &refused) || refused.Secondary || !refused.RetryAt.After(time.Now().Add(50*time.Minute)) {
+		t.Fatalf("past the limit: %#v", err)
+	}
+
+	// the next window warns again when it runs low
+	limited.ResetRateLimit()
+	for range 18 {
+		if _, err := c.Repository(ctx, "example-org", "apps"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "event=github.rate_limit_low"); n != 2 {
+		t.Fatalf("%d warnings after a new window", n)
+	}
+}
+
+func TestClient_RepositoriesCutShort(t *testing.T) {
+	f := newFixture(t)
+	var many []mockgithub.Repo
+	for i := range 150 {
+		many = append(many, mockgithub.Repo{Owner: "example-org", Name: fmt.Sprintf("repo-%03d", i), DefaultBranch: "main"})
+	}
+	// the first page is the last call the budget allows
+	limited := mockgithub.New(mockgithub.Options{
+		Org: "example-org", Repos: many, RateLimit: 1,
+		App: mockgithub.App{ID: "42", PublicKey: &f.key.PublicKey, InstallationID: 7},
+	})
+	f.srv.Config.Handler = limited.Handler()
+	c := f.client(t, func(o *Options) { o.Logger = slog.New(slog.DiscardHandler) })
+	got, err := c.Repositories(context.Background())
+	var refused *RateLimitError
+	if len(got) != 100 || got[0].Name != "repo-000" || !errors.As(err, &refused) {
+		t.Fatalf("%d repositories, %v", len(got), err)
 	}
 }

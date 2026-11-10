@@ -18,9 +18,29 @@ type pullRecord struct {
 	Body    string
 	Head    string // branch
 	Base    string // branch
-	HeadSHA string
+	HeadSHA string // follows the branch while the pull request is open
 	BaseSHA string // the base branch's head when the pull request opened
 	Created time.Time
+	Closed  bool
+}
+
+func (p pullRecord) state() string {
+	if p.Closed {
+		return "closed"
+	}
+	return "open"
+}
+
+func (s *Server) pullJSONView(r *http.Request, st *repoState, p pullRecord) map[string]any {
+	return map[string]any{
+		"number":   p.Number,
+		"state":    p.state(),
+		"title":    p.Title,
+		"body":     p.Body,
+		"html_url": s.webURL(r) + "/" + st.Owner + "/" + st.Name + "/pull/" + strconv.Itoa(p.Number),
+		"head":     map[string]string{"ref": p.Head, "sha": p.HeadSHA},
+		"base":     map[string]string{"ref": p.Base, "sha": p.BaseSHA},
+	}
 }
 
 func (s *Server) webURL(r *http.Request) string {
@@ -207,6 +227,60 @@ func (s *Server) createRef(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"ref": in.Ref, "object": map[string]string{"sha": in.SHA, "type": "commit"}})
 }
 
+// updateRef moves a branch: forward, or anywhere with force.
+func (s *Server) updateRef(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repo(w, r)
+	if !ok {
+		return
+	}
+	ref := r.PathValue("ref")
+	old, exists := st.refs[ref]
+	switch {
+	case !exists:
+		writeError(w, http.StatusUnprocessableEntity, "Reference does not exist")
+		return
+	case st.commits[in.SHA].Tree == "":
+		writeError(w, http.StatusUnprocessableEntity, "Object does not exist")
+		return
+	case !in.Force && !st.descends(in.SHA, old):
+		writeError(w, http.StatusUnprocessableEntity, "Update is not a fast forward")
+		return
+	}
+	st.refs[ref] = in.SHA
+	for i, p := range st.pulls {
+		if !p.Closed && "heads/"+p.Head == ref {
+			st.pulls[i].HeadSHA = in.SHA
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ref": "refs/" + ref, "object": map[string]string{"sha": in.SHA, "type": "commit"}})
+}
+
+// descends reports whether commit has ancestor among its first parents.
+func (st *repoState) descends(commit, ancestor string) bool {
+	for c := commit; c != ""; {
+		if c == ancestor {
+			return true
+		}
+		parents := st.commits[c].Parents
+		if len(parents) == 0 {
+			return false
+		}
+		c = parents[0]
+	}
+	return false
+}
+
+// deleteRef deletes a branch, closing the pull requests open from it, as
+// GitHub does.
 func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,7 +294,70 @@ func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(st.refs, ref)
+	for i, p := range st.pulls {
+		if "heads/"+p.Head == ref {
+			st.pulls[i].Closed = true
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// listPulls lists pull requests, newest first, filtered like GitHub's by
+// state (open by default) and head ("owner:branch").
+func (s *Server) listPulls(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	state := q.Get("state")
+	if state == "" {
+		state = "open"
+	}
+	headOwner, headBranch, byHead := strings.Cut(q.Get("head"), ":")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repo(w, r)
+	if !ok {
+		return
+	}
+	out := []map[string]any{}
+	for i := len(st.pulls) - 1; i >= 0; i-- {
+		p := st.pulls[i]
+		switch {
+		case state != "all" && p.state() != state:
+		case byHead && (!strings.EqualFold(headOwner, st.Owner) || p.Head != headBranch):
+		default:
+			out = append(out, s.pullJSONView(r, st, p))
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// updatePull changes a pull request's title and description.
+func (s *Server) updatePull(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Title *string `json:"title"`
+		Body  *string `json:"body"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	n, _ := strconv.Atoi(r.PathValue("number"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repo(w, r)
+	if !ok {
+		return
+	}
+	if n < 1 || n > len(st.pulls) {
+		writeError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	p := &st.pulls[n-1]
+	if in.Title != nil {
+		p.Title = *in.Title
+	}
+	if in.Body != nil {
+		p.Body = *in.Body
+	}
+	writeJSON(w, http.StatusOK, s.pullJSONView(r, st, *p))
 }
 
 func (s *Server) createPull(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +385,7 @@ func (s *Server) createPull(w http.ResponseWriter, r *http.Request) {
 	case !headOK || !baseOK || in.Head == in.Base:
 		writeError(w, http.StatusUnprocessableEntity, "Validation Failed: head or base is invalid")
 		return
-	case slices.ContainsFunc(st.pulls, func(p pullRecord) bool { return p.Head == in.Head }):
+	case slices.ContainsFunc(st.pulls, func(p pullRecord) bool { return p.Head == in.Head && !p.Closed }):
 		writeError(w, http.StatusUnprocessableEntity, "Validation Failed: A pull request already exists for "+in.Head)
 		return
 	}
@@ -263,14 +400,7 @@ func (s *Server) createPull(w http.ResponseWriter, r *http.Request) {
 		Created: time.Now().UTC(),
 	}
 	st.pulls = append(st.pulls, p)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"number":   p.Number,
-		"state":    "open",
-		"title":    p.Title,
-		"html_url": s.webURL(r) + "/" + st.Owner + "/" + st.Name + "/pull/" + strconv.Itoa(p.Number),
-		"head":     map[string]string{"ref": p.Head, "sha": p.HeadSHA},
-		"base":     map[string]string{"ref": p.Base, "sha": p.BaseSHA},
-	})
+	writeJSON(w, http.StatusCreated, s.pullJSONView(r, st, p))
 }
 
 // PullFile is a file a pull request changes.
@@ -283,7 +413,9 @@ type PullFile struct {
 // Pull is a pull request with its commits and changed files, for the mock's
 // page and tests. It is not a GitHub API shape.
 type Pull struct {
-	Number  int        `json:"number"`
+	Number int `json:"number"`
+	// State is "open" or "closed".
+	State   string     `json:"state"`
 	Title   string     `json:"title"`
 	Body    string     `json:"body"`
 	Head    string     `json:"head"`
@@ -302,7 +434,7 @@ func (s *Server) pullRequest(owner, repo string, number int) (Pull, bool) {
 		return Pull{}, false
 	}
 	p := st.pulls[number-1]
-	v := Pull{Number: p.Number, Title: p.Title, Body: p.Body, Head: p.Head, Base: p.Base, Files: []PullFile{}}
+	v := Pull{Number: p.Number, State: p.state(), Title: p.Title, Body: p.Body, Head: p.Head, Base: p.Base, Files: []PullFile{}}
 	// the commits from the head back to the base
 	for c := p.HeadSHA; c != "" && c != p.BaseSHA; {
 		v.Commits = append(v.Commits, c)

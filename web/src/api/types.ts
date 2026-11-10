@@ -95,6 +95,11 @@ export interface Repository {
 /** GET /api/v1/repos */
 export interface RepositoryList {
   repositories: Repository[];
+  /**
+   * Set when repositories the user can read may be missing: GitHub did not
+   * answer for all of them in time.
+   */
+  incomplete?: boolean;
 }
 
 /** A SealedSecret document for this env. */

@@ -113,7 +113,11 @@ function Palette({ onDone }: { onDone: () => void }) {
   const { theme, setTheme } = useTheme();
   const logout = useLogout();
   // repositories are listed for the env the page is in
-  const repos = useQuery({ ...reposQueryOptions, enabled: env !== null });
+  const repos = useQuery({
+    ...reposQueryOptions,
+    enabled: env !== null,
+    select: (list) => list.repositories,
+  });
   const sessions = useQuery({ ...sessionsQueryOptions, enabled: env !== null });
   const pending = new Map(
     (sessions.data ?? []).map((s) => [

@@ -77,6 +77,23 @@ describe("extractApiError", () => {
     );
   });
 
+  it("shows what a 503 says is unavailable and when to try again", () => {
+    expect(
+      extractApiError(
+        makeAxiosError(503, {
+          error:
+            "GitHub is limiting the sealer's requests for now; try again in 12 minutes",
+        }),
+      ),
+    ).toBe(
+      "GitHub is limiting the sealer's requests for now; try again in 12 minutes",
+    );
+    // a gateway's own 503 has no such text
+    expect(
+      extractApiError(makeAxiosError(503, { message: "Service Unavailable" })),
+    ).toBe("The service is temporarily unavailable — please try again");
+  });
+
   it("falls back to a status message for non-JSON bodies", () => {
     expect(
       extractApiError(makeAxiosError(502, "<html>Bad Gateway</html>")),

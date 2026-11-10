@@ -2,11 +2,12 @@ import { queryOptions } from "@tanstack/react-query";
 import apiClient from "@/api/client";
 import type { FileListing, RepositoryList } from "@/api/types";
 
+/** The repositories the GitHub App is installed on. */
 export const reposQueryOptions = queryOptions({
   queryKey: ["repos"],
   queryFn: async () => {
     const { data } = await apiClient.get<RepositoryList>("/repos");
-    return data.repositories;
+    return data;
   },
   staleTime: 60_000,
 });

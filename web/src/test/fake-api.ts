@@ -73,6 +73,8 @@ export function fakeApi(opts: {
   fleetStatus?: number;
   status?: SealingStatus;
   repos?: Repository[];
+  /** Marks the repository list as cut short by GitHub. */
+  reposIncomplete?: boolean;
   /** File listings by "owner/repo"; others answer 404. */
   files?: Record<string, FileListing>;
   reposStatus?: number;
@@ -143,7 +145,10 @@ export function fakeApi(opts: {
       if (!opts.me) return reply(401, { error: "unauthorized" });
       if (opts.reposStatus)
         return reply(opts.reposStatus, { error: "GitHub request failed" });
-      return reply(200, { repositories: opts.repos ?? [] });
+      return reply(200, {
+        repositories: opts.repos ?? [],
+        incomplete: opts.reposIncomplete,
+      });
     }
     if (url === "/sessions") {
       return reply(200, { sessions: Object.values(sessions) });

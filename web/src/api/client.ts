@@ -88,8 +88,9 @@ const STATUS_MESSAGES: Record<number, string> = {
 };
 
 // Statuses whose `error` text is a bare status word; the status message reads
-// better than "unauthorized" or "internal error".
-const GENERIC_BODY_STATUSES = new Set([401, 404, 500, 502, 503, 504]);
+// better than "unauthorized" or "internal error". A 503 says what is
+// unavailable and when to try again, so its text is shown.
+const GENERIC_BODY_STATUSES = new Set([401, 404, 500, 502, 504]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

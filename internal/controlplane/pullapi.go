@@ -22,6 +22,12 @@ const (
 	// pullRequestLock is how long a session stays locked while a pull
 	// request is opened from it: longer than the request can take.
 	pullRequestLock = 2 * time.Minute
+	// pullRequestTimeout bounds opening a pull request, GitHub's writes
+	// included, and pullRequestFinish ending or unlocking the session
+	// afterwards: together well within the 30 seconds API Gateway, a
+	// Lambda function and the HTTP server give a request.
+	pullRequestTimeout = 20 * time.Second
+	pullRequestFinish  = 3 * time.Second
 	// maxChangesPerSession bounds a session's pending changes, and so what
 	// one pull request carries.
 	maxChangesPerSession = 50
@@ -42,15 +48,17 @@ type pullRequestView struct {
 
 // createPullRequest opens a pull request with a session's pending changes,
 // on a new branch from the session's commit, and ends the session. The
-// session is locked meanwhile, so it opens one pull request at most and
-// nothing is sealed into it or removed from it while the pull request is
-// being made.
+// session is locked meanwhile, so nothing is sealed into it or removed from
+// it while the pull request is being made. An attempt that failed part way,
+// or whose answer was lost, can be repeated: the session's branch and the
+// pull request open from it are reused (githubapp.CreatePullRequest), so a
+// session opens one pull request at most.
 func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.currentSession(w, r)
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), sessionRequestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), pullRequestTimeout)
 	defer cancel()
 	user := userauth.UserFrom(ctx)
 	repoKey := store.RepoKey(sess.Owner, sess.Repo)
@@ -70,7 +78,7 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		if opened {
 			return
 		}
-		unlock, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		unlock, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullRequestFinish)
 		defer cancel()
 		if err := s.store.UnlockSession(unlock, user.ID, repoKey, sess.ID); err != nil {
 			s.logger.ErrorContext(unlock, "failed to unlock session", "session_id", sess.ID, "error", err)
@@ -135,11 +143,11 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	opened = true
 
-	end, cancelEnd := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	end, cancelEnd := context.WithTimeout(context.WithoutCancel(ctx), pullRequestFinish)
 	defer cancelEnd()
 	if _, err := s.store.DeleteSession(end, user.ID, repoKey, sess.ID); err != nil {
-		// the lock lapses and the session can be used again; the branch
-		// name, one per session, keeps it from opening a second pull request
+		// the lock lapses and the session can be used again; opening a pull
+		// request from it again updates this one
 		log.ErrorContext(ctx, "failed to end session after opening its pull request", "error", err)
 	}
 	log.InfoContext(ctx, "pull request opened",
@@ -173,7 +181,7 @@ func (s *Server) sealsRunning(ctx context.Context, sessionID string, now time.Ti
 }
 
 // pullRequestBranch names a session's branch. There is one per session, so
-// GitHub refuses a second pull request from the same session.
+// a session has one pull request at most.
 func pullRequestBranch(env, login, sessionID string) string {
 	return "sealer/" + env + "/" + strings.ToLower(login) + "-" + strings.ToLower(sessionID)
 }

@@ -7,7 +7,9 @@
 // (or passing login=<user>) redirects back with a code, as GitHub does.
 // Installation tokens carry the permissions they were minted with, and every
 // repository call checks them, so a token minted too narrowly fails here as
-// it would on GitHub.
+// it would on GitHub. Calls with them send GitHub's rate limit headers, and
+// with Options.RateLimit set, are refused as GitHub refuses them once the
+// budget is used up.
 package mockgithub
 
 import (
@@ -21,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // User is a mock GitHub user.
@@ -49,6 +52,10 @@ type Options struct {
 	// WebURL is where browsers reach the mock, for the html_url of pull
 	// requests. Empty means the request's host.
 	WebURL string
+	// RateLimit is how many calls installation tokens may make before the
+	// mock refuses them for its rate limit, until ResetRateLimit. Zero means
+	// 5000 that are never used up.
+	RateLimit int
 }
 
 // DefaultUsers are the local stack's users: alice may sign in and is an
@@ -72,7 +79,85 @@ type Server struct {
 	tokens        map[string]string // access token -> login
 	installTokens map[string]installationToken
 	repos         map[string]*repoState // lowercase "owner/name"
+	// calls counts installation token calls against Options.RateLimit in
+	// the window that started at window
+	calls  int
+	window time.Time
+	faults []fault
 }
+
+// Fault is how a request fails, for testing what a client does when GitHub
+// fails, and when it cannot tell whether GitHub acted.
+type Fault int
+
+// Faults.
+const (
+	// LoseAnswer drops the connection once the request is done: GitHub
+	// acted, and the client never hears back. (Go's HTTP client sends a GET
+	// again when its connection drops, so use it for writes.)
+	LoseAnswer Fault = iota + 1
+	// Stall answers nothing once the request is done, until the client gives
+	// up (or a minute passes), then drops the connection.
+	Stall
+	// ServerError answers 502 without acting, as GitHub does now and then.
+	ServerError
+)
+
+type fault struct {
+	method, suffix string
+	fault          Fault
+}
+
+// FailNext makes the next request with method whose path ends in suffix
+// fail with f, after the mock acted on it.
+func (s *Server) FailNext(method, suffix string, f Fault) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faults = append(s.faults, fault{method: method, suffix: suffix, fault: f})
+}
+
+// takeFault removes and returns the fault planned for r, if any.
+func (s *Server) takeFault(r *http.Request) Fault {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, f := range s.faults {
+		if f.method == r.Method && strings.HasSuffix(r.URL.Path, f.suffix) {
+			s.faults = slices.Delete(s.faults, i, i+1)
+			return f.fault
+		}
+	}
+	return 0
+}
+
+// withFaults serves requests with next and fails those FailNext planned.
+func (s *Server) withFaults(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f := s.takeFault(r)
+		switch f {
+		case 0:
+			next.ServeHTTP(w, r)
+			return
+		case ServerError:
+			writeError(w, http.StatusBadGateway, "Server Error")
+			return
+		}
+		next.ServeHTTP(discard{}, r)
+		if f == Stall {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Minute):
+			}
+		}
+		panic(http.ErrAbortHandler)
+	})
+}
+
+// discard is a ResponseWriter that keeps nothing.
+type discard struct{}
+
+func (discard) Header() http.Header         { return http.Header{} }
+func (discard) Write(b []byte) (int, error) { return len(b), nil }
+func (discard) WriteHeader(int)             {}
 
 // New returns a Server.
 func New(opts Options) *Server {
@@ -82,6 +167,7 @@ func New(opts Options) *Server {
 		tokens:        map[string]string{},
 		installTokens: map[string]installationToken{},
 		repos:         map[string]*repoState{},
+		window:        time.Now(),
 	}
 	for _, r := range opts.Repos {
 		s.repos[strings.ToLower(r.Owner+"/"+r.Name)] = newRepoState(r)
@@ -113,14 +199,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /repos/{owner}/{repo}/git/trees", s.withInstallation("contents", "write", s.createTree))
 	mux.HandleFunc("POST /repos/{owner}/{repo}/git/commits", s.withInstallation("contents", "write", s.createCommit))
 	mux.HandleFunc("POST /repos/{owner}/{repo}/git/refs", s.withInstallation("contents", "write", s.createRef))
+	mux.HandleFunc("PATCH /repos/{owner}/{repo}/git/refs/{ref...}", s.withInstallation("contents", "write", s.updateRef))
 	mux.HandleFunc("DELETE /repos/{owner}/{repo}/git/refs/{ref...}", s.withInstallation("contents", "write", s.deleteRef))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls", s.withInstallation("pull_requests", "read", s.listPulls))
 	mux.HandleFunc("POST /repos/{owner}/{repo}/pulls", s.withInstallation("pull_requests", "write", s.createPull))
+	mux.HandleFunc("PATCH /repos/{owner}/{repo}/pulls/{number}", s.withInstallation("pull_requests", "write", s.updatePull))
 
-	// not GitHub APIs: the page a pull request's html_url opens, and its
-	// data for the end-to-end tests
-	mux.HandleFunc("GET /{owner}/{repo}/pull/{number}", s.pullHTML)
+	// not GitHub APIs: the data of a pull request for the end-to-end tests,
+	// and the page its html_url opens, which would overlap the API's paths
+	// in one mux
 	mux.HandleFunc("GET /_mock/repos/{owner}/{repo}/pulls/{number}", s.pullJSON)
-	return mux
+	pages := http.NewServeMux()
+	pages.HandleFunc("GET /{owner}/{repo}/pull/{number}", s.pullHTML)
+	return s.withFaults(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := mux.Handler(r); pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		pages.ServeHTTP(w, r)
+	}))
 }
 
 var chooser = template.Must(template.New("authorize").Parse(`<!doctype html>
