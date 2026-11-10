@@ -663,16 +663,34 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
 
 ## 12. User authentication and authorization
 
-- **Login** is GitHub OAuth. The session cookie is a JWT signed with HS256 and
-  bound to the deployment's external URL as its audience. A CSRF token derived
-  (HMAC) from the session JWT is required on every state-changing request.
+- **Login** is GitHub OAuth (scope `read:org`). A random state goes in a
+  short-lived HttpOnly cookie scoped to the callback path and is compared
+  in constant time; `return_to` is honored only for same-origin paths. The
+  user must be a member of the configured org and, when teams are
+  configured, an active member of at least one of them.
+- **Session.** An HttpOnly, SameSite=Lax cookie holding a JWT signed with
+  HS256, bound to the deployment's URL (audience) and env, 8 hours by
+  default. Over https it is a `__Host-` cookie, so sibling subdomains can
+  neither set nor read it. The user session key is separate from the agent
+  session key.
+- **CSRF.** Every state-changing request must send `X-CSRF-Token`, an HMAC
+  of the session cookie under a key derived from the session key. `/me`
+  returns it; a page that cannot read `/me` (another origin) cannot learn
+  it, and a token for one session is useless with another.
+- **Browser hardening.** Every response carries a strict Content Security
+  Policy (same-origin scripts only and never inline, inline styles allowed
+  for UI components, images also from GitHub avatars), `X-Frame-Options: DENY`, `nosniff`, a same-origin
+  referrer and opener policy, and HSTS over https. The UI is built into
+  the binary and needs no third-party origin at runtime.
 - **Repository access** goes through the GitHub App's installation token, but
   every operation is first checked against the signed-in user's own permission
   on that repository: read to list and discover, write to create a session,
   seal and open a pull request. Write access is re-checked on every seal and
   PR. Results are cached briefly (per Lambda instance).
 - **Env allowlist.** A deployment can require membership in one or more GitHub
-  teams. Use it for `prod`.
+  teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
+  is checked at sign-in; removing someone from the team takes effect when
+  their session expires.
 - **Rate limits** use API Gateway throttling and WAF rate-based rules.
   In-memory limiters do not hold across Lambda instances, so limits that
   matter (sessions per user) are enforced with DynamoDB.

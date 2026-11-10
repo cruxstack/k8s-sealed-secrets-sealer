@@ -21,9 +21,29 @@ agentAudience: ""
 registry:
   configMapName: ""
 
-# Secret with APP_AGENT_SESSION_KEY (at least 32 bytes) and, to enable the
-# admin API, APP_ADMIN_TOKEN (required)
+# Secret with APP_AGENT_SESSION_KEY and APP_USER_SESSION_KEY (each at least
+# 32 random bytes), APP_GITHUB_OAUTH_CLIENT_SECRET and, to enable the admin
+# API, APP_ADMIN_TOKEN (required)
 existingSecret: ""
+
+# GitHub sign-in (a GitHub OAuth app). Users must belong to org and, when
+# allowedTeams is set, to at least one of those teams. Use teams for prod.
+github:
+  # (required)
+  org: ""
+  allowedTeams: []
+  # the OAuth app's client ID (required); its secret goes in existingSecret
+  oauthClientID: ""
+  # GitHub's web and API hosts; change for GitHub Enterprise Server
+  url: https://github.com
+  apiURL: https://api.github.com
+  # defaults to <url>/login/oauth/access_token
+  oauthTokenURL: ""
+  # permit http GitHub URLs, for local mocks only
+  allowInsecure: false
+
+# how long a user stays signed in
+userSessionTTL: 8h
 
 dynamodb:
   # (required)

@@ -10,6 +10,7 @@ shift
 
 ensure_cluster
 pull_charts
+build_web
 build_binaries
 
 echo "+ tilt ${action} --context ${KUBE_CONTEXT} --port ${SEALER_TILT_PORT} $*" >&2

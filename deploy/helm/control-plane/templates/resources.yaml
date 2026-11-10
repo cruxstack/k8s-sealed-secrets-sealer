@@ -98,6 +98,28 @@ spec:
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}
+            - name: APP_GITHUB_ORG
+              value: {{ required "github.org is required" .Values.github.org | quote }}
+            - name: APP_GITHUB_OAUTH_CLIENT_ID
+              value: {{ required "github.oauthClientID is required" .Values.github.oauthClientID | quote }}
+            - name: APP_GITHUB_URL
+              value: {{ .Values.github.url | quote }}
+            - name: APP_GITHUB_API_URL
+              value: {{ .Values.github.apiURL | quote }}
+            {{- with .Values.github.oauthTokenURL }}
+            - name: APP_GITHUB_OAUTH_TOKEN_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.github.allowedTeams }}
+            - name: APP_GITHUB_ALLOWED_TEAMS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.github.allowInsecure }}
+            - name: APP_ALLOW_INSECURE_GITHUB
+              value: "true"
+            {{- end }}
+            - name: APP_USER_SESSION_TTL
+              value: {{ .Values.userSessionTTL | quote }}
             {{- with .Values.aws.stsHosts }}
             - name: APP_AWS_STS_HOSTS
               value: {{ join "," . | quote }}

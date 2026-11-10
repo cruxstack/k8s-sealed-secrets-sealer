@@ -6,9 +6,9 @@ clusters and regions that environment spans. Users pick a repository and a
 file, type a value, and get a pull request. They never pick a cluster, a
 region or a certificate.
 
-> **Status:** early development. Agents log in to the control plane, check
-> in with their controller's key set, and the control plane computes the
-> env's key state; sealing is next. See [the design](docs/design.md) for
+> **Status:** early development. People sign in with GitHub and see the
+> fleet: every agent, its controller's keys and the env's key state.
+> Sealing is next. See [the design](docs/design.md) for
 > where it is going.
 
 ## How it works
@@ -64,6 +64,7 @@ installs every other tool (Go, k3d, Tilt, Helm, kubectl) into `.tools/`.
 
 ```sh
 atmos dev up        # k3d cluster + Tilt dashboard at http://localhost:10350
+open http://localhost:4100   # sign in as alice (a GitHub mock)
 atmos dev status    # pods, each agent's controller key, endpoints
 atmos test e2e      # the end-to-end suite in a throwaway cluster
 ```
@@ -76,6 +77,7 @@ command.
 | Path                         | Contents                                         |
 | ---------------------------- | ------------------------------------------------ |
 | `cmd/server`, `cmd/agent`    | Control plane (HTTP server) and agent binaries   |
+| `web/`                       | The web UI, built into the control plane         |
 | `internal/`                  | Application packages                             |
 | `deploy/helm/`               | Helm charts for the agent and the control plane  |
 | `dev/`, `Tiltfile`           | The local k3d stack                              |

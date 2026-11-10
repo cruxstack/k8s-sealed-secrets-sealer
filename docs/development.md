@@ -20,7 +20,8 @@ The stack is one k3d cluster that stands in for a whole environment:
 
 | Namespace                  | Contents                                          |
 | -------------------------- | ------------------------------------------------- |
-| `sealer-system`            | Control plane, DynamoDB Local, local KMS          |
+| `sealer-system`            | Control plane, DynamoDB Local, local KMS, GitHub  |
+|                            | mock                                              |
 | `<cluster>-sealed-secrets` | That cluster's sealed-secrets controller and keys |
 | `<cluster>-sealer`         | That cluster's agent                              |
 | `<cluster>-apps`           | Where tests apply SealedSecrets for that cluster  |
@@ -70,9 +71,10 @@ Terraform module, not here.
 | Endpoint       | Default                 |
 | -------------- | ----------------------- |
 | Tilt           | http://localhost:10350  |
-| Control plane  | http://localhost:4100   |
+| Web UI and API | http://localhost:4100   |
 | DynamoDB Local | http://localhost:4102   |
 | Local KMS      | http://localhost:4103   |
+| GitHub (mock)  | http://localhost:4104   |
 
 Go changes rebuild the binaries on the host (with the Go build cache) and
 redeploy in seconds; the images only wrap the binaries
@@ -86,6 +88,22 @@ redeploy in seconds; the images only wrap the binaries
 | `atmos dev logs [res]`   | Tilt logs, optionally for one resource (`-f` to follow) |
 | `atmos dev down`         | Remove the workloads, keep the cluster                  |
 | `atmos dev destroy`      | Delete the cluster, its registry and every key in it    |
+
+## Signing in locally
+
+Open http://localhost:4100 and sign in. GitHub is a mock
+(`cmd/mock-github`) that lets you pick a user:
+
+| User    | Result                                                   |
+| ------- | -------------------------------------------------------- |
+| `alice` | Signs in: org member and in the allowed team `sealers`   |
+| `bob`   | Refused: in the org, not in the allowed team             |
+| `carol` | Refused: not in the org                                  |
+
+The UI is built into the control plane binary; Tilt rebuilds it when
+`web/` changes. For hot reload while working on the UI, run
+`atmos web dev` (Vite on http://localhost:5173, proxying `/api` to the
+stack's control plane) and sign in through it the same way.
 
 ## Worktree stacks
 
@@ -101,6 +119,8 @@ and waits until it is ready. Several can run beside `atmos dev up`. Use
 | ------------------------ | ---------------------------------------------------------- |
 | `atmos test unit`        | Go unit tests with the race detector                       |
 | `atmos test integration` | The DynamoDB store against DynamoDB Local in Docker        |
+| `atmos web test`         | Web UI tests (vitest)                                      |
+| `atmos web check`        | Web UI lint, type check and formatting                     |
 | `atmos test e2e`         | Whole stack in a throwaway cluster, then end-to-end checks |
 | `atmos check all`        | go mod tidy, gofmt/goimports, golangci-lint, govulncheck,  |
 |                          | Helm lint and kubeconform                                  |
@@ -116,7 +136,10 @@ the run for inspection. Besides bringing the stack up, it checks that:
   can reach only its own controller;
 - each controller decrypts a value sealed with its certificate;
 - the fleet shows keys out of sync, with each cluster missing the others'
-  keys (until key sync exists, every simulated cluster has its own key).
+  keys (until key sync exists, every simulated cluster has its own key);
+- the UI is served with a strict content security policy, the fleet API
+  requires sign-in, alice can sign in while bob and carol are refused, and
+  sign-out requires the CSRF token.
 
 ## Local agent identity
 
@@ -153,6 +176,16 @@ Invalid or missing settings are reported together at startup.
 | `APP_DYNAMODB_ENDPOINT`            | control plane | AWS (set for emulators)       |
 | `APP_DYNAMODB_CREATE_TABLE`        | control plane | `false` (emulators only)      |
 | `APP_AWS_STS_HOSTS`                | control plane | AWS's public STS hosts        |
+| `APP_GITHUB_ORG`                   | control plane | required                      |
+| `APP_GITHUB_ALLOWED_TEAMS`         | control plane | unset: any org member         |
+| `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required                      |
+| `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required                      |
+| `APP_GITHUB_URL`                   | control plane | `https://github.com`          |
+| `APP_GITHUB_API_URL`               | control plane | `https://api.github.com`      |
+| `APP_GITHUB_OAUTH_TOKEN_URL`       | control plane | `APP_GITHUB_URL` + token path |
+| `APP_ALLOW_INSECURE_GITHUB`        | control plane | `false` (local mocks only)    |
+| `APP_USER_SESSION_KEY`             | control plane | required, at least 32 bytes   |
+| `APP_USER_SESSION_TTL`             | control plane | `8h` (15m to 24h)             |
 | `APP_CONTROL_PLANE_URL`            | agent         | required, https               |
 | `APP_ALLOW_INSECURE_CONTROL_PLANE` | agent         | `false` (local stacks only)   |
 | `APP_IDENTITY_MODE`                | agent         | `k8s-oidc` (or `aws-sts`)     |

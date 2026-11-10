@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+# The web UI in web/: React, Vite, TanStack Router and Query, Tailwind. Every
+# command runs on the Node pinned in web/.node-version, installed into
+# .tools/node and checksum-verified on first use (see
+# .atmos/scripts/web/node-env.sh), and installs dependencies from the
+# lockfile, with install scripts disabled, when they are missing or stale.
+
+commands:
+  - name: web
+    description: Build, test and check the web UI (web/)
+    commands:
+      - name: install
+        description: Install web dependencies from web/package-lock.json (npm ci --ignore-scripts).
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/web/npm.sh install
+
+      - name: dev
+        description: |
+          Run the Vite dev server with hot reload on http://localhost:5173. It
+          proxies /api to the control plane on localhost:$SEALER_CONTROL_PLANE_PORT
+          (4100 by default), so run it beside `atmos dev up`.
+        steps:
+          - type: shell
+            interactive: true
+            command: bash .atmos/scripts/web/npm.sh run dev
+
+      - name: build
+        description: |
+          Build the UI into internal/webui/dist/app, which the control plane
+          embeds, then type-check it.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/web/npm.sh run build
+
+      - name: test
+        description: |
+          Run the web unit tests (vitest, jsdom). Extra arguments after `--` go
+          to vitest.
+
+            atmos web test
+            atmos web test -- src/components/fleet
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/web/npm.sh run test -- {{ .TrailingArgs }}
+
+      - name: check
+        description: ESLint (no warnings allowed), the TypeScript type check, and Prettier in check mode.
+        steps:
+          - type: shell
+            command: |
+              set -euo pipefail
+              bash .atmos/scripts/web/npm.sh run lint
+              bash .atmos/scripts/web/npm.sh run typecheck
+              bash .atmos/scripts/web/npm.sh run format:check
+
+      - name: fmt
+        description: Format the web sources with Prettier.
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/web/npm.sh run format

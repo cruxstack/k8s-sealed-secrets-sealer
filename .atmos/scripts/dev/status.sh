@@ -32,7 +32,8 @@ fi
 
   Cluster:        ${SEALER_CLUSTER} (context ${KUBE_CONTEXT})
   Tilt:           http://localhost:${SEALER_TILT_PORT}
-  Control plane:  http://localhost:${SEALER_CONTROL_PLANE_PORT}
+  Web UI:         http://localhost:${SEALER_CONTROL_PLANE_PORT}  (sign in as alice)
   DynamoDB Local: http://localhost:${SEALER_DYNAMODB_PORT}
   KMS (local):    http://localhost:${SEALER_KMS_PORT}
+  GitHub (mock):  http://localhost:${SEALER_GITHUB_PORT}
 EOF

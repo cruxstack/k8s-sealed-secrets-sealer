@@ -7,12 +7,13 @@ export SEALER_TILT_PORT="${SEALER_TILT_PORT:-10450}"
 export SEALER_CONTROL_PLANE_PORT="${SEALER_CONTROL_PLANE_PORT:-4200}"
 export SEALER_DYNAMODB_PORT="${SEALER_DYNAMODB_PORT:-4202}"
 export SEALER_KMS_PORT="${SEALER_KMS_PORT:-4203}"
+export SEALER_GITHUB_PORT="${SEALER_GITHUB_PORT:-4204}"
 source .atmos/scripts/lib/dev.sh
 
-port_forward_pid=""
+port_forward_pids=()
 cleanup() {
   local status=$?
-  [[ -n "$port_forward_pid" ]] && kill "$port_forward_pid" 2>/dev/null
+  for pid in "${port_forward_pids[@]}"; do kill "$pid" 2>/dev/null; done
   [[ -n "${work:-}" ]] && rm -rf "$work"
   if [[ $status -ne 0 ]]; then
     echo "--- e2e failed; recent pod state ---" >&2
@@ -67,17 +68,23 @@ work="$(mktemp -d)"
 
 ensure_cluster
 pull_charts
+build_web
 build_binaries
 echo "+ tilt ci --context ${KUBE_CONTEXT} --port ${SEALER_TILT_PORT}" >&2
 tilt ci --context "$KUBE_CONTEXT" --port "$SEALER_TILT_PORT" --timeout "${E2E_TIMEOUT:-10m}"
 
-# tilt ci closes its port forwards when it exits, so open one of our own
+# tilt ci closes its port forwards when it exits, so open our own, on the
+# same ports the stack's URLs (OAuth redirects, token audience) point at
 kubectl --context "$KUBE_CONTEXT" -n sealer-system port-forward svc/sealer-control-plane \
   "${SEALER_CONTROL_PLANE_PORT}:80" >/dev/null 2>&1 &
-port_forward_pid=$!
+port_forward_pids+=($!)
+kubectl --context "$KUBE_CONTEXT" -n sealer-system port-forward svc/mock-github \
+  "${SEALER_GITHUB_PORT}:8080" >/dev/null 2>&1 &
+port_forward_pids+=($!)
 control_plane="http://localhost:${SEALER_CONTROL_PLANE_PORT}"
 for _ in $(seq 1 30); do
-  curl -sf "${control_plane}/healthz" >/dev/null 2>&1 && break
+  curl -sf "${control_plane}/healthz" >/dev/null 2>&1 \
+    && curl -sf "http://localhost:${SEALER_GITHUB_PORT}/healthz" >/dev/null 2>&1 && break
   sleep 1
 done
 
@@ -91,7 +98,7 @@ automount="$(kubectl --context "$KUBE_CONTEXT" -n sealer-system get deploy seale
 check "control plane has no Kubernetes API token"
 
 # --- agent login: only registered service accounts, only for this audience ---
-audience="http://localhost:4100"
+audience="$control_plane"
 first="$(stack_clusters | head -n 1)"
 kubectl --context "$KUBE_CONTEXT" -n "${first}-sealer" create serviceaccount e2e-rogue >/dev/null
 rogue="$(kubectl --context "$KUBE_CONTEXT" -n "${first}-sealer" create token e2e-rogue --audience "$audience")"
@@ -112,6 +119,44 @@ check "check-in requires a session token"
 
 [[ "$(api GET /api/v1/admin/fleet "" | cut -d' ' -f1)" == 401 ]] || die "admin API answered without a token"
 check "admin API requires its token"
+
+# --- web UI and sign-in ---
+headers="$(curl -sS -D - -o "${work}/index.html" "${control_plane}/fleet")"
+grep -qi "^content-security-policy:.*script-src 'self'" <<<"$headers" || die "the UI has no strict content security policy"
+grep -qi "^x-frame-options: DENY" <<<"$headers" || die "the UI can be framed"
+grep -q 'type="module"' "${work}/index.html" || die "the UI is not served"
+check "web UI is served, with a strict content security policy"
+
+[[ "$(api GET /api/v1/fleet "" | cut -d' ' -f1)" == 401 ]] || die "the fleet API answered without sign-in"
+check "the fleet API requires sign-in"
+
+# sign_in <login>: runs the browser's side of GitHub sign-in against the
+# mock and prints where the control plane finally sent the browser
+sign_in() {
+  local jar="${work}/cookies-$1" next
+  next="$(curl -sS -o /dev/null -w '%{redirect_url}' -c "$jar" -b "$jar" "${control_plane}/api/v1/auth/login?return_to=/fleet")"
+  next="$(curl -sS -o /dev/null -w '%{redirect_url}' "${next}&login=$1")"
+  curl -sS -o /dev/null -w '%{redirect_url}' -c "$jar" -b "$jar" "$next"
+}
+
+[[ "$(sign_in alice)" == "${control_plane}/fleet" ]] || die "alice could not sign in"
+me="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me")"
+[[ "$(jq -r .user.login <<<"$me")" == alice ]] || die "/me after sign-in: ${me}"
+csrf="$(jq -r .csrf_token <<<"$me")"
+agents="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/fleet" | jq '.agents | length')"
+[[ "$agents" == "$(stack_clusters | wc -l | tr -d ' ')" ]] || die "the signed-in fleet has ${agents} agents"
+check "alice (org member, allowed team) signs in and sees the fleet"
+
+[[ "$(sign_in bob)" == "${control_plane}/login?error=not_in_team" ]] || die "bob was not refused as outside the allowed team"
+[[ "$(sign_in carol)" == "${control_plane}/login?error=not_member" ]] || die "carol was not refused as outside the org"
+check "sign-in refuses users outside the allowed team or the org"
+
+logout() { curl -sS -o /dev/null -w '%{http_code}' -X POST -b "${work}/cookies-alice" -c "${work}/cookies-alice" "$@" "${control_plane}/api/v1/auth/logout"; }
+[[ "$(logout)" == 403 ]] || die "sign-out without the csrf token was accepted"
+[[ "$(logout -H "X-CSRF-Token: ${csrf}")" == 204 ]] || die "sign-out with the csrf token failed"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me")" == 401 ]] \
+  || die "still signed in after sign-out"
+check "sign-out requires the csrf token and ends the session"
 
 # --- fleet: every agent checks in with its controller's full key set ---
 fleet=""

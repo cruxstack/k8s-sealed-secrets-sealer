@@ -2,6 +2,15 @@
 
 # Release images. Build one with --target control-plane or --target agent.
 
+# The web UI is plain static files, so it builds once on the build machine's
+# platform. Install scripts stay disabled.
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine3.24@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY web ./
+RUN npm run build
+
 # The builder runs on the build machine's platform and cross-compiles for
 # the target platform, so multi-platform builds need no emulation.
 FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS builder
@@ -13,6 +22,8 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
+# the control plane embeds the UI build
+COPY --from=web /src/internal/webui/dist/app ./internal/webui/dist/app
 
 ARG TARGETOS
 ARG TARGETARCH

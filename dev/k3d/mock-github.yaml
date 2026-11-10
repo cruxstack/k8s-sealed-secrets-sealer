@@ -1,0 +1,76 @@
+# The GitHub mock for local sign-in (cmd/mock-github). Its client ID and
+# secret are local-only values matching dev/values/control-plane.yaml and
+# dev/k3d/control-plane-secret.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-github
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: github
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealer-emulator
+      app.kubernetes.io/component: github
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sealer-emulator
+        app.kubernetes.io/component: github
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: mock-github
+          image: local.invalid/sealer-mock-github:dev
+          env:
+            - name: MOCK_GITHUB_CLIENT_ID
+              value: local-client-id
+            - name: MOCK_GITHUB_CLIENT_SECRET
+              value: local-only-client-secret
+            - name: MOCK_GITHUB_ORG
+              value: example-org
+            # the control plane's callback; Tilt sets it from the stack's port
+            - name: MOCK_GITHUB_CALLBACK_URLS
+              value: http://localhost:4100/api/v1/auth/callback
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-github
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: github
+spec:
+  selector:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: github
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

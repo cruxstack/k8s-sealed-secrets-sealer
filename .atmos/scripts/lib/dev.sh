@@ -11,6 +11,7 @@ export SEALER_TILT_PORT="${SEALER_TILT_PORT:-10350}"
 export SEALER_CONTROL_PLANE_PORT="${SEALER_CONTROL_PLANE_PORT:-4100}"
 export SEALER_DYNAMODB_PORT="${SEALER_DYNAMODB_PORT:-4102}"
 export SEALER_KMS_PORT="${SEALER_KMS_PORT:-4103}"
+export SEALER_GITHUB_PORT="${SEALER_GITHUB_PORT:-4104}"
 
 # The upstream sealed-secrets chart, verified against the checksum of the
 # release asset before use.
@@ -92,12 +93,19 @@ pull_charts() {
   rm -rf "$tmp"
 }
 
+# Builds the web UI into internal/webui/dist/app, where the control plane
+# binary embeds it, with the pinned Node (installing it and the lockfile's
+# dependencies on first use, install scripts disabled).
+build_web() {
+  bash .atmos/scripts/web/npm.sh run build >&2
+}
+
 # Builds Linux binaries for the k3d nodes, which share the Docker host's
 # architecture. Tilt wraps them in images (dev/docker/Dockerfile).
 build_binaries() {
   local goarch="${SEALER_GOARCH:-$(go env GOARCH)}" bin
   mkdir -p "$BUILD_DIR"
-  for bin in server agent; do
+  for bin in server agent mock-github; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
       go build -trimpath -o "${BUILD_DIR}/${bin}" "./cmd/${bin}"
   done

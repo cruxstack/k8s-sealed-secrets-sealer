@@ -17,6 +17,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
 
 // LoginVerifier checks the identity in an agent's login request.
@@ -36,6 +37,12 @@ type Options struct {
 	Store    store.Store
 	// AdminToken enables the admin API. Empty disables it.
 	AdminToken string
+	// Users signs people in and enables the user API. Nil disables both.
+	Users *userauth.Handler
+	// WebUI serves the web UI at /. Nil serves nothing there.
+	WebUI http.Handler
+	// HSTS sets Strict-Transport-Security, for deployments served over https.
+	HSTS bool
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -51,6 +58,9 @@ type Server struct {
 	sessions   *agentauth.Sessions
 	store      store.Store
 	adminToken string
+	users      *userauth.Handler
+	webUI      http.Handler
+	hsts       bool
 	now        func() time.Time
 
 	// knownKeys caches fingerprints already recorded, so repeated check-ins
@@ -78,6 +88,9 @@ func New(opts Options) *Server {
 		sessions:   opts.Sessions,
 		store:      opts.Store,
 		adminToken: opts.AdminToken,
+		users:      opts.Users,
+		webUI:      opts.WebUI,
+		hsts:       opts.HSTS,
 		now:        now,
 		knownKeys:  map[string]bool{},
 	}
@@ -93,13 +106,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /agent/v1/checkin", s.requireAgent(s.agentCheckIn))
 
 	if s.adminToken != "" {
-		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.adminFleet))
+		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.fleet))
 	}
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "not found")
-	})
-	return mux
+	if u := s.users; u != nil {
+		mux.HandleFunc("GET /api/v1/auth/login", u.Login)
+		mux.HandleFunc("GET /api/v1/auth/callback", u.Callback)
+		mux.HandleFunc("GET /api/v1/auth/me", u.Me)
+		mux.HandleFunc("POST /api/v1/auth/logout", u.RequireUser(u.RequireCSRF(u.Logout)))
+		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(s.fleet))
+	}
+
+	notFound := func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") }
+	mux.HandleFunc("/api/", notFound)
+	mux.HandleFunc("/agent/", notFound)
+	if s.webUI != nil {
+		mux.Handle("/", s.webUI)
+	} else {
+		mux.HandleFunc("/", notFound)
+	}
+	return httpserver.SecurityHeaders(s.hsts)(mux)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

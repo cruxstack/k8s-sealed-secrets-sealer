@@ -16,11 +16,15 @@ func env(vars map[string]string) lookupFunc {
 
 func controlPlaneEnv(extra map[string]string) map[string]string {
 	vars := map[string]string{
-		"APP_ENV_NAME":          "dev",
-		"APP_PUBLIC_URL":        "https://sealer.dev.example.com/",
-		"APP_REGISTRY_FILE":     "/etc/sealer/registry.yaml",
-		"APP_AGENT_SESSION_KEY": strings.Repeat("k", 32),
-		"APP_DYNAMODB_TABLE":    "sealer",
+		"APP_ENV_NAME":                   "dev",
+		"APP_PUBLIC_URL":                 "https://sealer.dev.example.com/",
+		"APP_REGISTRY_FILE":              "/etc/sealer/registry.yaml",
+		"APP_AGENT_SESSION_KEY":          strings.Repeat("k", 32),
+		"APP_DYNAMODB_TABLE":             "sealer",
+		"APP_GITHUB_ORG":                 "example-org",
+		"APP_GITHUB_OAUTH_CLIENT_ID":     "client-id",
+		"APP_GITHUB_OAUTH_CLIENT_SECRET": "client-secret",
+		"APP_USER_SESSION_KEY":           strings.Repeat("u", 32),
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -170,5 +174,44 @@ func TestLoadControlPlane_STSHosts(t *testing.T) {
 	}
 	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_AWS_STS_HOSTS": "https://sts.amazonaws.com/"}))); err == nil {
 		t.Fatal("a URL was accepted as a host")
+	}
+}
+
+func TestLoadControlPlane_GitHub(t *testing.T) {
+	cfg, err := loadControlPlane(env(controlPlaneEnv(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubURL != "https://github.com" || cfg.GitHubAPIURL != "https://api.github.com" ||
+		cfg.GitHubOAuthTokenURL != "https://github.com/login/oauth/access_token" || cfg.UserSessionTTL != 8*time.Hour {
+		t.Errorf("defaults = %+v", cfg)
+	}
+
+	local := controlPlaneEnv(map[string]string{
+		"APP_GITHUB_URL":             "http://localhost:4104",
+		"APP_GITHUB_API_URL":         "http://mock-github:8080",
+		"APP_GITHUB_OAUTH_TOKEN_URL": "http://mock-github:8080/login/oauth/access_token",
+		"APP_GITHUB_ALLOWED_TEAMS":   "sealers, admins",
+	})
+	if _, err := loadControlPlane(env(local)); err == nil || !strings.Contains(err.Error(), "APP_GITHUB_URL must be an absolute https URL") {
+		t.Fatalf("http github accepted without the insecure flag: %v", err)
+	}
+	local["APP_ALLOW_INSECURE_GITHUB"] = "true"
+	cfg, err = loadControlPlane(env(local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.GitHubAllowedTeams) != 2 || cfg.GitHubAllowedTeams[1] != "admins" {
+		t.Errorf("teams = %v", cfg.GitHubAllowedTeams)
+	}
+
+	missing := controlPlaneEnv(nil)
+	delete(missing, "APP_GITHUB_OAUTH_CLIENT_SECRET")
+	missing["APP_USER_SESSION_KEY"] = "short"
+	_, err = loadControlPlane(env(missing))
+	for _, want := range []string{"APP_GITHUB_OAUTH_CLIENT_SECRET is required", "APP_USER_SESSION_KEY must be at least 32 bytes"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
 	}
 }

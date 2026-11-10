@@ -35,8 +35,10 @@ commands:
             command: |
               set -euo pipefail
               atmos check all
+              atmos web check
               atmos test unit
               atmos test integration
+              atmos web test
               if [[ "${VERIFY_FAST:-}" != "true" ]]; then
                 atmos test e2e
               fi

@@ -10,7 +10,7 @@ controlPlane:
   allowInsecure: true
 
 identity:
-  # the control plane's publicURL in dev/values/control-plane.yaml
+  # Tilt sets it to the control plane's publicURL for this stack
   audience: http://localhost:4100
 
 capabilities:

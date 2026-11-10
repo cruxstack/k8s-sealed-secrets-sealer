@@ -6,8 +6,20 @@ image:
   tag: dev
 
 env: dev
-# the local stack's canonical URL; agents' login tokens carry it as audience
+# Tilt sets publicURL and github.url to this stack's localhost ports, so the
+# OAuth redirects work for worktree and e2e stacks too
 publicURL: http://localhost:4100
+
+# the GitHub mock (dev/k3d/mock-github.yaml): alice may sign in, bob is not
+# in the allowed team, carol is not in the org
+github:
+  org: example-org
+  allowedTeams: [sealers]
+  oauthClientID: local-client-id
+  url: http://localhost:4104
+  apiURL: http://mock-github.sealer-system.svc.cluster.local:8080
+  oauthTokenURL: http://mock-github.sealer-system.svc.cluster.local:8080/login/oauth/access_token
+  allowInsecure: true
 
 registry:
   configMapName: sealer-registry

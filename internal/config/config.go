@@ -77,6 +77,22 @@ type ControlPlane struct {
 	// AWSSTSHosts, when set, replaces the default STS hosts agents' signed
 	// login requests may target.
 	AWSSTSHosts []string
+
+	// GitHub sign-in. GitHubURL is the web host (the authorize page users
+	// are sent to); GitHubAPIURL and GitHubOAuthTokenURL are called by the
+	// control plane. AllowInsecureGitHub permits http, for local mocks only.
+	GitHubURL               string
+	GitHubAPIURL            string
+	GitHubOAuthTokenURL     string
+	AllowInsecureGitHub     bool
+	GitHubOrg               string
+	GitHubAllowedTeams      []string
+	GitHubOAuthClientID     string
+	GitHubOAuthClientSecret string
+	// UserSessionKey signs user session cookies; UserSessionTTL is their
+	// lifetime.
+	UserSessionKey []byte
+	UserSessionTTL time.Duration
 }
 
 // Agent is the agent's configuration.
@@ -145,6 +161,30 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		DynamoDBCreateTable: r.boolean("APP_DYNAMODB_CREATE_TABLE", false),
 	}
 	cfg.AgentAudience = r.str("APP_AGENT_AUDIENCE", cfg.PublicURL)
+
+	cfg.AllowInsecureGitHub = r.boolean("APP_ALLOW_INSECURE_GITHUB", false)
+	cfg.GitHubURL = r.url("APP_GITHUB_URL", cfg.AllowInsecureGitHub)
+	if cfg.GitHubURL == "" {
+		cfg.GitHubURL = "https://github.com"
+	}
+	cfg.GitHubAPIURL = r.url("APP_GITHUB_API_URL", cfg.AllowInsecureGitHub)
+	if cfg.GitHubAPIURL == "" {
+		cfg.GitHubAPIURL = "https://api.github.com"
+	}
+	cfg.GitHubOAuthTokenURL = r.url("APP_GITHUB_OAUTH_TOKEN_URL", cfg.AllowInsecureGitHub)
+	if cfg.GitHubOAuthTokenURL == "" {
+		cfg.GitHubOAuthTokenURL = cfg.GitHubURL + "/login/oauth/access_token"
+	}
+	cfg.GitHubOrg = r.required(r.str("APP_GITHUB_ORG", ""), "APP_GITHUB_ORG")
+	for _, team := range strings.Split(r.str("APP_GITHUB_ALLOWED_TEAMS", ""), ",") {
+		if team = strings.TrimSpace(team); team != "" {
+			cfg.GitHubAllowedTeams = append(cfg.GitHubAllowedTeams, team)
+		}
+	}
+	cfg.GitHubOAuthClientID = r.required(r.str("APP_GITHUB_OAUTH_CLIENT_ID", ""), "APP_GITHUB_OAUTH_CLIENT_ID")
+	cfg.GitHubOAuthClientSecret = r.secret("APP_GITHUB_OAUTH_CLIENT_SECRET", 1, true)
+	cfg.UserSessionKey = []byte(r.secret("APP_USER_SESSION_KEY", MinSessionKeyBytes, true))
+	cfg.UserSessionTTL = r.duration("APP_USER_SESSION_TTL", 8*time.Hour, 15*time.Minute, 24*time.Hour)
 	for _, h := range strings.Split(r.str("APP_AWS_STS_HOSTS", ""), ",") {
 		if h = strings.TrimSpace(h); h == "" {
 			continue

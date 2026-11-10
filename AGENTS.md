@@ -21,6 +21,10 @@
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time
+  - `internal/userauth/` - GitHub OAuth sign-in (org and team checks), user session cookies, CSRF
+  - `internal/webui/` - serves the web UI embedded from `internal/webui/dist/app` (built by `atmos web build`)
+  - `internal/mockgithub/`, `cmd/mock-github/` - GitHub OAuth mock for tests and the local stack; never released
+- **Web UI**: `web/` (React, Vite, TanStack Router and Query, shadcn/ui). `atmos web check|test|build|dev`.
 - **Deploy**: `deploy/helm/agent` and `deploy/helm/control-plane`. AWS infrastructure lives in the separate `terraform-aws-k8s-sealed-secrets-sealer` repository.
 
 ## Build & Test
@@ -39,6 +43,29 @@ Atmos is the task runner; every command installs its pinned tools into `.tools/`
 - Use `atmos dev agent down` when the work is finished. Do not run `atmos dev agent destroy` or `atmos dev destroy` without an explicit request; they delete clusters and every sealing key in them.
 - `atmos test e2e` is already isolated from the development stacks.
 
+## UI pull requests
+
+Follow [UI conventions](docs/ui-conventions.md) when adding or changing console
+tables, toolbars, row details, and buttons.
+
+Every pull request with UI changes must include screenshots embedded in the PR
+description. Capture the affected screens from the local, worktree-isolated
+stack created with `atmos dev agent`, using local mocks and anonymized data.
+Capture desktop screenshots in the light theme at 1440×1100 by default; use a
+taller viewport when needed for the specific screen. Do not capture narrow or
+dark-theme layouts unless the PR specifically addresses dark-mode issues. Add
+concise captions explaining what each screenshot demonstrates.
+
+Commit screenshots under `docs/screenshots/<pr-number>/` and embed them with
+commit-pinned, private-repository-safe GitHub URLs:
+
+```md
+![Description](https://github.com/cruxstack/k8s-sealed-secrets-sealer/blob/<commit-sha>/docs/screenshots/<pr-number>/<image>.png?raw=true)
+```
+
+Do not link directly to `raw.githubusercontent.com`. The `blob` URL lets GitHub
+provide the authenticated, short-lived download token for private images.
+
 ## Code Style
 - **Imports**: stdlib, blank line, third-party, blank line, local (`github.com/cruxstack/k8s-sealed-secrets-sealer/...`); `atmos check fmt --write` enforces it
 - **Naming**: `PascalCase` exports, `camelCase` private
@@ -47,7 +74,7 @@ Atmos is the task runner; every command installs its pinned tools into `.tools/`
 - **Logging**: `log/slog` with key-value pairs and snake_case keys, `*Context` methods where a context exists. Operational events carry an `event` key (e.g. `controller.key_active`) so they can be alerted on; see `docs/design.md` for the list.
 
 ## Configuration
-- All variables are read in `internal/config`; nothing else reads the environment
+- All variables are read in `internal/config`; nothing else reads the environment (dev-only tools such as `cmd/mock-github` excepted)
 - Settings use the `APP_` prefix
 - Validate at load time and report every problem at once; invalid configuration is an error, never a silent default
 
