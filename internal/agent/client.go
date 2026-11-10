@@ -194,6 +194,10 @@ func (c *Client) do(ctx context.Context, method, path, session string, in, out a
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("User-Agent", c.userAgent)
+	// a control plane serving several envs sends the request to this one
+	if c.env != "" {
+		req.Header.Set(protocol.EnvHeader, c.env)
+	}
 	if session != "" {
 		req.Header.Set("Authorization", "Bearer "+session)
 	}

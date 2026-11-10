@@ -74,18 +74,25 @@ spec:
               value: {{ .Values.log.level | quote }}
             - name: APP_LOG_FORMAT
               value: {{ .Values.log.format | quote }}
+            {{- if .Values.envs }}
+            - name: APP_ENVS
+              value: {{ include "sealer.envs" . | quote }}
+            {{- else }}
             - name: APP_ENV_NAME
-              value: {{ required "env is required" .Values.env | quote }}
+              value: {{ required "env (or envs) is required" .Values.env | quote }}
+            - name: APP_REGISTRY_FILE
+              value: /etc/k8s-sealed-secrets-sealer/registry.yaml
+            - name: APP_DYNAMODB_TABLE
+              value: {{ required "dynamodb.table is required" .Values.dynamodb.table | quote }}
+            - name: APP_KMS_TRANSIT_KEY_ID
+              value: {{ required "kms.transitKeyId is required" .Values.kms.transitKeyId | quote }}
+            {{- end }}
             - name: APP_PUBLIC_URL
               value: {{ required "publicURL is required" .Values.publicURL | quote }}
             {{- with .Values.agentAudience }}
             - name: APP_AGENT_AUDIENCE
               value: {{ . | quote }}
             {{- end }}
-            - name: APP_REGISTRY_FILE
-              value: /etc/k8s-sealed-secrets-sealer/registry.yaml
-            - name: APP_DYNAMODB_TABLE
-              value: {{ required "dynamodb.table is required" .Values.dynamodb.table | quote }}
             {{- with .Values.dynamodb.endpoint }}
             - name: APP_DYNAMODB_ENDPOINT
               value: {{ . | quote }}
@@ -98,8 +105,6 @@ spec:
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}
-            - name: APP_KMS_TRANSIT_KEY_ID
-              value: {{ required "kms.transitKeyId is required" .Values.kms.transitKeyId | quote }}
             {{- with .Values.kms.region }}
             - name: APP_KMS_REGION
               value: {{ . | quote }}

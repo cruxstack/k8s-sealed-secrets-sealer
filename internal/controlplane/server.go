@@ -19,7 +19,6 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
-	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
 
 // LoginVerifier checks the identity in an agent's login request.
@@ -27,7 +26,20 @@ type LoginVerifier interface {
 	VerifyLogin(ctx context.Context, req protocol.SessionRequest) (*registry.Agent, error)
 }
 
-// Options configures a Server.
+// UserGuard admits people to one env's user API (userauth.EnvGuard).
+type UserGuard interface {
+	// RequireUser rejects requests without a session that grants the env,
+	// and puts the user, as the env sees them, in the request context.
+	RequireUser(http.HandlerFunc) http.HandlerFunc
+	// RequireCSRF rejects state-changing requests without the session's
+	// CSRF token.
+	RequireCSRF(http.HandlerFunc) http.HandlerFunc
+	// RequireAdmin rejects users who do not administer the env.
+	RequireAdmin(http.HandlerFunc) http.HandlerFunc
+}
+
+// Options configures a Server: one env's control plane. A Host serves one
+// or more of them, with sign-in and the web UI.
 type Options struct {
 	Logger   *slog.Logger
 	Version  string
@@ -39,8 +51,9 @@ type Options struct {
 	Store    store.Store
 	// AdminToken enables the admin API. Empty disables it.
 	AdminToken string
-	// Users signs people in and enables the user API. Nil disables both.
-	Users *userauth.Handler
+	// Users admits people to the env's user API; nil disables it. Signing
+	// in is the Host's.
+	Users UserGuard
 	// Repos gives signed-in users access to repositories; nil disables the
 	// repository API.
 	Repos *repos.Service
@@ -49,8 +62,6 @@ type Options struct {
 	// Sealing needs both Repos and Transit.
 	Transit      envelope.DataKeyGenerator
 	TransitKeyID string
-	// WebUI serves the web UI at /. Nil serves nothing there.
-	WebUI http.Handler
 	// HSTS sets Strict-Transport-Security, for deployments served over https.
 	HSTS bool
 	// KeyRenewPeriod is the period renewal.enable.v1 sets when no cluster
@@ -80,11 +91,10 @@ type Server struct {
 	sessions   *agentauth.Sessions
 	store      store.Store
 	adminToken string
-	users      *userauth.Handler
+	users      UserGuard
 	repos      *repos.Service
 	transit    envelope.DataKeyGenerator
 	transitKey string
-	webUI      http.Handler
 	hsts       bool
 	now        func() time.Time
 
@@ -130,7 +140,6 @@ func New(opts Options) *Server {
 		repos:      opts.Repos,
 		transit:    opts.Transit,
 		transitKey: opts.TransitKeyID,
-		webUI:      opts.WebUI,
 		hsts:       opts.HSTS,
 		now:        now,
 
@@ -159,10 +168,6 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	if u := s.users; u != nil {
-		mux.HandleFunc("GET /api/v1/auth/login", u.Login)
-		mux.HandleFunc("GET /api/v1/auth/callback", u.Callback)
-		mux.HandleFunc("GET /api/v1/auth/me", u.Me)
-		mux.HandleFunc("POST /api/v1/auth/logout", u.RequireUser(u.RequireCSRF(u.Logout)))
 		// the fleet is for admins; everyone sees whether sealing works
 		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(u.RequireAdmin(s.fleet)))
 		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
@@ -188,11 +193,7 @@ func (s *Server) Handler() http.Handler {
 	notFound := func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") }
 	mux.HandleFunc("/api/", notFound)
 	mux.HandleFunc("/agent/", notFound)
-	if s.webUI != nil {
-		mux.Handle("/", s.webUI)
-	} else {
-		mux.HandleFunc("/", notFound)
-	}
+	mux.HandleFunc("/", notFound)
 	return httpserver.SecurityHeaders(s.hsts)(mux)
 }
 

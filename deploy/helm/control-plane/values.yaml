@@ -8,8 +8,27 @@ image:
 
 replicaCount: 1
 
-# the env this control plane serves, e.g. "dev" (required)
+# the env this control plane serves, e.g. "dev" (required, unless envs is set)
 env: ""
+
+# Several envs on one URL, instead of env: each with its own table, transit
+# key, registry and teams; the rest of the settings here are shared. People
+# sign in once for all of them and switch in the UI; agents name their env.
+# For example:
+#   envs:
+#     - name: dev
+#       dynamodbTable: sealer-dev
+#       kmsTransitKeyId: arn:aws:kms:us-east-2:111111111111:key/mrk-...
+#     - name: prod
+#       dynamodbTable: sealer-prod
+#       kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
+#       allowedTeams: [prod-sealers]
+#       adminTeams: [platform]
+# An env reads its registry from registry-<name>.yaml in the registry
+# ConfigMap unless it sets registryFile or registry. Each may also set
+# kmsRegion, envAnnotation, regionAnnotation, discoveryFileGlobs and
+# keyRenewPeriod; teams it sets replace github.allowedTeams and adminTeams.
+envs: []
 # the control plane's external URL (required); also the audience agent login
 # tokens must carry unless agentAudience is set
 publicURL: ""
@@ -74,7 +93,8 @@ keyRenewPeriod: 720h
 # never decrypt. Each agent's role may decrypt only with its own agent_id in
 # the encryption context.
 kms:
-  # key ID, ARN or alias (required)
+  # key ID, ARN or alias (required, unless envs is set); a key in another
+  # account is named by its ARN, whose region is then the one called
   transitKeyId: ""
   # region of the KMS endpoint; empty uses aws.region or the AWS SDK's
   region: ""
@@ -82,7 +102,7 @@ kms:
   endpoint: ""
 
 dynamodb:
-  # (required)
+  # (required, unless envs is set)
   table: ""
   # local emulators only
   endpoint: ""

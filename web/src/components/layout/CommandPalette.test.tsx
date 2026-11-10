@@ -81,7 +81,7 @@ describe("command palette", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
-        "/secrets/example-org/platform",
+        "/dev/secrets/example-org/platform",
       ),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -96,7 +96,9 @@ describe("command palette", () => {
     );
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("option", { name: /^fleet/i }));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/fleet"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/dev/fleet"),
+    );
   });
 
   it("offers the fleet to admins only", async () => {

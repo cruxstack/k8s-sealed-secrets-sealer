@@ -15,6 +15,22 @@ export function setCsrfToken(token: string | null) {
 }
 
 // ---------------------------------------------------------------------------
+// Env
+// ---------------------------------------------------------------------------
+
+// The env the page is in, from its path. Every API call but signing in is
+// about one env, under /api/v1/envs/{env}/.
+let apiEnv: string | null = null;
+
+export function setApiEnv(env: string | null) {
+  apiEnv = env;
+}
+
+export function currentApiEnv(): string | null {
+  return apiEnv;
+}
+
+// ---------------------------------------------------------------------------
 // Navigation (indirect so tests can observe it; jsdom cannot navigate)
 // ---------------------------------------------------------------------------
 
@@ -136,6 +152,9 @@ const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use((config) => {
+  if (apiEnv && config.url && !config.url.startsWith("/auth/")) {
+    config.url = `/envs/${encodeURIComponent(apiEnv)}${config.url}`;
+  }
   const method = (config.method ?? "GET").toUpperCase();
   if (!SAFE_METHODS.has(method) && csrfToken) {
     config.headers.set("X-CSRF-Token", csrfToken);

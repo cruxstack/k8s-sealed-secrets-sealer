@@ -31,6 +31,19 @@ validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-eas
   --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token \
   --set github.installationID=777 --set 'discovery.fileGlobs={*.sealed.yaml,secrets/*/*.yaml}' \
   --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080
+# several envs on one URL: APP_ENVS instead of the one env's settings
+envs=(--set publicURL=https://sealer.example.com --set registry.configMapName=sealer-registry
+  --set existingSecret=sealer --set github.org=example-org --set github.oauthClientID=client-id
+  --set github.appID=12345
+  --set 'envs[0].name=dev' --set 'envs[0].dynamodbTable=sealer-dev' --set 'envs[0].kmsTransitKeyId=alias/dev'
+  --set 'envs[1].name=prod' --set 'envs[1].dynamodbTable=sealer-prod' --set 'envs[1].kmsTransitKeyId=alias/prod'
+  --set 'envs[1].allowedTeams={prod-sealers}')
+validate deploy/helm/control-plane "${envs[@]}"
+rendered="$(helm template check deploy/helm/control-plane "${envs[@]}")"
+if ! grep -q 'name: APP_ENVS' <<<"$rendered" || grep -qE 'name: APP_(ENV_NAME|DYNAMODB_TABLE|KMS_TRANSIT_KEY_ID)$' <<<"$rendered"; then
+  echo "Error: the control plane chart does not render envs as APP_ENVS alone" >&2
+  exit 1
+fi
 validate deploy/helm/agent "${agent[@]}"
 validate deploy/helm/agent "${agent[@]}" --set capabilities.keys=true --set capabilities.renewal=true \
   --set kms.escrowKeyId=alias/sealer-escrow --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080

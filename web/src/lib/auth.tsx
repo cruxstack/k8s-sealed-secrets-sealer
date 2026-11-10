@@ -1,18 +1,19 @@
 import { createContext, useContext, type ReactNode } from "react";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { authMeQueryOptions } from "@/api/queries/auth";
-import type { AuthUser, MeResponse } from "@/api/types";
+import type { AuthUser, EnvAccess, MeResponse } from "@/api/types";
 
 interface AuthContextValue {
   user: AuthUser | null;
-  env: string | null;
+  /** The envs the user may use. */
+  envs: EnvAccess[];
   isLoading: boolean;
   isAuthenticated: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue>({
   user: null,
-  env: null,
+  envs: [],
   isLoading: true,
   isAuthenticated: false,
 });
@@ -22,7 +23,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value: AuthContextValue = {
     user: isError ? null : (data?.user ?? null),
-    env: isError ? null : (data?.env ?? null),
+    envs: isError ? [] : (data?.envs ?? []),
     isLoading,
     isAuthenticated: !isError && !!data?.user,
   };

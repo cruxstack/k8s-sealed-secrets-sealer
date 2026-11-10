@@ -1,35 +1,18 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { RepoWorkspace } from "@/components/repos/RepoWorkspace";
-import { requireSignedIn, SignedInPage } from "@/lib/require-auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { homeEnv } from "@/lib/require-auth";
+import { repoSearch } from "./$env.secrets.$owner.$repo";
 
-export interface RepoSearch {
-  /** The chosen file's path. */
-  file?: string;
-}
-
+// pages are under their env now; links from before go to the first env
+// and keep their file
 export const Route = createFileRoute("/secrets/$owner/$repo")({
-  validateSearch: (search: Record<string, unknown>): RepoSearch =>
-    typeof search.file === "string" && search.file !== ""
-      ? { file: search.file }
-      : {},
-  beforeLoad: requireSignedIn,
-  component: RepoPage,
+  validateSearch: repoSearch,
+  beforeLoad: async (opts) => {
+    const env = await homeEnv(opts);
+    throw redirect({
+      to: "/$env/secrets/$owner/$repo",
+      params: { env, ...opts.params },
+      search: opts.search,
+      replace: true,
+    });
+  },
 });
-
-function RepoPage() {
-  const { owner, repo } = Route.useParams();
-  const { file } = Route.useSearch();
-  const navigate = Route.useNavigate();
-  return (
-    <SignedInPage>
-      <RepoWorkspace
-        owner={owner}
-        repo={repo}
-        selected={file}
-        onSelect={(path) =>
-          void navigate({ search: { file: path }, replace: true })
-        }
-      />
-    </SignedInPage>
-  );
-}

@@ -55,8 +55,8 @@ function LoginPage() {
           <div className="text-center">
             <h1 className="text-2xl font-bold tracking-tight">Sealer</h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              Sign in with your GitHub account to seal secrets for this
-              environment.
+              Sign in with your GitHub account to seal secrets for the envs your
+              teams may use.
             </p>
           </div>
         </div>

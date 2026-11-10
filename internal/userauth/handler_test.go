@@ -27,7 +27,14 @@ type flow struct {
 	cookies map[string]*http.Cookie
 }
 
+// newFlow serves sign-in for a dev env limited to teams (any org member
+// without them).
 func newFlow(t *testing.T, publicURL string, teams ...string) *flow {
+	t.Helper()
+	return newEnvsFlow(t, publicURL, EnvPolicy{Name: "dev", Teams: teams})
+}
+
+func newEnvsFlow(t *testing.T, publicURL string, envs ...EnvPolicy) *flow {
 	t.Helper()
 	gh := httptest.NewServer(mockgithub.New(mockgithub.Options{
 		ClientID: "cid", ClientSecret: "csecret", Org: "example-org", Users: mockgithub.DefaultUsers(),
@@ -35,7 +42,7 @@ func newFlow(t *testing.T, publicURL string, teams ...string) *flow {
 	}).Handler())
 	t.Cleanup(gh.Close)
 
-	sessions, err := NewSessions([]byte(testKey), publicURL, "dev", 8*time.Hour, nil)
+	sessions, err := NewSessions([]byte(testKey), publicURL, 8*time.Hour, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,9 +52,8 @@ func newFlow(t *testing.T, publicURL string, teams ...string) *flow {
 		PublicURL:    publicURL,
 		AuthorizeURL: gh.URL + "/login/oauth/authorize",
 		ClientID:     "cid",
-		Env:          "dev",
 		Org:          "example-org",
-		Teams:        teams,
+		Envs:         envs,
 		Logger:       slog.New(slog.DiscardHandler),
 	})
 	mux := http.NewServeMux()
@@ -55,6 +61,16 @@ func newFlow(t *testing.T, publicURL string, teams ...string) *flow {
 	mux.HandleFunc("GET /api/v1/auth/callback", h.Callback)
 	mux.HandleFunc("GET /api/v1/auth/me", h.Me)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.RequireUser(h.RequireCSRF(h.Logout)))
+	// an env's route answers with the user as that env sees them
+	for _, env := range envs {
+		g := h.Env(env.Name)
+		mux.HandleFunc("GET /api/v1/envs/"+env.Name+"/whoami", g.RequireUser(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, UserFrom(r.Context()))
+		}))
+		mux.HandleFunc("GET /api/v1/envs/"+env.Name+"/fleet", g.RequireUser(g.RequireAdmin(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	}
 	return &flow{t: t, gh: gh, h: h, mux: mux, cookies: map[string]*http.Cookie{}}
 }
 
@@ -136,7 +152,8 @@ func TestSignIn_MemberOfAllowedTeam(t *testing.T) {
 		t.Fatalf("/me = %d", status)
 	}
 	user := body["user"].(map[string]any)
-	if user["login"] != "alice" || body["env"] != "dev" || body["csrf_token"] == "" {
+	envs, _ := json.Marshal(body["envs"])
+	if user["login"] != "alice" || string(envs) != `[{"admin":false,"name":"dev"}]` || body["csrf_token"] == "" {
 		t.Fatalf("/me = %v", body)
 	}
 	session := f.cookies["sealer_session"]
@@ -210,64 +227,103 @@ func TestSecureCookiesOnHTTPS(t *testing.T) {
 
 func TestSessions_Rejects(t *testing.T) {
 	now := time.Now()
-	s, _ := NewSessions([]byte(testKey), "https://sealer.dev.example.com", "dev", time.Hour, func() time.Time { return now })
-	good, _, err := s.Issue(User{ID: 1, Login: "alice"})
+	s, _ := NewSessions([]byte(testKey), "https://sealer.example.com", time.Hour, func() time.Time { return now })
+	good, _, err := s.Issue(User{ID: 1, Login: "alice"}, Grants{"dev": false, "prod": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u, err := s.Verify(good); err != nil || u.Login != "alice" {
-		t.Fatalf("Verify = %v, %v", u, err)
+	if u, grants, err := s.Verify(good); err != nil || u.Login != "alice" || len(grants) != 2 || !grants["prod"] || u.Admin {
+		t.Fatalf("Verify = %v, %v, %v", u, grants, err)
+	}
+	if _, _, err := s.Issue(User{ID: 1, Login: "alice"}, nil); err == nil {
+		t.Error("a session granting no env was issued")
 	}
 
-	later, _ := NewSessions([]byte(testKey), "https://sealer.dev.example.com", "dev", time.Hour, func() time.Time { return now.Add(2 * time.Hour) })
-	otherEnv, _ := NewSessions([]byte(testKey), "https://sealer.dev.example.com", "prod", time.Hour, nil)
-	otherAud, _ := NewSessions([]byte(testKey), "https://sealer.prod.example.com", "dev", time.Hour, nil)
-	none, _ := jwt.NewWithClaims(jwt.SigningMethodNone, claims{Env: "dev", GitHubID: 1, RegisteredClaims: jwt.RegisteredClaims{
-		Issuer: sessionIssuer, Subject: "alice", Audience: jwt.ClaimStrings{"https://sealer.dev.example.com"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+	later, _ := NewSessions([]byte(testKey), "https://sealer.example.com", time.Hour, func() time.Time { return now.Add(2 * time.Hour) })
+	otherAud, _ := NewSessions([]byte(testKey), "https://sealer.other.example.com", time.Hour, nil)
+	none, _ := jwt.NewWithClaims(jwt.SigningMethodNone, claims{Envs: Grants{"dev": true}, GitHubID: 1, RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: sessionIssuer, Subject: "alice", Audience: jwt.ClaimStrings{"https://sealer.example.com"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 	}}).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	noEnvs, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{GitHubID: 1, RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: sessionIssuer, Subject: "alice", Audience: jwt.ClaimStrings{"https://sealer.example.com"},
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+	}}).SignedString([]byte(testKey))
 
 	for name, tc := range map[string]struct {
 		s     *Sessions
 		token string
 	}{
 		"expired":        {later, good},
-		"other env":      {otherEnv, good},
+		"no envs":        {s, noEnvs},
 		"other audience": {otherAud, good},
 		"alg none":       {s, none},
 		"tampered":       {s, good[:len(good)-2] + "xx"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := tc.s.Verify(tc.token); !errors.Is(err, ErrUnauthorized) {
+			if _, _, err := tc.s.Verify(tc.token); !errors.Is(err, ErrUnauthorized) {
 				t.Fatalf("Verify = %v", err)
 			}
 		})
 	}
-	if _, err := NewSessions([]byte("short"), "https://x", "dev", time.Hour, nil); err == nil {
+	if _, err := NewSessions([]byte("short"), "https://x", time.Hour, nil); err == nil {
 		t.Error("a short key was accepted")
 	}
-	other, _, _ := s.Issue(User{ID: 2, Login: "bob"})
+	other, _, _ := s.Issue(User{ID: 2, Login: "bob"}, Grants{"dev": false})
 	if s.CSRFToken(good) == s.CSRFToken(other) {
 		t.Error("two sessions share a csrf token")
 	}
 }
 
 func TestSignIn_AdminTeams(t *testing.T) {
-	for login, want := range map[string]bool{"alice": true, "dave": false} {
-		f := newFlow(t, "http://localhost:4100", "sealers")
-		f.h.opts.AdminTeams = []string{"sealer-admins"}
+	for login, want := range map[string]int{"alice": http.StatusNoContent, "dave": http.StatusForbidden} {
+		f := newEnvsFlow(t, "http://localhost:4100", EnvPolicy{Name: "dev", Teams: []string{"sealers"}, AdminTeams: []string{"sealer-admins"}})
 		f.signIn(login, "/")
-		status, body := f.me()
-		if status != http.StatusOK {
-			t.Fatalf("%s: /me = %d", login, status)
-		}
-		if got := body["user"].(map[string]any)["admin"]; got != want {
-			t.Errorf("%s: admin = %v, want %v", login, got, want)
+		if resp := f.do(http.MethodGet, "/api/v1/envs/dev/fleet", nil); resp.StatusCode != want {
+			t.Errorf("%s: an admin route = %d, want %d", login, resp.StatusCode, want)
 		}
 	}
 	// without admin teams nobody is an admin
 	f := newFlow(t, "http://localhost:4100", "sealers")
 	f.signIn("alice", "/")
-	if _, body := f.me(); body["user"].(map[string]any)["admin"] != false {
-		t.Fatalf("admin without admin teams: %v", body)
+	if resp := f.do(http.MethodGet, "/api/v1/envs/dev/fleet", nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("admin without admin teams: %d", resp.StatusCode)
+	}
+}
+
+// Each env is granted, and administered, on its own teams; a session works
+// in the envs it grants and is refused in the rest.
+func TestSignIn_Envs(t *testing.T) {
+	envs := []EnvPolicy{
+		{Name: "dev", Teams: []string{"sealers"}, AdminTeams: []string{"sealer-admins"}},
+		{Name: "prod", Teams: []string{"sealer-admins"}, AdminTeams: []string{"sealer-admins"}},
+	}
+	for login, want := range map[string]string{
+		"alice": `[{"admin":true,"name":"dev"},{"admin":true,"name":"prod"}]`,
+		"dave":  `[{"admin":false,"name":"dev"}]`,
+	} {
+		t.Run(login, func(t *testing.T) {
+			f := newEnvsFlow(t, "http://localhost:4100", envs...)
+			f.signIn(login, "/")
+			_, body := f.me()
+			if got, _ := json.Marshal(body["envs"]); string(got) != want {
+				t.Fatalf("envs = %s, want %s", got, want)
+			}
+			prod := f.do(http.MethodGet, "/api/v1/envs/prod/whoami", nil)
+			dev := f.do(http.MethodGet, "/api/v1/envs/dev/whoami", nil)
+			if dev.StatusCode != http.StatusOK {
+				t.Fatalf("dev = %d", dev.StatusCode)
+			}
+			if login == "dave" && (prod.StatusCode != http.StatusForbidden || !strings.Contains(string(prod.Body), "may not use the prod env")) {
+				t.Fatalf("dave in prod = %d %s", prod.StatusCode, prod.Body)
+			}
+			if login == "alice" && (prod.StatusCode != http.StatusOK || !strings.Contains(string(prod.Body), `"admin":true`)) {
+				t.Fatalf("alice in prod = %d %s", prod.StatusCode, prod.Body)
+			}
+		})
+	}
+	// someone no env admits cannot sign in
+	f := newEnvsFlow(t, "http://localhost:4100", envs...)
+	if got := f.signIn("bob", "/"); got != "/login?error="+ErrCodeNotInTeam {
+		t.Fatalf("bob redirected to %q", got)
 	}
 }

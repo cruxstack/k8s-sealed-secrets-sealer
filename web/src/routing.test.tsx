@@ -10,7 +10,14 @@ import {
 import apiClient, { navigation } from "@/api/client";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { routeTree } from "@/routeTree.gen";
-import { ADMIN, ME, fakeApi, listing } from "@/test/fake-api";
+import {
+  ADMIN,
+  ME,
+  REPO_APPS,
+  TWO_ENVS,
+  fakeApi,
+  listing,
+} from "@/test/fake-api";
 
 function renderApp(path: string) {
   const queryClient = new QueryClient({
@@ -108,7 +115,7 @@ describe("auth routing", () => {
       await screen.findByRole("button", { name: /account menu for octocat/i }),
     ).toBeInTheDocument();
     await waitFor(() => expect(router.state.status).toBe("idle"));
-    expect(router.state.location.pathname).toBe("/secrets");
+    expect(router.state.location.pathname).toBe("/dev/secrets");
     expect(navigations()).toBeLessThanOrEqual(4);
     expect(
       screen.queryByRole("link", { name: /sign in with github/i }),
@@ -127,7 +134,9 @@ describe("auth routing", () => {
     await screen.findByRole("region", {
       name: "deploy/legacy/sealed-secret.yaml",
     });
-    expect(router.state.location.pathname).toBe("/secrets/example-org/apps");
+    expect(router.state.location.pathname).toBe(
+      "/dev/secrets/example-org/apps",
+    );
     expect(router.state.location.search).toEqual({
       file: "deploy/legacy/sealed-secret.yaml",
     });
@@ -154,5 +163,44 @@ describe("auth routing", () => {
     expect(
       screen.queryByText("The fleet is for admins"),
     ).not.toBeInTheDocument();
+  });
+
+  it("puts every page in an env, starting with the user's first", async () => {
+    const api = fakeApi({ me: TWO_ENVS, repos: [REPO_APPS] });
+    apiClient.defaults.adapter = api.adapter;
+    const { router } = renderApp("/");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/dev/secrets"),
+    );
+    await screen.findByRole("rowheader", { name: /example-org\/apps/ });
+    expect(api.calls.find((c) => c.url === "/repos")?.env).toBe("dev");
+
+    // another env loads its own data
+    await router.navigate({ to: "/$env/secrets", params: { env: "prod" } });
+    await screen.findByRole("button", {
+      name: /^Environment prod.*Switch environment$/,
+    });
+    await waitFor(() =>
+      expect(
+        api.calls.filter((c) => c.url === "/repos").map((c) => c.env),
+      ).toEqual(["dev", "prod"]),
+    );
+  });
+
+  it("says when the user may not use an env", async () => {
+    const api = fakeApi({ me: ME });
+    apiClient.defaults.adapter = api.adapter;
+    renderApp("/prod/secrets/example-org/apps");
+    expect(
+      await screen.findByRole("heading", {
+        name: "You can't use the prod env",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Go to dev" })).toHaveAttribute(
+      "href",
+      "/dev/secrets",
+    );
+    // nothing was asked of prod
+    expect(api.calls.filter((c) => c.env === "prod")).toEqual([]);
   });
 });

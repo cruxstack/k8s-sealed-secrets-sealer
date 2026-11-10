@@ -75,13 +75,11 @@ func run() error {
 
 	// a handler is registered only for capabilities this agent has
 	commands := agent.NewCommands(client, logger, nil)
-	var kmsClient *kms.Client
-	if cfg.HasCapability(protocol.CapabilitySeal) || cfg.HasCapability(protocol.CapabilityKeys) {
-		if kmsClient, err = newKMS(cfg); err != nil {
+	if cfg.HasCapability(protocol.CapabilitySeal) {
+		kmsClient, err := newKMS(cfg, cfg.KMSTransitKeyID)
+		if err != nil {
 			return err
 		}
-	}
-	if cfg.HasCapability(protocol.CapabilitySeal) {
 		sealer := agent.NewSealer(agent.SealerOptions{
 			Keys:         inventory,
 			KMS:          kmsClient,
@@ -94,6 +92,10 @@ func run() error {
 	}
 	var escrow agent.Escrower
 	if cfg.HasCapability(protocol.CapabilityKeys) {
+		kmsClient, err := newKMS(cfg, cfg.KMSEscrowKeyID)
+		if err != nil {
+			return err
+		}
 		keySync := agent.NewKeySync(agent.KeySyncOptions{
 			Kube:        kube,
 			Namespace:   cfg.ControllerNamespace,
@@ -136,19 +138,25 @@ func run() error {
 	return g.Wait()
 }
 
-// newKMS returns the KMS client for the transit and escrow keys. Credentials
-// come from the SDK's default chain: EKS Pod Identity or IRSA in a cluster.
-func newKMS(cfg *config.Agent) (*kms.Client, error) {
+// newKMS returns the KMS client for a key, in the key's region: the one in
+// its ARN, which a key in another account is named by, or else the
+// configured region. The transit and escrow keys may be in different
+// regions. Credentials come from the SDK's default chain: EKS Pod Identity
+// or IRSA in a cluster.
+func newKMS(cfg *config.Agent, keyID string) (*kms.Client, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
 	}
-	region := cfg.KMSRegion
+	region := config.KMSKeyRegion(keyID)
+	if region == "" {
+		region = cfg.KMSRegion
+	}
 	if region == "" {
 		region = awsCfg.Region
 	}
 	if region == "" {
-		return nil, errors.New("the seal and keys capabilities need a KMS region: set APP_KMS_REGION or AWS_REGION")
+		return nil, errors.New("the seal and keys capabilities need a KMS region: name the keys by ARN, or set APP_KMS_REGION or AWS_REGION")
 	}
 	return kms.NewFromConfig(awsCfg, func(o *kms.Options) {
 		o.Region = region

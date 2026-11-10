@@ -26,14 +26,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.LoadControlPlane(ctx)
+	cfgs, err := config.LoadControlPlanes(ctx)
 	if err != nil {
 		return err
 	}
-	logger := cfg.Logging.Logger(os.Stdout).With("component", "control-plane", "env", cfg.EnvName)
+	cfg := cfgs[0]
+	logger := cfg.Logging.Logger(os.Stdout).With("component", "control-plane")
+	if len(cfgs) == 1 {
+		logger = logger.With("env", cfg.EnvName)
+	}
 	slog.SetDefault(logger)
 
-	handler, err := app.NewControlPlane(ctx, cfg, logger)
+	handler, err := app.NewControlPlane(ctx, cfgs, logger)
 	if err != nil {
 		return err
 	}

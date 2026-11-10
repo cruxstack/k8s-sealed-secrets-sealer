@@ -102,15 +102,18 @@ redeploy in seconds; the images only wrap the binaries
 
 ## Signing in locally
 
-Open http://localhost:4100 and sign in. GitHub is a mock
+Open http://localhost:4100 and sign in. The control plane serves two envs
+on that one URL (`dev/values/control-plane.yaml`): `dev`, whose clusters run
+in the stack, and `prod`, whose one cluster does not, so prod lists its
+SealedSecrets and says sealing is unavailable. GitHub is a mock
 (`cmd/mock-github`) that lets you pick a user:
 
 | User    | Result                                                          |
 | ------- | --------------------------------------------------------------- |
-| `alice` | Signs in as an admin: in the allowed team `sealers` and the     |
-|         | admin team `sealer-admins`, so also sees the fleet              |
-| `dave`  | Signs in: in the allowed team `sealers`, not an admin           |
-| `bob`   | Refused: in the org, not in the allowed team                    |
+| `alice` | Signs in to dev and prod as an admin of both: in the allowed    |
+|         | team `sealers` and the admin team `sealer-admins`               |
+| `dave`  | Signs in to dev only, not as an admin: in `sealers` alone       |
+| `bob`   | Refused: in the org, in neither env's team                      |
 | `carol` | Refused: not in the org                                         |
 
 The mock is also a GitHub App, installed on the fixture repositories in
@@ -190,6 +193,10 @@ the run for inspection. Besides bringing the stack up, it checks that:
 - alice is an admin and dave is not: the fleet API refuses dave, and the
   status API tells dave whether sealing works and how many clusters are
   ready without naming any;
+- alice may use dev and prod and dave only dev: prod refuses dave, lists
+  prod's SealedSecrets for alice, and says sealing is unavailable there,
+  with no prod cluster running; a dev agent can log in only to dev, and an
+  agent that names no env is refused;
 - alice sees only the repositories she can read, with her access, discovery
   finds the dev SealedSecrets (and flags cluster-wide scope), and a
   repository she cannot read is not found;
@@ -270,7 +277,8 @@ of environment variables.
 | `APP_HTTP_ADDR`                    | both          | `:8080` / `:8081` (agent)          |
 | `APP_LOG_LEVEL`                    | both          | `info`                             |
 | `APP_LOG_FORMAT`                   | both          | `json` (or `text`)                 |
-| `APP_ENV_NAME`                     | both          | required                           |
+| `APP_ENV_NAME`                     | both          | required (unless `APP_ENVS`)       |
+| `APP_ENVS`                         | control plane | unset: the one env above           |
 | `APP_PUBLIC_URL`                   | control plane | required                           |
 | `APP_AGENT_AUDIENCE`               | control plane | `APP_PUBLIC_URL`                   |
 | `APP_REGISTRY_FILE`                | control plane | this or `APP_REGISTRY`             |
@@ -301,7 +309,7 @@ of environment variables.
 | `APP_KEY_RENEW_PERIOD`             | control plane | `720h`                             |
 | `APP_KMS_TRANSIT_KEY_ID`           | both          | required (agent: with `seal`)      |
 | `APP_KMS_ESCROW_KEY_ID`            | agent         | required with `keys`               |
-| `APP_KMS_REGION`                   | both          | the AWS SDK's region               |
+| `APP_KMS_REGION`                   | both          | a key ARN's region, else the SDK's |
 | `APP_KMS_ENDPOINT`                 | both          | AWS (set for emulators)            |
 | `APP_CONTROL_PLANE_URL`            | agent         | required, https                    |
 | `APP_ALLOW_INSECURE_CONTROL_PLANE` | agent         | `false` (local stacks only)        |
@@ -315,3 +323,29 @@ of environment variables.
 | `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |
 | `APP_CONTROLLER_DEPLOYMENT`        | agent         | `APP_CONTROLLER_NAME`              |
 | `APP_KUBE_CONTEXT`                 | agent         | in-cluster configuration           |
+
+`APP_ENVS` serves several envs on one URL. It is YAML listing each env with
+the settings that are its own, and every other setting is shared:
+
+```yaml
+envs:
+  - name: dev
+    dynamodbTable: sealer-dev
+    kmsTransitKeyId: arn:aws:kms:us-east-2:111111111111:key/mrk-...
+    registry: arn:aws:ssm:us-east-2:999999999999:parameter/sealer/dev/registry
+  - name: prod
+    dynamodbTable: sealer-prod
+    kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
+    registryFile: /etc/sealer/prod.yaml
+    allowedTeams: [prod-sealers]
+    adminTeams: [platform]
+```
+
+Each env needs a name, a table of its own, a transit key and a registry
+(inline, as a file, or an SSM parameter ARN). It may also set `kmsRegion`,
+`allowedTeams` and `adminTeams` (which replace the shared teams, even when
+empty), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs` and
+`keyRenewPeriod`. With `APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`,
+`APP_REGISTRY_FILE`, `APP_DYNAMODB_TABLE` and `APP_KMS_TRANSIT_KEY_ID` are
+refused. Env names cannot be the UI's own paths (`secrets`, `fleet`,
+`login` and so on).

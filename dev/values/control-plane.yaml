@@ -5,7 +5,18 @@ image:
   repository: local.invalid/sealer-control-plane
   tag: dev
 
-env: dev
+# Two envs on one URL: dev, whose clusters run here (dev/stack.yaml), and
+# prod, whose cluster does not, for the sealer-admins team only. Each reads
+# its registry from registry-<env>.yaml, which Tilt generates.
+envs:
+  - name: dev
+    dynamodbTable: sealer
+    kmsTransitKeyId: alias/sealer-transit
+  - name: prod
+    dynamodbTable: sealer-prod
+    kmsTransitKeyId: alias/sealer-transit
+    allowedTeams: [sealer-admins]
+
 # Tilt sets publicURL and github.url to this stack's localhost ports, so the
 # OAuth redirects work for worktree and e2e stacks too
 publicURL: http://localhost:4100
@@ -30,12 +41,10 @@ registry:
 existingSecret: sealer-control-plane-local
 
 dynamodb:
-  table: sealer
   endpoint: http://dynamodb-local.sealer-system.svc.cluster.local:8000
   createTable: true
 
 kms:
-  transitKeyId: alias/sealer-transit
   endpoint: http://local-kms.sealer-system.svc.cluster.local:8080
 
 aws:

@@ -177,3 +177,31 @@ func TestClient_EscrowPathIsOneSegment(t *testing.T) {
 		t.Fatalf("path = %q, fingerprint = %q", gotPath, rec.Fingerprint)
 	}
 }
+
+// Every request names the agent's env, so a control plane serving several
+// envs sends it to this one.
+func TestClient_NamesItsEnv(t *testing.T) {
+	var envs []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, r *http.Request) {
+		envs = append(envs, r.Header.Get(protocol.EnvHeader))
+		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: "s", ExpiresAt: time.Now().Add(time.Hour), AgentID: "a", Env: "prod"})
+	})
+	mux.HandleFunc("POST /agent/v1/checkin", func(w http.ResponseWriter, r *http.Request) {
+		envs = append(envs, r.Header.Get(protocol.EnvHeader))
+		_ = json.NewEncoder(w).Encode(protocol.CheckInResponse{NextCheckInSeconds: 15})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientOptions{BaseURL: srv.URL, Identity: K8sTokenIdentity{TokenFile: path}, Env: "prod", Version: "test"})
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(envs, ",") != "prod,prod" {
+		t.Fatalf("env headers = %q", envs)
+	}
+}

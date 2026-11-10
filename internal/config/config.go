@@ -9,7 +9,6 @@
 package config
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -187,17 +186,6 @@ type Agent struct {
 
 // HasCapability reports whether the agent has capability c.
 func (a *Agent) HasCapability(c string) bool { return slices.Contains(a.Capabilities, c) }
-
-// LoadControlPlane reads the control plane's configuration from the
-// environment, reading settings given as SSM parameter ARNs from SSM, and
-// reports every invalid setting at once.
-func LoadControlPlane(ctx context.Context) (*ControlPlane, error) {
-	lookup, err := resolveParameters(ctx, os.Environ(), newSSMReader)
-	if err != nil {
-		return nil, err
-	}
-	return loadControlPlane(lookup)
-}
 
 // LoadAgent reads the agent's configuration from the environment and reports
 // every invalid setting at once.

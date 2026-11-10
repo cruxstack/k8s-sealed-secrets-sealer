@@ -144,9 +144,11 @@ router:
   on Kubernetes. It contains no Kubernetes client and knows nothing about the
   cluster it runs on. Locally this is the mode that runs in k3d.
 
-One control plane serves one env and every cluster in it, in every region.
-Where it runs is unrelated to which clusters it serves: a control plane in
-`use2` serves clusters in `use1` and `use2`.
+An env serves every cluster in it, in every region and AWS account. Where
+the control plane runs is unrelated to which clusters it serves: a control
+plane in `use2` of a tools account serves clusters in `use1` and `use2` of
+other accounts. One control plane serves one env or, optionally, several
+envs on one URL (section 15, "Several envs on one URL").
 
 **Agent.** One Deployment per cluster (`cmd/agent`), outbound only, with no
 Ingress and no Service. It checks in on a timer, long-polls for commands, and
@@ -550,8 +552,9 @@ secret's `tls.crt` and `tls.key` with AES-256-GCM, and the escrow record
 stores the wrapped data key, nonce and ciphertext next to the public
 certificate. The encryption context is both the KMS encryption context and
 the GCM additional data. An agent's env comes from its Helm values, not from
-the control plane: an agent refuses to log in to a control plane serving
-another env.
+the control plane: it names that env on every request (the
+`X-K8s-Sealed-Secrets-Sealer-Env` header), and refuses to log in to a
+control plane that answers for another env.
 
 **Upload.** Each check-in response lists the agent's keys that have no
 escrow record (`escrow_needed`), for agents with the `keys` capability. The
@@ -851,18 +854,27 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   permission Members (read). One GitHub App can provide both: its client ID
   and secret sign users in, and its App ID and private key read
   repositories.
-- **Env allowlist.** A deployment can require membership in one or more GitHub
+- **Env allowlist.** An env can require membership in one or more GitHub
   teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
   is checked at sign-in; removing someone from the team takes effect when
   their session expires.
-- **Admins.** Members of the teams in `github.adminTeams` are admins; with
-  none configured, nobody is. Membership is checked at sign-in and kept in
-  the session, like the allowlist. Only admins can read the fleet
-  (`GET /api/v1/fleet`: every agent with its cluster, controller, keys and
-  issues). Everyone signed in can read `GET /api/v1/status`, which says
-  whether sealing works and how many of the env's clusters are ready, but
-  names none of them. The UI shows the status as a dot on the env badge, and
-  the fleet only to admins.
+- **Admins.** Members of an env's admin teams (`github.adminTeams`) are its
+  admins; with none configured, nobody is. Membership is checked at sign-in
+  and kept in the session, like the allowlist. Only admins can read the
+  env's fleet (`GET .../fleet`: every agent with its cluster, controller,
+  keys and issues). Everyone who may use the env can read `GET .../status`,
+  which says whether sealing works and how many of its clusters are ready,
+  but names none of them. The UI shows the status as a dot on the env
+  badge, and the fleet only to admins.
+- **One sign-in for every env.** A deployment serving several envs signs
+  people in once. At sign-in the control plane works out, for each env,
+  whether its teams admit the person and whether they administer it; the
+  session (an HttpOnly cookie) carries the envs it grants and nothing else,
+  and each env's API refuses a session that does not grant it. Someone no
+  env admits cannot sign in. Every env's API is under
+  `/api/v1/envs/{env}/`; signing in, `/me` (the user and their envs) and
+  signing out are under `/api/v1/auth/`. With a single env its API is also
+  at `/api/v1/`.
 - **Rate limits** use API Gateway throttling and WAF rate-based rules.
   In-memory limiters do not hold across Lambda instances, so limits that
   matter (sessions per user) are enforced with DynamoDB.
@@ -1018,7 +1030,52 @@ AWS infrastructure lives in a separate repository,
 `terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
 CloudFront and WAF, the DynamoDB table (PITR, TTL, CMK), the transit and
 escrow KMS keys with their policies, the AWS Backup plan and the agent IAM
-roles. Each env is one instance of that module, in whichever region suits.
+roles. An env is one instance of that module, in whichever region suits,
+or one entry of a deployment that serves several.
+
+**Accounts and regions.** Nothing ties an env to an AWS account or region.
+A registry entry names an agent's role by its full ARN, account included,
+and the control plane forwards each agent's signed login to the STS
+endpoint of the agent's own region. KMS keys are regional and are called in
+their own region: a key named by its ARN (as a key in another account must
+be) is called in the region the ARN names, by the control plane and agents
+alike, so the transit and escrow keys may sit in different regions. A
+layout that keeps each env's keys with its clusters:
+
+| Account         | Holds                                                  |
+| --------------- | ------------------------------------------------------ |
+| tools (`use2`)  | The control plane, its API and its DynamoDB tables:    |
+|                 | ciphertext only.                                       |
+| dev, prod       | The clusters and their agents' roles, and the env's    |
+|                 | transit and escrow keys: multi-Region keys made in     |
+|                 | `use1` with a replica in `use2`, so each cluster calls |
+|                 | its own region.                                        |
+
+The only grant across accounts is then the control plane's
+`kms:GenerateDataKey` on each env's transit key, in that key's policy, with
+the env in the encryption context. Agents use keys in their own account,
+and nothing in the tools account can decrypt anything.
+
+**Several envs on one URL.** One deployment can serve several envs, such as
+dev and prod, on one URL: `APP_ENVS` (the chart's `envs`) lists them, each
+with its own registry, DynamoDB table, transit key and teams, and the other
+settings are shared. People sign in once and switch envs in the UI, whose
+pages carry their env first in the path (`/prod/secrets/...`), so links keep
+their env. Each agent names its env in the `X-K8s-Sealed-Secrets-Sealer-Env`
+header (from its own configuration), and its request goes to that env,
+whose registry must then know it; an agent that names no env is refused,
+and an env's agent sessions are signed with a key derived for it. Inside
+the process every env is its own server, with its own store, registry,
+transit key and agent sessions.
+
+The trade-off is isolation. A deployment per env keeps envs apart down to
+the IAM role: whoever can change the dev deployment cannot touch prod. A
+deployment serving several holds every env's permissions in one role, so a
+compromised or broken control plane, or a bad deploy, affects all of them,
+and whoever can deploy it controls prod. Their data stays apart (each env
+has its own table, keys and agents, and sessions cannot cross envs), but
+choose one deployment per env when prod must be isolated from everything
+else.
 
 ## 16. Future work (not in v1)
 

@@ -50,11 +50,14 @@ can_proxy() {
 }
 
 # api <method> <path> [bearer] [json body]: calls the control plane and prints
-# "<status> <body>"
+# "<status> <body>". Calls to the agent API name the env in agent_env, as an
+# agent does; empty names none.
+agent_env=dev
 api() {
   local method="$1" path="$2" auth="${3:-}" body="${4:-}" args=()
   args=(-sS -o "${work}/body" -w '%{http_code}' -X "$method" -H 'Content-Type: application/json')
   [[ -n "$auth" ]] && args+=(-H "Authorization: Bearer ${auth}")
+  [[ "$path" == /agent/* && -n "$agent_env" ]] && args+=(-H "X-K8s-Sealed-Secrets-Sealer-Env: ${agent_env}")
   [[ -n "$body" ]] && args+=(--data "$body")
   printf '%s %s' "$(curl "${args[@]}" "${control_plane}${path}")" "$(/bin/cat "${work}/body")"
 }
@@ -113,11 +116,17 @@ registered="$(kubectl --context "$KUBE_CONTEXT" -n "${first}-sealer" create toke
 [[ "$(login_status "$registered")" == 200 ]] || die "the registered service account could not log in"
 check "login with the registered service account succeeds"
 
+# the control plane serves dev and prod: an agent names its env, and only
+# that env's registry admits it
+[[ "$(agent_env=prod login_status "$registered")" == 401 ]] || die "a dev agent logged in to prod"
+[[ "$(agent_env='' login_status "$registered")" == 400 ]] || die "an agent that named no env logged in"
+check "an agent logs in only to the env it names and is registered in"
+
 [[ "$(api POST /agent/v1/checkin "" '{}' | cut -d' ' -f1)" == 401 ]] || die "check-in without a session was accepted"
 [[ "$(api POST /agent/v1/checkin "$registered" '{}' | cut -d' ' -f1)" == 401 ]] || die "a login token was accepted as a session"
 check "check-in requires a session token"
 
-[[ "$(api GET /api/v1/admin/fleet "" | cut -d' ' -f1)" == 401 ]] || die "admin API answered without a token"
+[[ "$(api GET /api/v1/envs/dev/admin/fleet "" | cut -d' ' -f1)" == 401 ]] || die "admin API answered without a token"
 check "admin API requires its token"
 
 # --- web UI and sign-in ---
@@ -127,7 +136,7 @@ grep -qi "^x-frame-options: DENY" <<<"$headers" || die "the UI can be framed"
 grep -q 'type="module"' "${work}/index.html" || die "the UI is not served"
 check "web UI is served, with a strict content security policy"
 
-[[ "$(api GET /api/v1/fleet "" | cut -d' ' -f1)" == 401 ]] || die "the fleet API answered without sign-in"
+[[ "$(api GET /api/v1/envs/dev/fleet "" | cut -d' ' -f1)" == 401 ]] || die "the fleet API answered without sign-in"
 check "the fleet API requires sign-in"
 
 # sign_in <login>: runs the browser's side of GitHub sign-in against the
@@ -141,31 +150,44 @@ sign_in() {
 
 [[ "$(sign_in alice)" == "${control_plane}/fleet" ]] || die "alice could not sign in"
 me="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me")"
-[[ "$(jq -r '.user.login + ":" + (.user.admin | tostring)' <<<"$me")" == alice:true ]] || die "/me after sign-in: ${me}"
+[[ "$(jq -c '[.user.login, .envs]' <<<"$me")" == '["alice",[{"name":"dev","admin":true},{"name":"prod","admin":true}]]' ]] \
+  || die "/me after sign-in: ${me}"
 csrf="$(jq -r .csrf_token <<<"$me")"
-agents="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/fleet" | jq '.agents | length')"
+agents="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/fleet" | jq '.agents | length')"
 [[ "$agents" == "$(stack_clusters | wc -l | tr -d ' ')" ]] || die "the signed-in fleet has ${agents} agents"
-check "alice (org member, allowed team) signs in and sees the fleet"
+check "alice (org member, allowed team, admin) signs in to dev and prod and sees the dev fleet"
 
 # dave may sign in but is not an admin: the fleet is closed to him, and he
 # sees only whether sealing works
 [[ "$(sign_in dave)" == "${control_plane}/fleet" ]] || die "dave could not sign in"
-[[ "$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/auth/me" | jq -r .user.admin)" == false ]] \
-  || die "dave signed in as an admin"
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-dave" "${control_plane}/api/v1/fleet")" == 403 ]] \
+[[ "$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/auth/me" | jq -c .envs)" == '[{"name":"dev","admin":false}]' ]] \
+  || die "dave signed in with more than dev, or as an admin"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-dave" "${control_plane}/api/v1/envs/dev/fleet")" == 403 ]] \
   || die "dave, who is not an admin, read the fleet"
-status="$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/status")"
+status="$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/envs/dev/status")"
 jq -e '(.sealing | IN("ready", "degraded", "unavailable")) and .clusters.total == 3 and (tostring | test("dev-use") | not)' \
   <<<"$status" >/dev/null || die "status for dave: ${status}"
 check "dave (not an admin) signs in, cannot read the fleet, and sees whether sealing works"
 
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-dave" "${control_plane}/api/v1/envs/prod/status")" == 403 ]] \
+  || die "dave, who is not in prod's team, used prod"
+status="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/prod/status")"
+jq -e '.env == "prod" and .sealing == "unavailable" and .clusters.total == 1' <<<"$status" >/dev/null \
+  || die "prod's status for alice: ${status}"
+prod_files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/prod/repos/example-org/apps/files")"
+jq -e '
+  (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/reports/sealed-secret.yaml"]
+  and (.files[0].documents | map(.namespace)) == ["billing"]
+' <<<"$prod_files" >/dev/null || die "prod's SealedSecrets in example-org/apps: ${prod_files}"
+check "prod is for its team only, lists prod's SealedSecrets, and has no agent to seal with here"
+
 # --- repositories, through the GitHub App, limited to alice's own access ---
-repos="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos")"
+repos="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos")"
 [[ "$(jq -c '[.repositories[] | .full_name + ":" + .access]' <<<"$repos")" == '["example-org/apps:write","example-org/platform:read"]' ]] \
   || die "alice's repositories: ${repos}"
 check "alice sees only the repositories she can read, with her access"
 
-files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos/example-org/apps/files")"
+files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/apps/files")"
 jq -e '
   (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml", "deploy/worker/sealed-secret.yaml"]
   and (.files[0].documents | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"]
@@ -173,7 +195,7 @@ jq -e '
 ' <<<"$files" >/dev/null || die "SealedSecret discovery in example-org/apps: ${files}"
 check "discovery finds the dev SealedSecrets in example-org/apps, and flags cluster-wide scope"
 
-restricted="$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-alice" "${control_plane}/api/v1/repos/example-org/restricted/files")"
+restricted="$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/restricted/files")"
 [[ "$restricted" == 404 ]] || die "alice read a repository she has no access to: ${restricted}"
 check "a repository alice cannot read is not found"
 
@@ -192,7 +214,7 @@ check "sign-out requires the csrf token and ends the session"
 fleet=""
 expected="$(stack_clusters | wc -l | tr -d ' ')"
 for _ in $(seq 1 60); do
-  fleet="$(api GET /api/v1/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
+  fleet="$(api GET /api/v1/envs/dev/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
   healthy="$(jq '[.agents[] | select(.healthy)] | length' <<<"$fleet" 2>/dev/null || echo 0)"
   [[ "$healthy" == "$expected" ]] && break
   sleep 2
@@ -215,7 +237,7 @@ synced() {
   ' <<<"$1" >/dev/null 2>&1
 }
 for _ in $(seq 1 120); do
-  fleet="$(api GET /api/v1/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
+  fleet="$(api GET /api/v1/envs/dev/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
   synced "$fleet" && break
   sleep 2
 done
@@ -308,7 +330,7 @@ as_alice() {
   [[ -n "${3:-}" ]] && args+=(--data "$3")
   printf '%s %s' "$(curl "${args[@]}" "${control_plane}$2")" "$(/bin/cat "${work}/body")"
 }
-apps=/api/v1/repos/example-org/apps
+apps=/api/v1/envs/dev/repos/example-org/apps
 out="$(as_alice POST "${apps}/session" "$(jq -nc --arg c "$(jq -r .commit <<<"$files")" '{commit: $c}')")"
 [[ "${out%% *}" == 201 ]] || die "alice could not open a session: ${out}"
 session="$(jq -r .session.id <<<"${out#* }")"
@@ -387,9 +409,9 @@ check "db-password is sealed apart for use1 and use2, each by an agent in its re
 code="$(as_alice POST "${apps}/session/${session}/seals" \
   '{"path":"deploy/legacy/sealed-secret.yaml","key":"k","value":"v"}' | cut -d' ' -f1)"
 [[ "$code" == 422 ]] || die "a seal into a cluster-wide document answered ${code}"
-code="$(as_alice POST /api/v1/repos/example-org/platform/session '{}' | cut -d' ' -f1)"
+code="$(as_alice POST /api/v1/envs/dev/repos/example-org/platform/session '{}' | cut -d' ' -f1)"
 [[ "$code" == 403 ]] || die "a session on a read-only repository answered ${code}"
-code="$(as_alice POST /api/v1/repos/example-org/restricted/session '{}' | cut -d' ' -f1)"
+code="$(as_alice POST /api/v1/envs/dev/repos/example-org/restricted/session '{}' | cut -d' ' -f1)"
 [[ "$code" == 404 ]] || die "a session on a repository alice cannot read answered ${code}"
 check "sealing refuses cluster-wide documents and repositories alice cannot write"
 

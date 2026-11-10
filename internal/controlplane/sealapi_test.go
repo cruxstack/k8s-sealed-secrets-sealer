@@ -98,10 +98,10 @@ agents:
 		t.Fatal(err)
 	}
 	agentSessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "https://sealer.dev.example.com", "dev", nil)
-	userSessions, _ := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "https://sealer.dev.example.com", "dev", time.Hour, nil)
+	userSessions, _ := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "https://sealer.dev.example.com", time.Hour, nil)
 	users := userauth.NewHandler(userauth.HandlerOptions{
-		Sessions: userSessions, PublicURL: "http://localhost:4100", Env: "dev", Org: "example-org",
-		Logger: slog.New(slog.DiscardHandler),
+		Sessions: userSessions, PublicURL: "http://localhost:4100", Org: "example-org",
+		Envs: []userauth.EnvPolicy{{Name: "dev"}}, Logger: slog.New(slog.DiscardHandler),
 	})
 
 	sh := &sealHarness{
@@ -119,7 +119,7 @@ agents:
 		Registry:     reg,
 		Sessions:     agentSessions,
 		Store:        sh.store,
-		Users:        users,
+		Users:        users.Env("dev"),
 		Repos:        rs,
 		Transit:      sh.kms,
 		TransitKeyID: "transit",
@@ -189,7 +189,7 @@ func (sh *sealHarness) do(login, method, path string, body any, csrf bool) *http
 	token, ok := sh.sessions[login]
 	if !ok {
 		var err error
-		if token, _, err = sh.users.Issue(testUsers[login]); err != nil {
+		if token, _, err = sh.users.Issue(testUsers[login], userauth.Grants{"dev": false}); err != nil {
 			sh.t.Fatal(err)
 		}
 		sh.sessions[login] = token

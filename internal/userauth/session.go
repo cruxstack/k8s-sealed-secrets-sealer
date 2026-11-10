@@ -1,8 +1,9 @@
 // Package userauth signs people in to the control plane with GitHub OAuth.
 // A signed-in user holds an HttpOnly session cookie (an HS256 JWT bound to
-// this deployment's URL and env); state-changing requests must also carry a
-// CSRF token derived from that cookie, which only this deployment can
-// compute and only a page that can read /me can learn.
+// this deployment's URL) that names the envs they may use and those they
+// administer; state-changing requests must also carry a CSRF token derived
+// from that cookie, which only this deployment can compute and only a page
+// that can read /me can learn.
 package userauth
 
 import (
@@ -25,13 +26,14 @@ const sessionIssuer = "k8s-sealed-secrets-sealer/user"
 // ErrUnauthorized is returned for any session that is missing or invalid.
 var ErrUnauthorized = errors.New("unauthorized")
 
-// User is a signed-in GitHub user.
+// User is a signed-in GitHub user, as one env sees them.
 type User struct {
 	ID        int64  `json:"id"`
 	Login     string `json:"login"`
 	Name      string `json:"name,omitempty"`
 	AvatarURL string `json:"avatar_url,omitempty"`
-	// Admin is set for members of an admin team, checked at sign-in.
+	// Admin is set for members of one of the env's admin teams, checked at
+	// sign-in.
 	Admin bool `json:"admin"`
 }
 
@@ -48,32 +50,34 @@ func UserFrom(ctx context.Context) *User {
 	return u
 }
 
+// Grants are the envs a user may use, each with whether they administer it.
+type Grants map[string]bool
+
 // Sessions issues and verifies session JWTs and derives CSRF tokens.
 type Sessions struct {
 	key      []byte
 	csrfKey  []byte
 	audience string
-	env      string
 	ttl      time.Duration
 	now      func() time.Time
 }
 
 type claims struct {
-	Env       string `json:"env"`
+	// Envs maps each env the user may use to whether they administer it.
+	Envs      Grants `json:"envs"`
 	GitHubID  int64  `json:"ghid"`
 	Name      string `json:"name,omitempty"`
 	AvatarURL string `json:"avatar,omitempty"`
-	Admin     bool   `json:"adm,omitempty"`
 	jwt.RegisteredClaims
 }
 
 // NewSessions returns a Sessions. audience is this deployment's public URL.
-func NewSessions(key []byte, audience, env string, ttl time.Duration, now func() time.Time) (*Sessions, error) {
+func NewSessions(key []byte, audience string, ttl time.Duration, now func() time.Time) (*Sessions, error) {
 	if len(key) < MinSessionKeyBytes {
 		return nil, fmt.Errorf("failed to create user sessions: key must be at least %d bytes", MinSessionKeyBytes)
 	}
-	if audience == "" || env == "" || ttl <= 0 {
-		return nil, errors.New("failed to create user sessions: audience, env and ttl are required")
+	if audience == "" || ttl <= 0 {
+		return nil, errors.New("failed to create user sessions: audience and ttl are required")
 	}
 	if now == nil {
 		now = time.Now
@@ -81,19 +85,22 @@ func NewSessions(key []byte, audience, env string, ttl time.Duration, now func()
 	// a separate key for CSRF tokens, so they can never verify as a session
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(sessionIssuer + "/csrf/v1"))
-	return &Sessions{key: key, csrfKey: mac.Sum(nil), audience: audience, env: env, ttl: ttl, now: now}, nil
+	return &Sessions{key: key, csrfKey: mac.Sum(nil), audience: audience, ttl: ttl, now: now}, nil
 }
 
-// Issue returns a session token for u and when it expires.
-func (s *Sessions) Issue(u User) (string, time.Time, error) {
+// Issue returns a session token for u, granting the envs in grants, and
+// when it expires.
+func (s *Sessions) Issue(u User, grants Grants) (string, time.Time, error) {
+	if len(grants) == 0 {
+		return "", time.Time{}, fmt.Errorf("failed to sign session for %s: it grants no env", u.Login)
+	}
 	now := s.now().UTC().Truncate(time.Second)
 	exp := now.Add(s.ttl)
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
-		Env:       s.env,
+		Envs:      grants,
 		GitHubID:  u.ID,
 		Name:      u.Name,
 		AvatarURL: u.AvatarURL,
-		Admin:     u.Admin,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    sessionIssuer,
 			Subject:   u.Login,
@@ -109,8 +116,9 @@ func (s *Sessions) Issue(u User) (string, time.Time, error) {
 	return token, exp, nil
 }
 
-// Verify checks a session token and returns its user.
-func (s *Sessions) Verify(token string) (*User, error) {
+// Verify checks a session token and returns its user and the envs it
+// grants. The user's Admin is left unset: it differs per env.
+func (s *Sessions) Verify(token string) (*User, Grants, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c,
 		func(*jwt.Token) (any, error) { return s.key, nil },
@@ -123,12 +131,12 @@ func (s *Sessions) Verify(token string) (*User, error) {
 		jwt.WithLeeway(30*time.Second),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
-	if c.Env != s.env || c.GitHubID == 0 || c.Subject == "" {
-		return nil, fmt.Errorf("%w: session is for another env or has no user", ErrUnauthorized)
+	if len(c.Envs) == 0 || c.GitHubID == 0 || c.Subject == "" {
+		return nil, nil, fmt.Errorf("%w: session grants no env or has no user", ErrUnauthorized)
 	}
-	return &User{ID: c.GitHubID, Login: c.Subject, Name: c.Name, AvatarURL: c.AvatarURL, Admin: c.Admin}, nil
+	return &User{ID: c.GitHubID, Login: c.Subject, Name: c.Name, AvatarURL: c.AvatarURL}, c.Envs, nil
 }
 
 // CSRFToken derives the CSRF token for a session token. It is tied to the

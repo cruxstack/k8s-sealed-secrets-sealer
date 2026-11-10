@@ -52,6 +52,12 @@ const (
 	AWSAudienceHeader        = "X-K8s-Sealed-Secrets-Sealer-Audience"
 )
 
+// EnvHeader names the env an agent belongs to, on every request it makes. A
+// control plane serving several envs sends the request to that env, whose
+// registry must then know the agent; one serving a single env refuses
+// agents of any other.
+const EnvHeader = "X-K8s-Sealed-Secrets-Sealer-Env"
+
 // SessionRequest asks for an agent session token. Token is set for
 // MethodK8sOIDC and AWS for MethodAWSSTS.
 type SessionRequest struct {
