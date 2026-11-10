@@ -6,13 +6,21 @@
 // decryption label (name, namespace and scope) always comes from the
 // document's own metadata, the same place the controller reads it, so it
 // can never be chosen by a user.
+//
+// Optional hint annotations, under the env annotation's prefix, only help
+// people: what the secret is for (<prefix>/description), the keys it should
+// hold (<prefix>/keys) and where its docs are (<prefix>/docs). They never
+// change what is sealed or where.
 package manifest
 
 import (
 	"bytes"
 	"errors"
 	"io"
+	"net/url"
 	"sort"
+	"strings"
+	"unicode"
 
 	ssv1alpha1 "github.com/bitnami/sealed-secrets/pkg/apis/sealedsecrets/v1alpha1"
 	"go.yaml.in/yaml/v3"
@@ -31,7 +39,14 @@ const (
 	MaxFileBytes     = 1 << 20
 	MaxDocuments     = 100
 	MaxKeysPerSecret = 200
+	// limits on hint annotations; longer values are cut or ignored
+	maxDescriptionRunes = 300
+	maxDocsURLBytes     = 2048
 )
+
+// DefaultPrefix is the annotation prefix hints use when the env annotation
+// has none.
+const DefaultPrefix = "k8s-sealed-secrets-sealer"
 
 // Default annotation keys (docs/design.md, "Annotations").
 const (
@@ -57,6 +72,16 @@ type Annotations struct {
 	Region string
 }
 
+// Hint returns the key of a hint annotation: name under the env
+// annotation's prefix.
+func (a Annotations) Hint(name string) string {
+	prefix, _, ok := strings.Cut(a.Env, "/")
+	if !ok || prefix == "" {
+		prefix = DefaultPrefix
+	}
+	return prefix + "/" + name
+}
+
 // Document is a SealedSecret in the env.
 type Document struct {
 	// Index is the document's position in the file, counting from 0.
@@ -71,6 +96,12 @@ type Document struct {
 	// Problem says why values cannot be sealed into this document; empty
 	// when they can.
 	Problem string `json:"problem,omitempty"`
+
+	// Hints from optional annotations, for people: what the secret is for,
+	// the keys it should hold, and an http(s) link to its docs.
+	Description  string   `json:"description,omitempty"`
+	ExpectedKeys []string `json:"expected_keys,omitempty"`
+	Docs         string   `json:"docs,omitempty"`
 }
 
 // Sealable reports whether values can be sealed into the document.
@@ -102,6 +133,10 @@ func Find(content []byte, ann Annotations, env string) ([]Document, error) {
 			Region:    annotations[ann.Region],
 			Scope:     scope(annotations),
 			Keys:      mapKeys(mapValue(spec, "encryptedData")),
+
+			Description:  description(annotations[ann.Hint("description")]),
+			ExpectedKeys: expectedKeys(annotations[ann.Hint("keys")]),
+			Docs:         docsURL(annotations[ann.Hint("docs")]),
 		}
 		doc.Problem = problem(root, spec, doc)
 		out = append(out, doc)
@@ -272,4 +307,50 @@ func mapKeys(n *yaml.Node) []string {
 // no value at all.
 func isMappingOrEmpty(n *yaml.Node) bool {
 	return n == nil || n.Kind == yaml.MappingNode || (n.Kind == yaml.ScalarNode && n.Tag == "!!null")
+}
+
+// description returns a description hint on one line, without control or
+// formatting characters (a bidi override could make it read as something
+// else), cut to a readable length.
+func description(v string) string {
+	v = strings.Join(strings.Fields(v), " ")
+	v = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, v)
+	if r := []rune(v); len(r) > maxDescriptionRunes {
+		v = strings.TrimSpace(string(r[:maxDescriptionRunes-1])) + "…"
+	}
+	return v
+}
+
+// expectedKeys returns the valid, distinct keys of a keys hint, separated
+// by commas or spaces, in the order given.
+func expectedKeys(v string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, k := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' }) {
+		if seen[k] || len(validation.IsConfigMapKey(k)) > 0 || len(out) == MaxKeysPerSecret {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
+}
+
+// docsURL returns a docs hint when it is an absolute http(s) URL, the only
+// links the UI shows.
+func docsURL(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > maxDocsURLBytes {
+		return ""
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
+		return ""
+	}
+	return u.String()
 }

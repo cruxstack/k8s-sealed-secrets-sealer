@@ -306,3 +306,25 @@ func TestSeal_CapsPendingChanges(t *testing.T) {
 		t.Fatalf("reseal at the cap = %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestStatus(t *testing.T) {
+	sh := newSealHarness(t)
+	status := func() statusView {
+		t.Helper()
+		rec := sh.do("alice", http.MethodGet, "/api/v1/status", nil, false)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d %s", rec.Code, rec.Body)
+		}
+		return decode[statusView](t, rec)
+	}
+	if got := status(); got.Sealing != "ready" || got.Clusters.Ready != 3 || got.Clusters.Total != 3 {
+		t.Fatalf("status = %+v", got)
+	}
+	// one cluster stops checking in: sealing still works
+	sh.advance(time.Hour)
+	sh.checkIn("dev-use1-blue", sh.key.Key)
+	sh.checkIn("dev-use1-green", sh.key.Key)
+	if got := status(); got.Sealing != "degraded" || got.Clusters.Ready != 2 || !strings.Contains(got.Message, "1 of 3") {
+		t.Fatalf("status = %+v", got)
+	}
+}

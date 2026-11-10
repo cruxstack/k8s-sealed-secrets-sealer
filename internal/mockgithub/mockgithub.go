@@ -51,13 +51,15 @@ type Options struct {
 	WebURL string
 }
 
-// DefaultUsers are the local stack's users: alice may sign in, bob is in the
-// org but not in the allowed team, and carol is not in the org.
+// DefaultUsers are the local stack's users: alice may sign in and is an
+// admin, dave may sign in, bob is in the org but not in the allowed team,
+// and carol is not in the org.
 func DefaultUsers() []User {
 	return []User{
-		{ID: 1001, Login: "alice", Name: "Alice Example", Member: true, Teams: []string{"sealers"}},
+		{ID: 1001, Login: "alice", Name: "Alice Example", Member: true, Teams: []string{"sealers", "sealer-admins"}},
 		{ID: 1002, Login: "bob", Name: "Bob Example", Member: true},
 		{ID: 1003, Login: "carol", Name: "Carol Example"},
+		{ID: 1004, Login: "dave", Name: "Dave Example", Member: true, Teams: []string{"sealers"}},
 	}
 }
 

@@ -163,7 +163,9 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/v1/auth/callback", u.Callback)
 		mux.HandleFunc("GET /api/v1/auth/me", u.Me)
 		mux.HandleFunc("POST /api/v1/auth/logout", u.RequireUser(u.RequireCSRF(u.Logout)))
-		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(s.fleet))
+		// the fleet is for admins; everyone sees whether sealing works
+		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(u.RequireAdmin(s.fleet)))
+		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
 		if s.repos != nil {
 			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.listRepos))
 			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.listFiles))

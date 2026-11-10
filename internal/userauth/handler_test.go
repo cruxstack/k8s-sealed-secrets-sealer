@@ -250,3 +250,24 @@ func TestSessions_Rejects(t *testing.T) {
 		t.Error("two sessions share a csrf token")
 	}
 }
+
+func TestSignIn_AdminTeams(t *testing.T) {
+	for login, want := range map[string]bool{"alice": true, "dave": false} {
+		f := newFlow(t, "http://localhost:4100", "sealers")
+		f.h.opts.AdminTeams = []string{"sealer-admins"}
+		f.signIn(login, "/")
+		status, body := f.me()
+		if status != http.StatusOK {
+			t.Fatalf("%s: /me = %d", login, status)
+		}
+		if got := body["user"].(map[string]any)["admin"]; got != want {
+			t.Errorf("%s: admin = %v, want %v", login, got, want)
+		}
+	}
+	// without admin teams nobody is an admin
+	f := newFlow(t, "http://localhost:4100", "sealers")
+	f.signIn("alice", "/")
+	if _, body := f.me(); body["user"].(map[string]any)["admin"] != false {
+		t.Fatalf("admin without admin teams: %v", body)
+	}
+}

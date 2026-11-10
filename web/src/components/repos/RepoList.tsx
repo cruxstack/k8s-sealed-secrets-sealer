@@ -53,7 +53,7 @@ function Continue({
           return (
             <li key={r.full_name}>
               <Link
-                to="/repos/$owner/$repo"
+                to="/secrets/$owner/$repo"
                 params={{ owner: r.owner, repo: r.name }}
                 className="group flex items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 transition-colors hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none dark:bg-primary/10"
               >
@@ -101,7 +101,7 @@ export function RepoList() {
   );
   const open = (r: Repository) =>
     void navigate({
-      to: "/repos/$owner/$repo",
+      to: "/secrets/$owner/$repo",
       params: { owner: r.owner, repo: r.name },
     });
 
@@ -109,7 +109,7 @@ export function RepoList() {
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold tracking-tight">Repositories</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Secrets</h1>
           <p className="text-sm text-muted-foreground">
             Pick a repository to seal values into its SealedSecrets for the{" "}
             <span className="font-medium text-foreground">{env}</span> env.
@@ -239,7 +239,7 @@ export function RepoList() {
                             className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
                           >
                             <Link
-                              to="/repos/$owner/$repo"
+                              to="/secrets/$owner/$repo"
                               params={{ owner: r.owner, repo: r.name }}
                               className="hover:underline focus-visible:underline"
                               onClick={(e) => e.stopPropagation()}

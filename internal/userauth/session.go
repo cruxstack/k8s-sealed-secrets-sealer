@@ -31,6 +31,8 @@ type User struct {
 	Login     string `json:"login"`
 	Name      string `json:"name,omitempty"`
 	AvatarURL string `json:"avatar_url,omitempty"`
+	// Admin is set for members of an admin team, checked at sign-in.
+	Admin bool `json:"admin"`
 }
 
 type userKey struct{}
@@ -61,6 +63,7 @@ type claims struct {
 	GitHubID  int64  `json:"ghid"`
 	Name      string `json:"name,omitempty"`
 	AvatarURL string `json:"avatar,omitempty"`
+	Admin     bool   `json:"adm,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -90,6 +93,7 @@ func (s *Sessions) Issue(u User) (string, time.Time, error) {
 		GitHubID:  u.ID,
 		Name:      u.Name,
 		AvatarURL: u.AvatarURL,
+		Admin:     u.Admin,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    sessionIssuer,
 			Subject:   u.Login,
@@ -124,7 +128,7 @@ func (s *Sessions) Verify(token string) (*User, error) {
 	if c.Env != s.env || c.GitHubID == 0 || c.Subject == "" {
 		return nil, fmt.Errorf("%w: session is for another env or has no user", ErrUnauthorized)
 	}
-	return &User{ID: c.GitHubID, Login: c.Subject, Name: c.Name, AvatarURL: c.AvatarURL}, nil
+	return &User{ID: c.GitHubID, Login: c.Subject, Name: c.Name, AvatarURL: c.AvatarURL, Admin: c.Admin}, nil
 }
 
 // CSRFToken derives the CSRF token for a session token. It is tied to the

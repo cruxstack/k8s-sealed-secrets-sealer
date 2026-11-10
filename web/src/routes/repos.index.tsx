@@ -1,16 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { RepoList } from "@/components/repos/RepoList";
-import { requireSignedIn, SignedInPage } from "@/lib/require-auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
+// the sealing area moved to /secrets
 export const Route = createFileRoute("/repos/")({
-  beforeLoad: requireSignedIn,
-  component: ReposPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/secrets", replace: true });
+  },
 });
-
-function ReposPage() {
-  return (
-    <SignedInPage>
-      <RepoList />
-    </SignedInPage>
-  );
-}

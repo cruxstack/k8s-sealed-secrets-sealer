@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { FileWarning, Info } from "lucide-react";
+import { BookOpen, ExternalLink, FileWarning, Info } from "lucide-react";
 import type {
   RepositoryFile,
   SealSession,
@@ -7,6 +7,7 @@ import type {
 } from "@/api/types";
 import { CopyButton } from "@/components/fleet/CopyButton";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -14,6 +15,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { FilePath, fileStatus } from "./FileList";
+import { fileHints } from "./hints";
 import { SealForm } from "./SealForm";
 
 const SCOPES: Record<
@@ -70,10 +72,22 @@ function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
   );
 }
 
-/** A document's keys, with values waiting in this session marked. */
-function Keys({ keys, pending }: { keys: string[]; pending: Set<string> }) {
+/**
+ * A document's keys, with values waiting in this session marked, and then
+ * the keys it is expected to hold but does not yet.
+ */
+function Keys({
+  keys,
+  pending,
+  expected,
+}: {
+  keys: string[];
+  pending: Set<string>;
+  expected: string[];
+}) {
   const all = [...new Set([...keys, ...pending])].sort();
-  if (all.length === 0) {
+  const missing = expected.filter((k) => !all.includes(k));
+  if (all.length === 0 && missing.length === 0) {
     return <span className="text-xs text-muted-foreground">No keys yet</span>;
   }
   return (
@@ -108,6 +122,19 @@ function Keys({ keys, pending }: { keys: string[]; pending: Set<string> }) {
           </li>
         );
       })}
+      {missing.map((k) => (
+        <li key={k}>
+          <code
+            className="inline-flex items-center gap-1 rounded-md border border-dashed border-warning/60 px-1.5 py-px font-mono text-xs text-warning"
+            title="Expected, but not set yet"
+          >
+            {k}
+            <span className="font-sans text-[10px] font-semibold uppercase">
+              missing
+            </span>
+          </code>
+        </li>
+      ))}
     </ul>
   );
 }
@@ -115,10 +142,12 @@ function Keys({ keys, pending }: { keys: string[]; pending: Set<string> }) {
 function Panel({
   file,
   aside,
+  actions,
   children,
 }: {
   file: RepositoryFile;
   aside?: ReactNode;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -134,6 +163,7 @@ function Panel({
           </h2>
           {aside}
         </div>
+        {actions && <div className="shrink-0">{actions}</div>}
       </div>
       {children}
     </section>
@@ -173,6 +203,7 @@ export function FilePanel({
 }) {
   const status = fileStatus(file);
   const docs = file.documents ?? [];
+  const hints = fileHints(file);
   const pending = new Set(
     (session?.changes ?? [])
       .filter((c) => c.path === file.path)
@@ -194,11 +225,31 @@ export function FilePanel({
     <Panel
       file={file}
       aside={
-        <p className="text-xs text-muted-foreground">
-          {docs.length === 1
-            ? `1 SealedSecret for the ${env} env`
-            : `${docs.length} SealedSecrets for the ${env} env`}
-        </p>
+        <>
+          {hints.description && (
+            <p className="text-sm text-foreground/85">{hints.description}</p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {docs.length === 1
+              ? `1 SealedSecret for the ${env} env`
+              : `${docs.length} SealedSecrets for the ${env} env`}
+          </p>
+        </>
+      }
+      actions={
+        hints.docs && (
+          <Button asChild variant="outline" size="sm">
+            <a href={hints.docs} target="_blank" rel="noopener noreferrer">
+              <BookOpen className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+              Docs
+              <ExternalLink
+                className="ml-1.5 h-3 w-3 opacity-60"
+                aria-hidden="true"
+              />
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>
+          </Button>
+        )
       }
     >
       <div className="overflow-x-auto">
@@ -254,6 +305,7 @@ export function FilePanel({
                   <Keys
                     keys={d.keys}
                     pending={d.problem ? new Set() : pending}
+                    expected={d.expected_keys ?? []}
                   />
                 </td>
               </tr>

@@ -15,7 +15,9 @@ import {
 import apiClient from "@/api/client";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { routeTree } from "@/routeTree.gen";
+import type { MeResponse } from "@/api/types";
 import {
+  ADMIN,
   ME,
   REPO_APPS,
   REPO_PLATFORM,
@@ -23,9 +25,9 @@ import {
   fakeApi,
 } from "@/test/fake-api";
 
-function renderAt(path: string) {
+function renderAt(path: string, me: MeResponse = ME) {
   apiClient.defaults.adapter = fakeApi({
-    me: ME,
+    me,
     repos: [REPO_APPS, REPO_PLATFORM],
     sessions: { "example-org/apps": { ...SESSION, pending_changes: 2 } },
   }).adapter;
@@ -54,7 +56,7 @@ describe("command palette", () => {
   });
 
   it("opens with Ctrl+K and jumps to a repository", async () => {
-    const router = renderAt("/fleet");
+    const router = renderAt("/secrets");
     await screen.findByRole("button", { name: /account menu/i });
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
@@ -79,21 +81,36 @@ describe("command palette", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
-        "/repos/example-org/platform",
+        "/secrets/example-org/platform",
       ),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("opens from the header and goes to a page", async () => {
-    const router = renderAt("/repos");
+    const router = renderAt("/secrets", ADMIN);
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Search repositories and pages",
       }),
     );
     const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("option", { name: "Fleet" }));
+    fireEvent.click(within(dialog).getByRole("option", { name: /^fleet/i }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/fleet"));
+  });
+
+  it("offers the fleet to admins only", async () => {
+    renderAt("/secrets");
+    fireEvent.keyDown(
+      await screen.findByRole("button", { name: /account menu/i }),
+      { key: "k", ctrlKey: true },
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByRole("option", { name: /^secrets/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("option", { name: /^fleet/i }),
+    ).not.toBeInTheDocument();
   });
 });

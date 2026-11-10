@@ -51,7 +51,10 @@ describe("repositories", () => {
   });
 
   it("lists the repositories the user can read, with their access", async () => {
-    renderAt("/repos", fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }));
+    renderAt(
+      "/secrets",
+      fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
+    );
 
     const apps = await screen.findByRole("rowheader", {
       name: "example-org/apps",
@@ -61,7 +64,7 @@ describe("repositories", () => {
     expect(within(appsRow).getByText("Private")).toBeInTheDocument();
     expect(
       within(apps).getByRole("link", { name: "example-org/apps" }),
-    ).toHaveAttribute("href", "/repos/example-org/apps");
+    ).toHaveAttribute("href", "/secrets/example-org/apps");
 
     const platform = screen
       .getByRole("rowheader", { name: "example-org/platform" })
@@ -69,18 +72,19 @@ describe("repositories", () => {
     expect(within(platform).getByText("Read only")).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", { name: "Main" });
-    expect(
-      within(nav).getByRole("link", { name: "Repositories" }),
-    ).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Secrets" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("explains an empty list and shows errors", async () => {
-    renderAt("/repos", fakeApi({ me: ME, repos: [] }));
+    renderAt("/secrets", fakeApi({ me: ME, repos: [] }));
     expect(await screen.findByText("No repositories")).toBeInTheDocument();
   });
 
   it("shows the server's message when GitHub fails", async () => {
-    renderAt("/repos", fakeApi({ me: ME, reposStatus: 502 }));
+    renderAt("/secrets", fakeApi({ me: ME, reposStatus: 502 }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /could not load repositories/i,
     );
@@ -88,7 +92,7 @@ describe("repositories", () => {
 
   it("shows a repository's SealedSecret files for the env", async () => {
     renderAt(
-      "/repos/example-org/apps",
+      "/secrets/example-org/apps",
       fakeApi({ me: ME, files: { "example-org/apps": listing() } }),
     );
 
@@ -127,7 +131,7 @@ describe("repositories", () => {
 
   it("filters repositories and opens the first match with Enter", async () => {
     const router = renderAt(
-      "/repos",
+      "/secrets",
       fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
     );
     const filter = await screen.findByRole("searchbox", {
@@ -139,14 +143,14 @@ describe("repositories", () => {
     fireEvent.keyDown(filter, { key: "Enter" });
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
-        "/repos/example-org/platform",
+        "/secrets/example-org/platform",
       ),
     );
   });
 
   it("says when the user can only read, and when nothing was found", async () => {
     renderAt(
-      "/repos/example-org/platform",
+      "/secrets/example-org/platform",
       fakeApi({
         me: ME,
         files: {
@@ -163,7 +167,7 @@ describe("repositories", () => {
   });
 
   it("reports a repository the user cannot read as not found", async () => {
-    renderAt("/repos/example-org/restricted", fakeApi({ me: ME }));
+    renderAt("/secrets/example-org/restricted", fakeApi({ me: ME }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /could not load this repository/i,
     );
