@@ -210,10 +210,48 @@ verifies tokens against those keys and never calls the Kubernetes API. Its
 local-only secrets, including the admin token `atmos dev status` uses, are in
 `dev/k3d/control-plane-secret.yaml`.
 
+## Releases
+
+Every push to `main` runs the whole CI suite on that commit from
+`.github/workflows/release.yaml`, then releases it when its conventional
+commits since the last `vX.Y.Z` tag call for one:
+
+| Commits since the last release                      | Release                  |
+| --------------------------------------------------- | ------------------------ |
+| `type!:` or a `BREAKING CHANGE:` footer             | major (minor before 1.0) |
+| `feat:`                                             | minor                    |
+| `fix:`, `perf:`, `refactor:`, `revert:`             | patch                    |
+| `build(deps):`, `chore(deps):` (dependency updates) | patch                    |
+| only `docs:`, `ci:`, `test:`, `chore:` and the like | none                     |
+
+A release builds and publishes, for `linux/amd64` and `linux/arm64`:
+
+- the control plane's Lambda zips (`bootstrap` for `provided.al2023`),
+  attached to the GitHub release with checksums and the packaged charts;
+- the control plane and agent images on GHCR, with SBOMs;
+- the Helm charts, as OCI artifacts on GHCR (`oci://ghcr.io/cruxstack/charts`);
+- a build provenance attestation for every file, image and chart.
+
+The release is tagged last, so a failed run leaves no tag; running the
+workflow by hand retries it. The same steps run locally:
+
+```sh
+atmos release version                    # the next version and its notes (release/notes.md)
+atmos release artifacts --version 0.1.0  # the Lambda zips, charts and checksums in release/
+```
+
+CI builds the release files on every pull request, so packaging problems show
+up before a merge. The Lambda zips are reproducible: the same commit and
+version give the same bytes.
+
 ## Configuration
 
 The binaries read `APP_` environment variables, all in `internal/config`.
-Invalid or missing settings are reported together at startup.
+Invalid or missing settings are reported together at startup. Any control
+plane setting may instead hold the ARN of an SSM Parameter Store parameter
+(`arn:aws:ssm:<region>:<account>:parameter/<name>`), which is read once at
+start, decrypted when it is a SecureString. On Lambda, that keeps secrets out
+of environment variables.
 
 | Variable                           | Component     | Default                            |
 | ---------------------------------- | ------------- | ---------------------------------- |
@@ -223,7 +261,8 @@ Invalid or missing settings are reported together at startup.
 | `APP_ENV_NAME`                     | both          | required                           |
 | `APP_PUBLIC_URL`                   | control plane | required                           |
 | `APP_AGENT_AUDIENCE`               | control plane | `APP_PUBLIC_URL`                   |
-| `APP_REGISTRY_FILE`                | control plane | required                           |
+| `APP_REGISTRY_FILE`                | control plane | this or `APP_REGISTRY`             |
+| `APP_REGISTRY`                     | control plane | the registry inline (Lambda)       |
 | `APP_AGENT_SESSION_KEY`            | control plane | required, at least 32 bytes        |
 | `APP_ADMIN_TOKEN`                  | control plane | unset: admin API disabled          |
 | `APP_DYNAMODB_TABLE`               | control plane | required                           |

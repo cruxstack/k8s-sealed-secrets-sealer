@@ -12,8 +12,9 @@ region or a certificate.
 > into them as pending changes, and open a pull request with those changes;
 > an agent seals each value with the env key, and only `spec.encryptedData`
 > changes in the files. Agents keep every cluster holding the same keys.
-> Packaging a release is next. See [the design](docs/design.md) for where it
-> is going.
+> Releases publish the control plane for Lambda, container images and Helm
+> charts; the Terraform module for AWS is next. See
+> [the design](docs/design.md) for where it is going.
 
 ## How it works
 
@@ -76,11 +77,40 @@ atmos test e2e      # the end-to-end suite in a throwaway cluster
 See [docs/development.md](docs/development.md) for the local stack and every
 command.
 
+## Install
+
+Each [release](https://github.com/cruxstack/k8s-sealed-secrets-sealer/releases)
+publishes:
+
+| Artifact                 | Where                                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| Control plane for Lambda | `k8s-sealed-secrets-sealer-lambda_arm64.zip` and `_amd64.zip` on the release             |
+| Control plane image      | `ghcr.io/cruxstack/k8s-sealed-secrets-sealer-control-plane:<version>`                    |
+| Agent image              | `ghcr.io/cruxstack/k8s-sealed-secrets-sealer-agent:<version>`                            |
+| Agent chart              | `oci://ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-agent`                         |
+| Control plane chart      | `oci://ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-control-plane`, for containers |
+
+Install the agent in each cluster, beside its sealed-secrets controller:
+
+```sh
+helm install sealer-agent oci://ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-agent \
+  --version <version> --namespace sealer --create-namespace -f values.yaml
+```
+
+Every file, image and chart has a build provenance attestation:
+
+```sh
+gh attestation verify k8s-sealed-secrets-sealer-lambda_arm64.zip --repo cruxstack/k8s-sealed-secrets-sealer
+gh attestation verify oci://ghcr.io/cruxstack/k8s-sealed-secrets-sealer-agent:<version> \
+  --repo cruxstack/k8s-sealed-secrets-sealer
+```
+
 ## Repository layout
 
 | Path                         | Contents                                         |
 | ---------------------------- | ------------------------------------------------ |
-| `cmd/server`, `cmd/agent`    | Control plane (HTTP server) and agent binaries   |
+| `cmd/server`, `cmd/lambda`   | Control plane as an HTTP server and on Lambda    |
+| `cmd/agent`                  | The agent                                        |
 | `web/`                       | The web UI, built into the control plane         |
 | `internal/`                  | Application packages                             |
 | `deploy/helm/`               | Helm charts for the agent and the control plane  |

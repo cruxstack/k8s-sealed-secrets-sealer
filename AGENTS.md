@@ -7,7 +7,8 @@
 - **Entry points**:
   - `cmd/server/` - control plane as an HTTP server (containers, local stack)
   - `cmd/agent/` - the agent
-  - `cmd/lambda/` - control plane on Lambda (not yet added)
+  - `cmd/lambda/` - control plane on Lambda: API Gateway HTTP API (payload 2.0) and function URL events to the same HTTP handler
+  - `internal/app/` - wires the control plane together from its configuration, for `cmd/server` and `cmd/lambda` alike
 - **Packages**:
   - `internal/config/` - reads and validates all configuration; nothing else reads the environment
   - `internal/protocol/` - the agent API's messages and capabilities; a change here is a protocol change

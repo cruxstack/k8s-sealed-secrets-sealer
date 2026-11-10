@@ -1,6 +1,6 @@
 # build output
 /dist/
-release/
+/release/
 # the web UI build, embedded into the control plane (the placeholder stays)
 internal/webui/dist/app/
 coverage.out

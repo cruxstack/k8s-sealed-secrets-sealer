@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://atmos.tools/schemas/atmos/atmos-manifest/1.0/atmos-manifest.json
+
+# The release workflow (.github/workflows/release.yaml) runs these, so a
+# release can be built and checked locally the same way.
+commands:
+  - name: release
+    description: Build and publish releases
+    commands:
+      - name: version
+        description: |
+          Print the next release version from the conventional commits since
+          the last vX.Y.Z tag (empty when nothing needs a release), and write
+          its notes to release/notes.md.
+
+            atmos release version
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/release/version.sh
+
+      - name: artifacts
+        dependencies:
+          tools:
+            golang/go: 1.27.3
+            helm/helm: 3.22.1
+        description: |
+          Build a release's files into release/: the control plane's Lambda
+          zips (amd64 and arm64), the packaged Helm charts and checksums.
+
+            atmos release artifacts --version 0.1.0
+        flags:
+          - name: version
+            description: The release version, X.Y.Z
+            required: true
+        env:
+          - key: RELEASE_VERSION
+            value: "{{ .Flags.version }}"
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/release/artifacts.sh "$RELEASE_VERSION"
+
+      - name: charts
+        dependencies:
+          tools:
+            helm/helm: 3.22.1
+        description: |
+          Push the charts in release/ to an OCI registry, logging in with
+          REGISTRY_USER and REGISTRY_TOKEN.
+
+            atmos release charts --target oci://ghcr.io/cruxstack/charts
+        flags:
+          - name: target
+            description: The OCI registry path, oci://<host>/<path>
+            required: true
+        env:
+          - key: RELEASE_CHARTS_TARGET
+            value: "{{ .Flags.target }}"
+        steps:
+          - type: shell
+            command: bash .atmos/scripts/release/charts.sh "$RELEASE_CHARTS_TARGET"
