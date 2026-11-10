@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -17,7 +19,9 @@ type Memory struct {
 	replays map[string]time.Time
 	// commands by agent ID, then command ID
 	commands map[string]map[string]CommandRecord
-	escrow   map[string]protocol.EscrowRecord
+	// escrow holds each key's escrowed copies, the primary record first
+	escrow  map[string][]protocol.EscrowRecord
+	revoked map[string]RevokedKey
 	// sessions by user ID, then repository key; seals and changes by
 	// session ID, then command or change ID
 	sessions map[int64]map[string]Session
@@ -42,7 +46,8 @@ func NewMemory() *Memory {
 		keys:     map[string]KeyRecord{},
 		replays:  map[string]time.Time{},
 		commands: map[string]map[string]CommandRecord{},
-		escrow:   map[string]protocol.EscrowRecord{},
+		escrow:   map[string][]protocol.EscrowRecord{},
+		revoked:  map[string]RevokedKey{},
 		sessions: map[int64]map[string]Session{},
 		seals:    map[string]map[string]Seal{},
 		changes:  map[string]map[string]Change{},
@@ -78,6 +83,36 @@ func (m *Memory) PutKeyIfAbsent(_ context.Context, k KeyRecord) (bool, error) {
 	}
 	m.keys[k.Fingerprint] = k
 	return true, nil
+}
+
+func (m *Memory) GetKey(_ context.Context, fingerprint string) (KeyRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.keys[fingerprint]
+	return k, ok, nil
+}
+
+func (m *Memory) SetKeyStatus(_ context.Context, k KeyRecord) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.keys[k.Fingerprint]
+	if !ok {
+		return false, nil
+	}
+	rec.Status, rec.StatusBy, rec.StatusAt = k.Status, k.StatusBy, k.StatusAt
+	m.keys[k.Fingerprint] = rec
+	if k.Status == KeyRevoked {
+		m.revoked[k.Fingerprint] = revokedKey(k)
+	} else {
+		delete(m.revoked, k.Fingerprint)
+	}
+	return true, nil
+}
+
+func (m *Memory) RevokedKeys(_ context.Context) (map[string]RevokedKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.revoked), nil
 }
 
 func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.Time) (bool, error) {
@@ -178,30 +213,35 @@ func (m *Memory) FinishCommand(_ context.Context, agentID, id, status, result, e
 	return true, nil
 }
 
-func (m *Memory) PutEscrowIfAbsent(_ context.Context, rec protocol.EscrowRecord) (bool, error) {
+func (m *Memory) PutEscrow(_ context.Context, rec protocol.EscrowRecord, maxCopies int) (bool, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.escrow[rec.Fingerprint]; ok {
-		return false, nil
+	recs := m.escrow[rec.Fingerprint]
+	if len(recs) >= max(maxCopies, 1) || slices.ContainsFunc(recs, func(r protocol.EscrowRecord) bool { return r.UploadedBy == rec.UploadedBy }) {
+		return false, false, nil
 	}
-	m.escrow[rec.Fingerprint] = rec
-	return true, nil
+	recs = append(recs, rec)
+	// the primary record stays first; copies follow by uploader
+	sort.SliceStable(recs[1:], func(i, j int) bool { return recs[1+i].UploadedBy < recs[1+j].UploadedBy })
+	m.escrow[rec.Fingerprint] = recs
+	return true, len(recs) == 1, nil
 }
 
-func (m *Memory) Escrow(_ context.Context, fingerprint string) (protocol.EscrowRecord, bool, error) {
+func (m *Memory) Escrow(_ context.Context, fingerprint string) ([]protocol.EscrowRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rec, ok := m.escrow[fingerprint]
-	return rec, ok, nil
+	return slices.Clone(m.escrow[fingerprint]), nil
 }
 
-func (m *Memory) Escrowed(_ context.Context, fingerprints []string) (map[string]bool, error) {
+func (m *Memory) EscrowUploaders(_ context.Context, fingerprints []string) (map[string][]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := map[string]bool{}
+	out := map[string][]string{}
 	for _, fp := range fingerprints {
-		if _, ok := m.escrow[fp]; ok {
-			out[fp] = true
+		for _, r := range m.escrow[fp] {
+			if !slices.Contains(out[fp], r.UploadedBy) {
+				out[fp] = append(out[fp], r.UploadedBy)
+			}
 		}
 	}
 	return out, nil

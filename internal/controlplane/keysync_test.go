@@ -323,19 +323,19 @@ func TestEscrow_Rejects(t *testing.T) {
 			}
 		})
 	}
-	if _, ok, _ := sh.store.Escrow(context.Background(), k.Fingerprint); ok {
+	if recs, _ := sh.store.Escrow(context.Background(), k.Fingerprint); len(recs) != 0 {
 		t.Fatal("a rejected upload was stored")
 	}
 
-	// the first upload wins
+	// an agent's copy is never replaced
 	if code := put("a", k.Fingerprint, protocol.EscrowUpload{Certificate: k.Certificate, Envelope: good}); code != http.StatusOK {
 		t.Fatalf("upload = %d", code)
 	}
-	first, _, _ := sh.store.Escrow(context.Background(), k.Fingerprint)
+	first, _ := sh.store.Escrow(context.Background(), k.Fingerprint)
 	if code := sh.upload("a", k); code != http.StatusOK {
 		t.Fatalf("second upload = %d", code)
 	}
-	if again, _, _ := sh.store.Escrow(context.Background(), k.Fingerprint); again.Envelope.Ciphertext != first.Envelope.Ciphertext {
+	if again, _ := sh.store.Escrow(context.Background(), k.Fingerprint); len(again) != 1 || again[0].Envelope.Ciphertext != first[0].Envelope.Ciphertext {
 		t.Fatal("a second upload replaced the first")
 	}
 
@@ -450,7 +450,7 @@ agents:
 	}
 	plan := func(self string, states map[string]store.AgentState, cmds []store.CommandRecord) bool {
 		a, _ := reg.Agent(self)
-		return planKeySync(fleet.Compute("dev", reg, states, now), a, states[self], false, cmds, nil, now).EnableRenewal
+		return planKeySync(fleet.Compute("dev", reg, states, fleet.Keys{}, now), a, states[self], false, cmds, fleet.Keys{}, now).EnableRenewal
 	}
 
 	off := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "0s", 0)}
@@ -461,7 +461,7 @@ agents:
 	// checks in before their states are stored, and each could see itself
 	// as the lowest
 	a, _ := reg.Agent("a")
-	if planKeySync(fleet.Compute("dev", reg, off, now), a, off["a"], true, nil, nil, now).EnableRenewal {
+	if planKeySync(fleet.Compute("dev", reg, off, fleet.Keys{}, now), a, off["a"], true, nil, fleet.Keys{}, now).EnableRenewal {
 		t.Error("renewal was asked on a's first check-in")
 	}
 	on := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "720h0m0s", 0)}

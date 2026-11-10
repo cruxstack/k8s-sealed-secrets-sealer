@@ -241,6 +241,8 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	var outOfSync *fleet.KeysOutOfSyncError
 	switch {
 	case errors.As(err, &outOfSync):
+		s.logger.WarnContext(ctx, "seal refused: no key is held by every cluster",
+			"event", "keys.out_of_sync", "env", s.env, "clusters", outOfSync.Clusters, "user", user.Login)
 		writeError(w, http.StatusConflict, outOfSync.Error())
 		return
 	case errors.Is(err, fleet.ErrNoSealer):
@@ -330,16 +332,10 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 
 // chooseSealer picks the agent for a seal and returns it with the env key.
 func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Time) (fleet.Agent, string, error) {
-	reg := s.currentRegistry()
-	ids := make([]string, 0, len(reg.Agents))
-	for _, a := range reg.Agents {
-		ids = append(ids, a.ID)
-	}
-	states, err := s.store.GetAgentStates(ctx, ids)
+	f, err := s.loadFleet(ctx, now)
 	if err != nil {
 		return fleet.Agent{}, "", err
 	}
-	f := fleet.Compute(s.env, reg, states, now)
 	// commands in flight, counted only for agents that might be chosen
 	inFlight := map[string]int{}
 	for _, a := range f.Agents {

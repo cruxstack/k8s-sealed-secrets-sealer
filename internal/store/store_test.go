@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,9 @@ func TestStore_AgentStates(t *testing.T) {
 				Controller:   protocol.Controller{Namespace: "sealed-secrets", Name: "sealed-secrets-controller", ActiveFingerprint: "SHA256:a"},
 				Keys:         []KeyRef{{Fingerprint: "SHA256:a", NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}},
 				KeysComplete: true,
+				KeysReported: 3,
+				DroppedUpTo:  ptr(now.Add(-2 * time.Hour)),
+				JoinedAt:     ptr(now.Add(-time.Minute)),
 
 				CheckInIntervalSeconds: 60,
 			}
@@ -81,9 +85,23 @@ func TestStore_AgentStates(t *testing.T) {
 			if !g.LastCheckIn.Equal(now) || g.Controller.ActiveFingerprint != "SHA256:a" || len(g.Keys) != 1 || !g.KeysComplete || g.CheckInIntervalSeconds != 60 {
 				t.Fatalf("state round trip: %+v", g)
 			}
+			if g.KeysReported != 3 || g.DroppedUpTo == nil || !g.DroppedUpTo.Equal(*state.DroppedUpTo) || g.JoinedAt == nil || !g.JoinedAt.Equal(*state.JoinedAt) {
+				t.Fatalf("key limit and joining round trip: %+v", g)
+			}
+			// states stored before these were recorded read as unknown
+			state.AgentID, state.KeysReported, state.DroppedUpTo, state.JoinedAt = "use1-green", 0, nil, nil
+			if err := s.PutAgentState(ctx, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err = s.GetAgentStates(ctx, []string{"use1-green"})
+			if g := got["use1-green"]; err != nil || g.KeysReported != 0 || g.DroppedUpTo != nil || g.JoinedAt != nil {
+				t.Fatalf("state without them: %+v %v", g, err)
+			}
 		})
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
 
 func TestStore_PutKeyIfAbsent(t *testing.T) {
 	for name, s := range stores(t) {
@@ -302,32 +320,54 @@ func TestStore_Escrow(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			fp := "SHA256:escrow-" + name
-			rec := protocol.EscrowRecord{
-				Fingerprint: fp,
-				Certificate: "PEM",
-				Envelope: protocol.Envelope{
-					KeyID: "arn:aws:kms:us-east-1:000000000000:key/k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y2lwaGVy",
-					Context: map[string]string{"env": "dev", "fingerprint": fp, "purpose": "key-escrow"},
-				},
-				UploadedBy: "use1-blue",
-				UploadedAt: time.Now().UTC().Truncate(time.Millisecond),
+			upload := func(agent, ciphertext string) protocol.EscrowRecord {
+				return protocol.EscrowRecord{
+					Fingerprint: fp,
+					Certificate: "PEM",
+					Envelope: protocol.Envelope{
+						KeyID: "arn:aws:kms:us-east-1:000000000000:key/k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: ciphertext,
+						Context: map[string]string{"env": "dev", "fingerprint": fp, "purpose": "key-escrow"},
+					},
+					UploadedBy: agent,
+					UploadedAt: time.Now().UTC().Truncate(time.Millisecond),
+				}
 			}
-			if _, ok, err := s.Escrow(ctx, fp); err != nil || ok {
-				t.Fatalf("escrow before upload: ok=%v err=%v", ok, err)
+			if recs, err := s.Escrow(ctx, fp); err != nil || len(recs) != 0 {
+				t.Fatalf("escrow before upload: %v %v", recs, err)
 			}
-			if stored, err := s.PutEscrowIfAbsent(ctx, rec); err != nil || !stored {
-				t.Fatalf("first upload: stored=%v err=%v", stored, err)
+			first := upload("use1-blue", "Zmlyc3Q=")
+			if stored, isFirst, err := s.PutEscrow(ctx, first, 3); err != nil || !stored || !isFirst {
+				t.Fatalf("first upload: stored=%v first=%v err=%v", stored, isFirst, err)
 			}
-			second := rec
-			second.UploadedBy = "use2-blue"
-			if stored, err := s.PutEscrowIfAbsent(ctx, second); err != nil || stored {
-				t.Fatalf("second upload: stored=%v err=%v", stored, err)
+			// one copy per agent: the first uploader cannot add or replace one
+			if stored, _, err := s.PutEscrow(ctx, upload("use1-blue", "YWdhaW4="), 3); err != nil || stored {
+				t.Fatalf("second upload by the same agent: stored=%v err=%v", stored, err)
 			}
-			got, ok, err := s.Escrow(ctx, fp)
-			if err != nil || !ok {
-				t.Fatalf("escrow: ok=%v err=%v", ok, err)
+			// other agents add copies, up to three in all
+			for _, agent := range []string{"use2-green", "use2-blue"} {
+				if stored, isFirst, err := s.PutEscrow(ctx, upload(agent, "Y29weQ=="), 3); err != nil || !stored || isFirst {
+					t.Fatalf("copy from %s: stored=%v first=%v err=%v", agent, stored, isFirst, err)
+				}
 			}
-			if got.UploadedBy != "use1-blue" || got.Envelope.Ciphertext != "Y2lwaGVy" || got.Envelope.Context["fingerprint"] != fp || !got.UploadedAt.Equal(rec.UploadedAt) {
+			if stored, _, err := s.PutEscrow(ctx, upload("use2-blue", "YWdhaW4="), 3); err != nil || stored {
+				t.Fatalf("second copy from use2-blue: stored=%v err=%v", stored, err)
+			}
+			if stored, _, err := s.PutEscrow(ctx, upload("use3-blue", "Zm91cnRo"), 3); err != nil || stored {
+				t.Fatalf("fourth copy: stored=%v err=%v", stored, err)
+			}
+
+			recs, err := s.Escrow(ctx, fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var by []string
+			for _, r := range recs {
+				by = append(by, r.UploadedBy)
+			}
+			if !slices.Equal(by, []string{"use1-blue", "use2-blue", "use2-green"}) {
+				t.Fatalf("copies = %v, want the primary first, then by uploader", by)
+			}
+			if got := recs[0]; got.Envelope.Ciphertext != "Zmlyc3Q=" || got.Envelope.Context["fingerprint"] != fp || !got.UploadedAt.Equal(first.UploadedAt) {
 				t.Fatalf("escrow round trip: %+v", got)
 			}
 
@@ -335,12 +375,68 @@ func TestStore_Escrow(t *testing.T) {
 			for i := range 120 {
 				fps = append(fps, "SHA256:missing-"+time.Duration(i).String())
 			}
-			escrowed, err := s.Escrowed(ctx, fps)
+			uploaders, err := s.EscrowUploaders(ctx, fps)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(escrowed) != 1 || !escrowed[fp] {
-				t.Fatalf("Escrowed = %v", escrowed)
+			if len(uploaders) != 1 || !slices.Equal(uploaders[fp], []string{"use1-blue", "use2-blue", "use2-green"}) {
+				t.Fatalf("EscrowUploaders = %v", uploaders)
+			}
+		})
+	}
+}
+
+func TestStore_KeyStatus(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			fp := "SHA256:status-" + name
+			k := KeyRecord{Fingerprint: fp, Certificate: "PEM", NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), FirstSeenAgent: "use1-blue", FirstSeenAt: now}
+
+			revoke := k
+			revoke.Status, revoke.StatusBy, revoke.StatusAt = KeyRevoked, "alice", &now
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || ok {
+				t.Fatalf("status of an unknown key: ok=%v err=%v", ok, err)
+			}
+			if revoked, err := s.RevokedKeys(ctx); err != nil || len(revoked) != 0 {
+				t.Fatalf("an unknown key was listed as revoked: %v %v", revoked, err)
+			}
+
+			if _, err := s.PutKeyIfAbsent(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			got, ok, err := s.GetKey(ctx, fp)
+			if err != nil || !ok || got.Status != "" || got.Certificate != "PEM" {
+				t.Fatalf("new key: %+v %v %v", got, ok, err)
+			}
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
+				t.Fatalf("revoke: ok=%v err=%v", ok, err)
+			}
+			got, _, _ = s.GetKey(ctx, fp)
+			if got.Status != KeyRevoked || got.StatusBy != "alice" || got.StatusAt == nil || !got.StatusAt.Equal(now) || got.FirstSeenAgent != "use1-blue" {
+				t.Fatalf("revoked key: %+v", got)
+			}
+			revoked, err := s.RevokedKeys(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := revoked[fp]; len(revoked) != 1 || r.By != "alice" || !r.At.Equal(now) || !r.NotBefore.Equal(k.NotBefore) {
+				t.Fatalf("RevokedKeys = %+v", revoked)
+			}
+
+			later := now.Add(time.Minute)
+			reinstate := k
+			reinstate.Status, reinstate.StatusBy, reinstate.StatusAt = KeyActive, "bob", &later
+			if ok, err := s.SetKeyStatus(ctx, reinstate); err != nil || !ok {
+				t.Fatalf("reinstate: ok=%v err=%v", ok, err)
+			}
+			got, _, _ = s.GetKey(ctx, fp)
+			if got.Status != KeyActive || got.StatusBy != "bob" {
+				t.Fatalf("reinstated key: %+v", got)
+			}
+			if revoked, err := s.RevokedKeys(ctx); err != nil || len(revoked) != 0 {
+				t.Fatalf("a reinstated key is still listed: %v %v", revoked, err)
 			}
 		})
 	}

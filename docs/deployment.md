@@ -290,7 +290,9 @@ A cluster that runs only at times, like `prod-use2-blue`, stays in the
 registry. While it is down, it keeps its last known keys: the env key, which
 values are sealed with, does not move past them, so everything sealed
 meanwhile still decrypts there. When the cluster comes back, or is rebuilt,
-its agent restores the env's keys from escrow. Seals meant for `use2` go to
+its agent restores the env's keys from escrow. A rebuilt cluster is left
+out of the env key for up to 30 minutes while it does, so sealing goes on
+meanwhile; that needs the `keys` capability. Seals meant for `use2` go to
 an agent in `use1` while no `use2` agent is healthy; any agent of the env
 can seal for any of its clusters.
 

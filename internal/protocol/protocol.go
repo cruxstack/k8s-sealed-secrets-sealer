@@ -40,8 +40,17 @@ func IsCapability(c string) bool { return slices.Contains(Capabilities, c) }
 
 // Limits on a check-in.
 const (
-	// MaxKeys bounds the key set one controller may report.
-	MaxKeys = 100
+	// MaxKeys is how many of a controller's keys the control plane keeps
+	// track of: the newest it reports. A check-in reporting more is
+	// accepted, and the oldest are left out of key sync. A 4096-bit key is
+	// about 1.9 KB of a check-in and 127 bytes of the agent's stored state,
+	// so 250 keys are about 465 KB of a 2 MiB check-in and 32 KB of a
+	// 400 KB DynamoDB item; docs/design.md, section 9, has the numbers.
+	MaxKeys = 250
+	// MaxRestoreKeys bounds the fingerprints one keys.restore.v1 names.
+	// Agents built when MaxKeys was 100 refuse a longer list; the control
+	// plane restores more in later commands.
+	MaxRestoreKeys = 100
 	// MaxCertificateBytes bounds one PEM certificate.
 	MaxCertificateBytes = 16 << 10
 )

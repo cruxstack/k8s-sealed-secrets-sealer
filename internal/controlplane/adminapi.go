@@ -29,18 +29,13 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 // fleet serves the env's fleet view: to automation holding the admin token,
 // and to signed-in users who administer the env.
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request) {
-	reg := s.currentRegistry()
-	ids := make([]string, 0, len(reg.Agents))
-	for _, a := range reg.Agents {
-		ids = append(ids, a.ID)
-	}
-	states, err := s.store.GetAgentStates(r.Context(), ids)
+	f, err := s.loadFleet(r.Context(), s.now().UTC())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to read agent states", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to read the fleet", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	httpserver.WriteJSON(w, http.StatusOK, fleet.Compute(s.env, reg, states, s.now().UTC()))
+	httpserver.WriteJSON(w, http.StatusOK, f)
 }
 
 // statusView says whether sealing works, for everyone signed in. It names
@@ -60,17 +55,11 @@ type statusView struct {
 
 // status serves whether values can be sealed in the env right now.
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	reg := s.currentRegistry()
-	ids := make([]string, 0, len(reg.Agents))
-	for _, a := range reg.Agents {
-		ids = append(ids, a.ID)
-	}
-	states, err := s.store.GetAgentStates(r.Context(), ids)
+	f, err := s.loadFleet(r.Context(), s.now().UTC())
 	if err != nil {
-		s.internalError(w, r, "failed to read agent states", err)
+		s.internalError(w, r, "failed to read the fleet", err)
 		return
 	}
-	f := fleet.Compute(s.env, reg, states, s.now().UTC())
 	v := statusView{Env: s.env}
 	v.Clusters.Total = len(f.Agents)
 	for _, a := range f.Agents {

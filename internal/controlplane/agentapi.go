@@ -107,13 +107,25 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 			"event", "agent.capability_ignored", "env", s.env, "agent_id", agent.ID, "capabilities", ignored)
 	}
 	state.CheckInIntervalSeconds = checkInIntervalSeconds(r.Header.Get(protocol.CheckInIntervalHeader))
-	// the fleet as it was before this check-in, for key sync: it says
-	// whether this agent had checked in before
-	states, statesErr := s.agentStates(r.Context())
+	// the fleet as it was before this check-in: the agent's previous state
+	// says whether it checked in before, and with the revoked keys shapes
+	// what is stored (the keys kept under the limit, when it joined)
+	snap, snapErr := s.readSnapshot(r.Context())
+	prev, seen := snap.states[agent.ID]
+	records = applyKeyReport(&state, records, prev, seen, snap.revoked, now)
+	if snapErr != nil {
+		// the check-in is stored all the same, so the agent stays healthy,
+		// and key sync waits for the next; without the previous state the
+		// join time is unknown, as for agents seen before it was recorded
+		state.JoinedAt = nil
+	}
 	if err := s.store.PutAgentState(r.Context(), state); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to store agent check-in", "agent_id", agent.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if snapErr == nil {
+		s.logKeyReport(r.Context(), agent, prev, seen, state, now)
 	}
 	for _, rec := range records {
 		if s.isKnownKey(rec.Fingerprint) {
@@ -133,9 +145,10 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 		}
 	}
 	var escrowNeeded []string
-	err = statesErr
+	err = snapErr
 	if err == nil {
-		escrowNeeded, err = s.syncKeys(r.Context(), agent, state, states)
+		snap.states[agent.ID] = state
+		escrowNeeded, err = s.syncKeys(r.Context(), agent, state, snap, seen)
 	}
 	if err != nil {
 		// key sync catches up on a later check-in; the check-in itself is
@@ -248,11 +261,9 @@ func validateCheckIn(in protocol.CheckIn, agent *registry.Agent, now time.Time) 
 		fail("controller key_order_priority is not recognized")
 	}
 
-	switch {
-	case len(in.Keys) == 0:
+	// more than protocol.MaxKeys keys is not refused: the newest are kept
+	if len(in.Keys) == 0 {
 		fail("keys must not be empty")
-	case len(in.Keys) > protocol.MaxKeys:
-		fail("too many keys (at most %d)", protocol.MaxKeys)
 	}
 	var refs []store.KeyRef
 	var records []store.KeyRecord

@@ -479,6 +479,9 @@ func TestSeal_Refuses(t *testing.T) {
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "keys out of sync") {
 		t.Fatalf("out of sync = %d %s", rec.Code, rec.Body)
 	}
+	if !strings.Contains(sh.logs.String(), "event=keys.out_of_sync") {
+		t.Error("a seal refused for keys out of sync was not logged")
+	}
 	sh.checkIn("dev-use2-blue", sh.key.Key, other)
 
 	// no healthy agent
