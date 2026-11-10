@@ -821,6 +821,14 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
   is checked at sign-in; removing someone from the team takes effect when
   their session expires.
+- **Admins.** Members of the teams in `github.adminTeams` are admins; with
+  none configured, nobody is. Membership is checked at sign-in and kept in
+  the session, like the allowlist. Only admins can read the fleet
+  (`GET /api/v1/fleet`: every agent with its cluster, controller, keys and
+  issues). Everyone signed in can read `GET /api/v1/status`, which says
+  whether sealing works and how many of the env's clusters are ready, but
+  names none of them. The UI shows the status as a dot on the env badge, and
+  the fleet only to admins.
 - **Rate limits** use API Gateway throttling and WAF rate-based rules.
   In-memory limiters do not hold across Lambda instances, so limits that
   matter (sessions per user) are enforced with DynamoDB.
@@ -839,9 +847,43 @@ two annotations whose keys are configurable:
 | Region     | `k8s-sealed-secrets-sealer/region`   | no       |
 
 A document belongs to the env when its env annotation equals the deployment's
-env name. The region annotation is a preference hint for choosing an agent and
-is shown in the UI. Files that already use other annotation names keep working
-by configuring the keys to match them.
+env name. The env annotation is how a fleet says which documents it manages:
+each deployment names its annotation (`annotations.env`, `APP_ENV_ANNOTATION`)
+and its env, and ignores every other document, so fleets can share a
+repository without touching each other's documents. The region annotation is
+a preference hint for choosing an agent and is shown in the UI. Files that
+already use other annotation names keep working by configuring the keys to
+match them.
+
+**Hints.** Three more annotations, under the env annotation's prefix (the
+part of its key before `/`), help people seal the right values. They are
+optional and change nothing about how a value is sealed:
+
+| Annotation             | Holds                                         |
+| ---------------------- | --------------------------------------------- |
+| `<prefix>/description` | What the secret is for: one line, cut at 300  |
+|                        | characters.                                   |
+| `<prefix>/keys`        | The keys the Secret should hold, separated by |
+|                        | commas or spaces.                             |
+| `<prefix>/docs`        | An http(s) link to the secret's docs or       |
+|                        | runbook.                                      |
+
+```yaml
+metadata:
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/description: Credentials the billing service uses
+    k8s-sealed-secrets-sealer/keys: api-token, db-password
+    k8s-sealed-secrets-sealer/docs: https://docs.example.com/runbooks/billing
+```
+
+The UI shows the description in the file list and above the file's
+documents, links the docs, marks expected keys a document lacks as missing,
+offers expected keys first in the seal form and warns, without refusing, when
+a new key is not among them. Invalid values are dropped: a key that cannot
+name a Secret value, a link that is not absolute http(s) or carries
+credentials. They come from the documents themselves, so they are reviewed
+with the file like any other change.
 
 **Discovery.** A repository's SealedSecret files are found on the head of its
 default branch: the commit's tree is listed once, files whose name matches
@@ -944,6 +986,11 @@ roles. Each env is one instance of that module, in whichever region suits.
 
 ## 16. Future work (not in v1)
 
+- **Region-specific secrets.** A seal goes into every document of a file
+  for the env, so a value that differs by region (a regional endpoint's
+  credentials) needs a file per region today. A later version may let a seal
+  target only the documents of chosen regions, from their region
+  annotation, and show per region which keys are set.
 - **Reseal all.** Re-encrypt every sealed value in the env's repositories with
   the env key, so old keys can eventually be removed. Either the agent calls
   the controller's `/v1/rotate` (which re-encrypts without exposing plaintext

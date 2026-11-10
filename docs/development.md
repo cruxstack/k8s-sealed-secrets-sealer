@@ -105,25 +105,29 @@ redeploy in seconds; the images only wrap the binaries
 Open http://localhost:4100 and sign in. GitHub is a mock
 (`cmd/mock-github`) that lets you pick a user:
 
-| User    | Result                                                   |
-| ------- | -------------------------------------------------------- |
-| `alice` | Signs in: org member and in the allowed team `sealers`   |
-| `bob`   | Refused: in the org, not in the allowed team             |
-| `carol` | Refused: not in the org                                  |
+| User    | Result                                                          |
+| ------- | --------------------------------------------------------------- |
+| `alice` | Signs in as an admin: in the allowed team `sealers` and the     |
+|         | admin team `sealer-admins`, so also sees the fleet              |
+| `dave`  | Signs in: in the allowed team `sealers`, not an admin           |
+| `bob`   | Refused: in the org, not in the allowed team                    |
+| `carol` | Refused: not in the org                                         |
 
 The mock is also a GitHub App, installed on the fixture repositories in
 `internal/mockgithub/fixtures`:
 
-| Repository               | alice | bob  | carol |
-| ------------------------ | ----- | ---- | ----- |
-| `example-org/apps`       | write | read | none  |
-| `example-org/platform`   | read  | none | none  |
-| `example-org/restricted` | none  | none | none  |
+| Repository               | alice | dave  | bob  | carol |
+| ------------------------ | ----- | ----- | ---- | ----- |
+| `example-org/apps`       | write | write | read | none  |
+| `example-org/platform`   | read  | none  | none | none  |
+| `example-org/restricted` | none  | none  | none | none  |
 
 In `example-org/apps`, `deploy/billing/sealed-secret.yaml` has one dev
 document per simulated cluster (one seal updates all three) and a prod
 document the dev stack ignores; the other files cover namespace-wide and
-cluster-wide scope and a prod-only file.
+cluster-wide scope and a prod-only file. The billing and search files carry
+the hint annotations (description, expected keys and, for billing, a docs
+link), so the UI shows them; the others have none.
 
 Its installation tokens carry the permissions they were minted with, and every
 repository call checks them, as GitHub does: writes need a token minted with
@@ -181,6 +185,9 @@ the run for inspection. Besides bringing the stack up, it checks that:
 - the UI is served with a strict content security policy, the fleet API
   requires sign-in, alice can sign in while bob and carol are refused, and
   sign-out requires the CSRF token;
+- alice is an admin and dave is not: the fleet API refuses dave, and the
+  status API tells dave whether sealing works and how many clusters are
+  ready without naming any;
 - alice sees only the repositories she can read, with her access, discovery
   finds the dev SealedSecrets (and flags cluster-wide scope), and a
   repository she cannot read is not found;
@@ -271,6 +278,7 @@ of environment variables.
 | `APP_AWS_STS_HOSTS`                | control plane | AWS's public STS hosts             |
 | `APP_GITHUB_ORG`                   | control plane | required                           |
 | `APP_GITHUB_ALLOWED_TEAMS`         | control plane | unset: any org member              |
+| `APP_GITHUB_ADMIN_TEAMS`           | control plane | unset: no admins                   |
 | `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required                           |
 | `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required                           |
 | `APP_GITHUB_URL`                   | control plane | `https://github.com`               |

@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
+import { fileHints, missingKeys } from "./hints";
 
 /** How often a seal's progress is checked; tests shorten it. */
 export const sealPolling = { intervalMs: 1000 };
@@ -120,8 +121,23 @@ export function SealForm({
 
   const docs = file.documents ?? [];
   const existing = [...new Set(docs.flatMap((d) => d.keys))];
-  const suggestions = [...new Set([...existing, ...pendingKeys])].sort();
+  const { expected } = fileHints(file);
+  // the keys the file expects first, then the rest it holds
+  const suggestions = [
+    ...new Set([
+      ...expected,
+      ...[...new Set([...existing, ...pendingKeys])].sort(),
+    ]),
+  ];
   const problem = keyProblem(key);
+  // a new key the file does not expect is likely a typo
+  const unexpected =
+    !problem &&
+    key !== "" &&
+    expected.length > 0 &&
+    !expected.includes(key) &&
+    !existing.includes(key) &&
+    !pendingKeys.has(key);
   const canSubmit = !busy && key !== "" && !problem && value !== "";
   const note = problem
     ? problem
@@ -129,9 +145,17 @@ export function SealForm({
       ? `Replaces the value of ${key} you sealed in this session.`
       : existing.includes(key)
         ? `Replaces the current value of ${key} in the file.`
-        : key
-          ? `Adds ${key} to spec.encryptedData.`
-          : "The name in spec.encryptedData; existing keys are suggested.";
+        : unexpected
+          ? `Adds ${key} to spec.encryptedData, but this file does not expect it. Check the name.`
+          : key
+            ? `Adds ${key} to spec.encryptedData.`
+            : expected.length > 0
+              ? "The name in spec.encryptedData; pick an expected key or type one."
+              : "The name in spec.encryptedData; existing keys are suggested.";
+  const pick = (k: string) => {
+    setKey(k);
+    valueRef.current?.focus();
+  };
 
   async function submit(e?: FormEvent) {
     e?.preventDefault();
@@ -239,11 +263,25 @@ export function SealForm({
           id={`${id}-key-help`}
           className={cn(
             "text-xs",
-            problem ? "text-destructive" : "text-muted-foreground",
+            problem
+              ? "text-destructive"
+              : unexpected
+                ? "text-warning"
+                : "text-muted-foreground",
           )}
         >
           {note}
         </p>
+        {expected.length > 0 && (
+          <ExpectedKeys
+            expected={expected}
+            file={file}
+            pendingKeys={pendingKeys}
+            current={key}
+            disabled={busy}
+            onPick={pick}
+          />
+        )}
       </div>
 
       <div className="space-y-1.5">
@@ -319,6 +357,73 @@ export function SealForm({
         </div>
       </div>
     </form>
+  );
+}
+
+/**
+ * The keys the file expects, as chips to fill the key with: missing ones
+ * dashed, ones with a value waiting in the session marked, and set ones
+ * plain.
+ */
+function ExpectedKeys({
+  expected,
+  file,
+  pendingKeys,
+  current,
+  disabled,
+  onPick,
+}: {
+  expected: string[];
+  file: RepositoryFile;
+  pendingKeys: Set<string>;
+  current: string;
+  disabled: boolean;
+  onPick: (key: string) => void;
+}) {
+  const lacking = new Set(missingKeys(file, pendingKeys));
+  const state = (k: string) =>
+    pendingKeys.has(k) ? "pending" : lacking.has(k) ? "missing" : "set";
+  const missing = lacking.size;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+      <span className="mr-0.5 text-xs text-muted-foreground">
+        Expected
+        {missing > 0 && (
+          <span className="text-warning"> · {missing} missing</span>
+        )}
+      </span>
+      <ul className="flex flex-wrap gap-1.5" aria-label="Expected keys">
+        {expected.map((k) => {
+          const s = state(k);
+          return (
+            <li key={k}>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onPick(k)}
+                aria-pressed={current === k}
+                aria-label={`${k}, ${s}`}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50",
+                  s === "missing" &&
+                    "border-dashed border-warning/60 text-warning hover:bg-warning/10",
+                  s === "pending" &&
+                    "border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 dark:bg-primary/20",
+                  s === "set" &&
+                    "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+                  current === k && "ring-2 ring-ring/50",
+                )}
+              >
+                {s === "set" && (
+                  <Check className="h-3 w-3 text-success" aria-hidden="true" />
+                )}
+                {k}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

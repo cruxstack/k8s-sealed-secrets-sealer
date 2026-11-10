@@ -132,9 +132,12 @@ export function RepoWorkspace({
   const chosen = files.find((f) => f.path === selected);
   const current = chosen ?? defaultFile(files);
   const canWrite = data?.repository.access === "write";
-  const pending = new Map<string, number>();
+  // keys with a value waiting in the session, per file
+  const pending = new Map<string, Set<string>>();
   for (const c of session?.changes ?? []) {
-    pending.set(c.path, (pending.get(c.path) ?? 0) + 1);
+    const keys = pending.get(c.path) ?? new Set<string>();
+    keys.add(c.key);
+    pending.set(c.path, keys);
   }
 
   return (
@@ -142,8 +145,11 @@ export function RepoWorkspace({
       <nav aria-label="Breadcrumb" className="text-sm text-muted-foreground">
         <ol className="flex items-center gap-1.5">
           <li>
-            <Link to="/repos" className="hover:text-foreground hover:underline">
-              Repositories
+            <Link
+              to="/secrets"
+              className="hover:text-foreground hover:underline"
+            >
+              Secrets
             </Link>
           </li>
           <li aria-hidden="true">/</li>

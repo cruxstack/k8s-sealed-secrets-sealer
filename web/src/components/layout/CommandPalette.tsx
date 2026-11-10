@@ -11,6 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
   FolderGit2,
+  KeyRound,
   LogOut,
   Moon,
   Server,
@@ -29,6 +30,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Kbd } from "@/components/ui/kbd";
+import { useAuth } from "@/lib/auth";
 import { useShortcut } from "@/lib/shortcuts";
 import { useTheme } from "@/lib/theme-provider";
 
@@ -104,6 +106,7 @@ function Item({
 
 function Palette({ onDone }: { onDone: () => void }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { theme, setTheme } = useTheme();
   const logout = useLogout();
   const repos = useQuery(reposQueryOptions);
@@ -160,7 +163,7 @@ function Palette({ onDone }: { onDone: () => void }) {
                     run(
                       () =>
                         void navigate({
-                          to: "/repos/$owner/$repo",
+                          to: "/secrets/$owner/$repo",
                           params: { owner: r.owner, repo: r.name },
                         }),
                     )
@@ -172,19 +175,22 @@ function Palette({ onDone }: { onDone: () => void }) {
         )}
         <CommandGroup heading="Go to">
           <Item
-            icon={FolderGit2}
-            label="Repositories"
-            value="page:repositories"
-            keywords={["repositories", "repos", "home"]}
-            onSelect={() => run(() => void navigate({ to: "/repos" }))}
+            icon={KeyRound}
+            label="Secrets"
+            value="page:secrets"
+            keywords={["secrets", "repositories", "repos", "home"]}
+            onSelect={() => run(() => void navigate({ to: "/secrets" }))}
           />
-          <Item
-            icon={Server}
-            label="Fleet"
-            value="page:fleet"
-            keywords={["fleet", "agents", "clusters", "keys"]}
-            onSelect={() => run(() => void navigate({ to: "/fleet" }))}
-          />
+          {user?.admin && (
+            <Item
+              icon={Server}
+              label="Fleet"
+              hint="admin"
+              value="page:fleet"
+              keywords={["fleet", "agents", "clusters", "keys", "admin"]}
+              onSelect={() => run(() => void navigate({ to: "/fleet" }))}
+            />
+          )}
         </CommandGroup>
         <CommandGroup heading="Preferences">
           <Item

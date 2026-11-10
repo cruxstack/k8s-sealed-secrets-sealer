@@ -10,8 +10,14 @@ Every signed-in page sits in `AppShell`: the header with the env badge, the
 navigation, the search button, the theme toggle and the account menu, then
 the page content in a centered column. A page starts with what matters most
 (the fleet page opens with the env key banner) and then its main table or
-form. Sealing is what people come for, so the home page (`/`) is their
-repositories; the fleet is at `/fleet`.
+form. Sealing is what people come for, so the home page is Secrets
+(`/secrets`): their repositories, each opening its workspace at
+`/secrets/{owner}/{repo}`. The navigation holds what everyone uses.
+
+The fleet (`/fleet`) is for admins. They reach it from the account menu, the
+palette and the env badge; nobody else is offered it, and someone who opens
+the URL anyway is told it is for admins. Everyone sees whether sealing works
+from the dot on the env badge, with a summary in its tooltip.
 
 ## Workspaces
 
@@ -21,6 +27,13 @@ right, with its form. The repository page is one: files on the left, the
 file's documents and seal form on the right, and the pending changes under
 them. The pick is in the URL (`?file=`), so a reload or a shared link opens
 the same thing, and the first usable item is picked when none is.
+
+Show hints where the decision is made. A file's description sits under its
+path in the list and above its documents, its docs are a link in its header,
+and expected keys it lacks are dashed amber, in the list as a count, in the
+documents by name and in the form as chips that fill the key. Hints warn and
+never block: a key the file does not expect gets an amber note, and the
+value can still be sealed.
 
 ## Keyboard
 

@@ -30,10 +30,12 @@ existingSecret: ""
 # client ID and secret sign users in, and its App ID and private key read
 # repositories and open pull requests. Users must belong to org and, when
 # allowedTeams is set, to at least one of those teams. Use teams for prod.
+# Members of adminTeams also see the fleet; with none, nobody does.
 github:
   # (required)
   org: ""
   allowedTeams: []
+  adminTeams: []
   # the OAuth client ID (required); its secret goes in existingSecret
   oauthClientID: ""
   # the GitHub App's ID (required); its private key goes in existingSecret

@@ -138,6 +138,10 @@ spec:
             - name: APP_GITHUB_ALLOWED_TEAMS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- with .Values.github.adminTeams }}
+            - name: APP_GITHUB_ADMIN_TEAMS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- if .Values.github.allowInsecure }}
             - name: APP_ALLOW_INSECURE_GITHUB
               value: "true"

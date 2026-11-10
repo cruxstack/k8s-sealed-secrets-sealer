@@ -46,8 +46,11 @@ type HandlerOptions struct {
 	Org string
 	// Teams, when set, also require membership in at least one of these
 	// teams of Org.
-	Teams  []string
-	Logger *slog.Logger
+	Teams []string
+	// AdminTeams are teams of Org whose members are admins: they may see
+	// the fleet. Membership is checked at sign-in.
+	AdminTeams []string
+	Logger     *slog.Logger
 }
 
 // Handler serves sign-in, sign-out and /me, and authenticates requests.
@@ -143,7 +146,11 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, ErrCodeGitHub)
 		return
 	}
-	if code, err := h.authorize(r, token, user.Login); err != nil || code != "" {
+	code, err := h.authorize(r, token, user.Login)
+	if err == nil && code == "" {
+		user.Admin, err = h.anyTeam(r, token, user.Login, h.opts.AdminTeams)
+	}
+	if err != nil || code != "" {
 		if err != nil {
 			log.WarnContext(ctx, "sign-in failed", "event", "user.login_failed", "user", user.Login, "error", err)
 			code = ErrCodeGitHub
@@ -169,7 +176,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	log.InfoContext(ctx, "user signed in", "event", "user.login", "user", user.Login, "github_id", user.ID)
+	log.InfoContext(ctx, "user signed in", "event", "user.login", "user", user.Login, "github_id", user.ID, "admin", user.Admin)
 	if returnTo == "" {
 		returnTo = "/"
 	}
@@ -188,16 +195,28 @@ func (h *Handler) authorize(r *http.Request, token, login string) (string, error
 	if len(h.opts.Teams) == 0 {
 		return "", nil
 	}
-	for _, team := range h.opts.Teams {
+	ok, err := h.anyTeam(r, token, login, h.opts.Teams)
+	switch {
+	case err != nil:
+		return "", err
+	case !ok:
+		return ErrCodeNotInTeam, nil
+	}
+	return "", nil
+}
+
+// anyTeam reports whether login is an active member of any of teams.
+func (h *Handler) anyTeam(r *http.Request, token, login string, teams []string) (bool, error) {
+	for _, team := range teams {
 		ok, err := h.opts.GitHub.TeamMember(r.Context(), token, h.opts.Org, team, login)
 		if err != nil {
-			return "", err
+			return false, err
 		}
 		if ok {
-			return "", nil
+			return true, nil
 		}
 	}
-	return ErrCodeNotInTeam, nil
+	return false, nil
 }
 
 // Me returns the signed-in user and the CSRF token for their session.
@@ -234,6 +253,18 @@ func (h *Handler) RequireUser(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r.WithContext(WithUser(r.Context(), user)))
+	}
+}
+
+// RequireAdmin rejects users who are not admins. It must run behind
+// RequireUser.
+func (h *Handler) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if u := UserFrom(r.Context()); u == nil || !u.Admin {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only admins can see this"})
+			return
+		}
+		next(w, r)
 	}
 }
 

@@ -6,12 +6,14 @@ clusters and regions that environment spans. Users pick a repository and a
 file, type a value, and get a pull request. They never pick a cluster, a
 region or a certificate.
 
-> **Status:** early development. People sign in with GitHub, see the fleet
-> (every agent, its controller's keys and the env's key state), browse the
+> **Status:** early development. People sign in with GitHub, browse the
 > SealedSecrets for their env in the repositories they can read, seal values
 > into them as pending changes, and open a pull request with those changes;
 > an agent seals each value with the env key, and only `spec.encryptedData`
-> changes in the files. Agents keep every cluster holding the same keys.
+> changes in the files. Optional annotations tell them what a secret is for,
+> which keys it should hold and where its docs are. Admins see the fleet
+> (every agent, its controller's keys and the env's key state); everyone else
+> sees whether sealing works. Agents keep every cluster holding the same keys.
 > Releases publish the control plane for Lambda, container images and Helm
 > charts; the Terraform module for AWS is next. See
 > [the design](docs/design.md) for where it is going.

@@ -1,5 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { FileLock, LogOut, Search } from "lucide-react";
+import { FileLock, LogOut, Search, Server } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { useCommandPalette } from "./CommandPalette";
 import {
@@ -13,17 +14,18 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAuth } from "@/lib/auth";
 import { modKey } from "@/lib/shortcuts";
+import { cn } from "@/lib/utils";
 import { useLogout } from "@/api/queries/auth";
+import { statusQueryOptions } from "@/api/queries/status";
 
-function NavLink({
-  to,
-  children,
-}: {
-  to: "/fleet" | "/repos";
-  children: string;
-}) {
+function NavLink({ to, children }: { to: "/secrets"; children: string }) {
   return (
     <Link
       to={to}
@@ -61,6 +63,64 @@ function SearchButton() {
   );
 }
 
+const SEALING = {
+  ready: { dot: "bg-success", label: "sealing works" },
+  degraded: {
+    dot: "bg-warning",
+    label: "sealing works, some clusters are not ready",
+  },
+  unavailable: { dot: "bg-destructive", label: "sealing is unavailable" },
+} as const;
+
+/**
+ * The env badge, with a dot that says whether sealing works. Admins can open
+ * the fleet from it; everyone else gets the summary in its tooltip.
+ */
+function EnvBadge({ env, admin }: { env: string; admin: boolean }) {
+  const { data } = useQuery(statusQueryOptions);
+  const state = data ? SEALING[data.sealing] : null;
+  const label = `Environment ${env}${state ? `: ${state.label}` : ""}`;
+  const badge = (
+    <Badge variant="outline" className="gap-1.5">
+      <span
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          state?.dot ?? "bg-muted-foreground/40",
+        )}
+        aria-hidden="true"
+      />
+      {env}
+    </Badge>
+  );
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {admin ? (
+          <Link
+            to="/fleet"
+            aria-label={`${label}. Open the fleet`}
+            className="rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            {badge}
+          </Link>
+        ) : (
+          <button
+            type="button"
+            aria-label={label}
+            className="cursor-default rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            {badge}
+          </button>
+        )}
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        {data?.message ?? "Checking whether sealing works…"}
+        {admin && " Open the fleet for detail."}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function Header() {
   const { user, env } = useAuth();
   const logout = useLogout();
@@ -70,7 +130,7 @@ export function Header() {
       <div className="flex h-full items-center justify-between px-4 md:px-8">
         <div className="flex items-center gap-3">
           <Link
-            to="/repos"
+            to="/secrets"
             className="flex items-center gap-3 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             aria-label="Sealer home"
           >
@@ -82,15 +142,15 @@ export function Header() {
             </span>
             <span className="text-base font-bold tracking-tight">Sealer</span>
           </Link>
-          {env && (
-            <Badge variant="outline" aria-label={`Environment ${env}`}>
-              {env}
-            </Badge>
-          )}
+          {env &&
+            (user ? (
+              <EnvBadge env={env} admin={user.admin === true} />
+            ) : (
+              <Badge variant="outline">{env}</Badge>
+            ))}
           {user && (
             <nav aria-label="Main" className="ml-4 flex items-center gap-1">
-              <NavLink to="/repos">Repositories</NavLink>
-              <NavLink to="/fleet">Fleet</NavLink>
+              <NavLink to="/secrets">Secrets</NavLink>
             </nav>
           )}
         </div>
@@ -127,6 +187,20 @@ export function Header() {
                   )}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                {user.admin && (
+                  <>
+                    <DropdownMenuItem asChild>
+                      <Link to="/fleet">
+                        <Server className="mr-2 h-4 w-4" aria-hidden="true" />
+                        Fleet
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          admin
+                        </span>
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
                 <DropdownMenuItem
                   onSelect={() => logout.mutate()}
                   disabled={logout.isPending}

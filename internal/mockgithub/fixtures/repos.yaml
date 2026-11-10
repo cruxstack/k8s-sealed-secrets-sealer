@@ -1,7 +1,7 @@
 # Repositories the mock GitHub App is installed on. Each repository's files
 # are the directory <owner>/<name> next to this file; they become the first
 # commit of the default branch. Permissions are per mock user (alice, bob,
-# carol); anyone not listed has none.
+# carol, dave); anyone not listed has none.
 repos:
   - owner: example-org
     name: apps
@@ -10,6 +10,7 @@ repos:
     permissions:
       alice: write
       bob: read
+      dave: write
   - owner: example-org
     name: platform
     private: false

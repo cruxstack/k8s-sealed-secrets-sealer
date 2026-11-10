@@ -8,6 +8,7 @@ import type {
   Repository,
   Seal,
   SealSession,
+  SealingStatus,
 } from "@/api/types";
 
 export const ME: MeResponse = {
@@ -19,6 +20,16 @@ export const ME: MeResponse = {
   },
   csrf_token: "csrf-token-1",
   env: "dev",
+};
+
+/** ME, as an admin: a member of an admin team, who sees the fleet. */
+export const ADMIN: MeResponse = { ...ME, user: { ...ME.user, admin: true } };
+
+export const STATUS: SealingStatus = {
+  env: "dev",
+  sealing: "ready",
+  message: "Sealing works in all 2 clusters.",
+  clusters: { ready: 2, total: 2 },
 };
 
 export interface Recorded {
@@ -37,12 +48,15 @@ export interface FakeApi {
 
 /**
  * A fake control plane for axios: `/auth/me` answers with `me` (or 401),
- * `/fleet` with `fleet`, `/auth/logout` with 204; anything else is 404.
+ * `/fleet` with `fleet` (403 unless `me` is an admin), `/status` with
+ * `status`, `/auth/logout` with 204, and the repository and session routes
+ * from their options; anything else is 404.
  */
 export function fakeApi(opts: {
   me: MeResponse | null;
   fleet?: Fleet | null;
   fleetStatus?: number;
+  status?: SealingStatus;
   repos?: Repository[];
   /** File listings by "owner/repo"; others answer 404. */
   files?: Record<string, FileListing>;
@@ -94,9 +108,16 @@ export function fakeApi(opts: {
     }
     if (url === "/fleet") {
       if (!opts.me) return reply(401, { error: "unauthorized" });
+      if (!opts.me.user.admin) {
+        return reply(403, { error: "only admins can see this" });
+      }
       if (opts.fleetStatus)
         return reply(opts.fleetStatus, { error: "internal error" });
       return reply(200, opts.fleet ?? emptyFleet());
+    }
+    if (url === "/status") {
+      if (!opts.me) return reply(401, { error: "unauthorized" });
+      return reply(200, opts.status ?? STATUS);
     }
     if (url === "/auth/logout" && method === "POST") return reply(204, "");
     if (url === "/repos") {
