@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -58,11 +59,21 @@ type sealHarness struct {
 	now time.Time
 }
 
-func newSealHarness(t *testing.T) *sealHarness {
+// newSealHarness serves the fixture repositories, with files added to
+// example-org/apps (path to content) for one test.
+func newSealHarness(t *testing.T, files ...map[string]string) *sealHarness {
 	t.Helper()
 	fixtures, err := mockgithub.Fixtures()
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, add := range files {
+		for i, r := range fixtures {
+			if r.Owner == "example-org" && r.Name == "apps" {
+				fixtures[i].Files = maps.Clone(r.Files)
+				maps.Copy(fixtures[i].Files, add)
+			}
+		}
 	}
 	appKey := testcerts.RSA(t, 2048)
 	github := mockgithub.New(mockgithub.Options{

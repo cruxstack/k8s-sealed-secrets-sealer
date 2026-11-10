@@ -53,6 +53,10 @@ func RepoKey(owner, repo string) string { return strings.ToLower(owner + "/" + r
 
 // Target is one SealedSecret document a seal writes to.
 type Target struct {
+	// Index is the document's position in the file at the session's
+	// commit, which identifies it. Nil for changes stored before it was
+	// recorded; those are told apart by region, namespace and name.
+	Index     *int   `dynamodbav:"index,omitempty"`
 	Namespace string `dynamodbav:"namespace"`
 	Name      string `dynamodbav:"name"`
 	Scope     string `dynamodbav:"scope"`

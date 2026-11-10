@@ -25,7 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
 import { fileHints } from "./hints";
-import { docId, fileRegions, regionList, type PendingDocs } from "./keys";
+import { fileRegions, isPending, regionList, type PendingDocs } from "./keys";
 
 /** How often a seal's progress is checked; tests shorten it. */
 export const sealPolling = { intervalMs: 1000 };
@@ -46,7 +46,12 @@ export function keyProblem(key: string): string | null {
   return null;
 }
 
-const DONE = new Set<Seal["status"]>(["sealed", "failed", "expired"]);
+const DONE = new Set<Seal["status"]>([
+  "sealed",
+  "superseded",
+  "failed",
+  "expired",
+]);
 
 function agentName(seal: Seal): string {
   return seal.agent.cluster || seal.agent.id;
@@ -194,7 +199,7 @@ export function SealForm({
     !expected.includes(key) &&
     !existing.includes(key) &&
     !pending.has(key);
-  const pendingHere = targets.some((d) => pending.get(key)?.has(docId(d)));
+  const pendingHere = targets.some((d) => isPending(pending, key, d));
   const held = targets.filter((d) => d.keys.includes(key)).length;
   const where = everywhere ? "" : ` in ${regionList(chosen)}`;
   const canSubmit = !busy && key !== "" && !problem && value !== "";
@@ -539,6 +544,13 @@ function SealProgress({
               {shortFingerprint(seal.fingerprint)}
             </code>
           </span>
+        </p>
+      );
+    case "superseded":
+      return (
+        <p role="status" className="text-sm text-muted-foreground">
+          Sealed <code className="font-mono text-xs">{seal.key}</code>, but a
+          newer seal of it has replaced the value.
         </p>
       );
     default:

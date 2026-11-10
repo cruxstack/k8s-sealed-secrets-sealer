@@ -139,6 +139,8 @@ export interface FileListing {
 
 /** A SealedSecret document a value is sealed for. */
 export interface SealTarget {
+  /** The document's position in the file; absent for older changes. */
+  index?: number;
   namespace: string;
   name: string;
   scope: "strict" | "namespace-wide";
@@ -211,7 +213,12 @@ export interface PullRequest {
   changes: number;
 }
 
-export type SealStatus = "queued" | "sealing" | "sealed" | "failed" | "expired";
+/**
+ * Where a seal stands. `superseded`: it sealed, but a newer seal of the key
+ * replaced its value in the session.
+ */
+export type SealStatus =
+  "queued" | "sealing" | "sealed" | "superseded" | "failed" | "expired";
 
 /** A seal's progress. */
 export interface Seal {

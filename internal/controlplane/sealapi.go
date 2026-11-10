@@ -50,6 +50,9 @@ const (
 	sealSealed  = "sealed"
 	sealFailed  = "failed"
 	sealExpired = "expired"
+	// sealSuperseded is a value sealed and then replaced in the session by
+	// a newer seal of the same key for the same documents.
+	sealSuperseded = "superseded"
 )
 
 // sealView is a seal's progress.
@@ -196,7 +199,7 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		if len(sealFor) > 0 && !slices.Contains(sealFor, d.Region) {
 			continue
 		}
-		targets = append(targets, store.Target{Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
+		targets = append(targets, store.Target{Index: &d.Index, Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
 		if d.Region != "" {
 			regions = append(regions, d.Region)
 		}
@@ -397,6 +400,15 @@ func (s *Server) getSeal(w http.ResponseWriter, r *http.Request) {
 	case cmd.Status == store.CommandLeased:
 		v = s.viewSeal(seal, sealSealing, "")
 	case cmd.Status == store.CommandSucceeded:
+		pending, err := s.sealPending(ctx, seal)
+		if err != nil {
+			s.internalError(w, r, "failed to read pending changes", err)
+			return
+		}
+		if !pending {
+			v = s.viewSeal(seal, sealSuperseded, "a newer seal of this key replaced the value")
+			break
+		}
 		v = s.viewSeal(seal, sealSealed, "")
 		v.ChangeID = changeID(seal.Path, seal.Key, seal.Regions)
 	default:
@@ -497,25 +509,35 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
-// pruneChanges removes the session's changes that newer ones cover for
-// every document, such as a seal for one region followed by one for all.
-// Overlapping changes are resolved when read anyway (store.Effective), so a
-// failure here only leaves the list longer than it needs to be.
+// sealPending reports whether a finished seal's value is still a pending
+// change of its session: not when a newer seal of the same key replaced it
+// or covered all its documents.
+func (s *Server) sealPending(ctx context.Context, seal store.Seal) (bool, error) {
+	changes, err := s.store.Changes(ctx, seal.SessionID, false)
+	if err != nil {
+		return false, err
+	}
+	id := changeID(seal.Path, seal.Key, seal.Regions)
+	return slices.ContainsFunc(changes, func(c store.Change) bool {
+		return c.ID == id && c.CommandID == seal.CommandID
+	}), nil
+}
+
+// pruneChanges removes the session's changes that one newer change covers
+// for every document, such as a seal for one region followed by one for
+// all. Changes that newer ones only cover between them stay, so removing
+// one of those brings the older value back. Overlapping changes are
+// resolved when read anyway (store.Effective), so a failure here only
+// leaves the list longer than it needs to be.
 func (s *Server) pruneChanges(ctx context.Context, sessionID string, log *slog.Logger) {
 	changes, err := s.store.Changes(ctx, sessionID, false)
 	if err != nil {
 		log.WarnContext(ctx, "failed to read changes to prune", "error", err)
 		return
 	}
-	live := map[string]bool{}
-	for _, c := range store.Effective(changes) {
-		live[c.ID] = true
-	}
-	for _, c := range changes {
-		if live[c.ID] {
-			continue
-		}
-		if _, err := s.store.DeleteChange(ctx, sessionID, c.ID); err != nil {
+	for _, c := range store.Superseded(changes) {
+		// only if no newer seal replaced it since it was read
+		if _, err := s.store.PruneChange(ctx, sessionID, c.ID, c.CommandID); err != nil {
 			log.WarnContext(ctx, "failed to prune a covered change", "change_id", c.ID, "error", err)
 		}
 	}

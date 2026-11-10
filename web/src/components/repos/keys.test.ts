@@ -31,17 +31,41 @@ function doc(
 }
 
 function file(...documents: SealedSecretDocument[]): RepositoryFile {
-  return { path: "deploy/sealed-secret.yaml", blob: "b", documents };
+  return {
+    path: "deploy/sealed-secret.yaml",
+    blob: "b",
+    documents: documents.map((d, index) => ({ ...d, index })),
+  };
 }
 
-/** Pending values: each key with the namespaces it waits in. */
-function pending(byKey: Record<string, string[]>): PendingDocs {
-  return new Map(
-    Object.entries(byKey).map(([k, ns]) => [
-      k,
-      new Set(ns.map((n) => `${n}/billing`)),
-    ]),
+/**
+ * Pending values in a file: each key with the namespaces of the documents
+ * it waits in.
+ */
+function pending(
+  f: RepositoryFile,
+  byKey: Record<string, string[]>,
+): PendingDocs {
+  const changes: PendingChange[] = Object.entries(byKey).map(
+    ([key, namespaces]) => ({
+      id: key,
+      path: f.path,
+      key,
+      targets: (f.documents ?? [])
+        .filter((d) => namespaces.includes(d.namespace))
+        .map((d) => ({
+          index: d.index,
+          namespace: d.namespace,
+          name: d.name,
+          scope: "strict",
+          region: d.region,
+        })),
+      sealed_at: "",
+      sealed_by: { id: "a" },
+      fingerprint: "",
+    }),
   );
+  return pendingDocs(changes, f.path);
 }
 
 describe("keyStatuses", () => {
@@ -86,7 +110,7 @@ describe("keyStatuses", () => {
     );
     const states = keyStatuses(
       f,
-      pending({ token: ["blue", "green"], url: ["green"], extra: ["blue"] }),
+      pending(f, { token: ["blue", "green"], url: ["green"], extra: ["blue"] }),
     ).map((k) => [k.key, k.state, k.pending]);
     expect(states).toEqual([
       ["token", "new", 2],
@@ -95,10 +119,10 @@ describe("keyStatuses", () => {
       ["extra", "new", 1],
     ]);
     // a value pending for one region leaves the other lacking
-    expect(keyStatuses(f, pending({ token: ["blue"] }))[0]).toMatchObject({
+    expect(keyStatuses(f, pending(f, { token: ["blue"] }))[0]).toMatchObject({
       state: "partial",
       pending: 1,
-      lacking: ["green/billing"],
+      lacking: ["green/billing in use2"],
     });
   });
 
@@ -110,7 +134,7 @@ describe("keyStatuses", () => {
       doc("use3-blue", ["token"], ["url"], "use3"),
     );
     expect(
-      keyStatuses(f, pending({ token: ["use2-blue"] })).find(
+      keyStatuses(f, pending(f, { token: ["use2-blue"] })).find(
         (k) => k.key === "token",
       )?.regions,
     ).toEqual([
@@ -170,10 +194,12 @@ describe("missingKeys", () => {
       doc("green", ["a", "b"], ["a", "b"]),
     );
     expect(missingKeys(f, NO_PENDING)).toEqual(["b", "c"]);
-    expect(missingKeys(f, pending({ c: ["blue"] }))).toEqual(["b"]);
-    expect(missingKeys(f, pending({ b: ["blue"], c: ["blue"] }))).toEqual([]);
+    expect(missingKeys(f, pending(f, { c: ["blue"] }))).toEqual(["b"]);
+    expect(missingKeys(f, pending(f, { b: ["blue"], c: ["blue"] }))).toEqual(
+      [],
+    );
     // pending in another document doesn't count
-    expect(missingKeys(f, pending({ b: ["green"], c: ["blue"] }))).toEqual([
+    expect(missingKeys(f, pending(f, { b: ["green"], c: ["blue"] }))).toEqual([
       "b",
     ]);
   });
@@ -207,8 +233,65 @@ describe("pendingDocs", () => {
       "deploy/sealed-secret.yaml",
     );
     expect([...(docs.get("token") ?? [])]).toEqual([
-      "use1/billing",
-      "use2/billing",
+      "/use1/billing",
+      "/use2/billing",
     ]);
+  });
+});
+
+describe("documents with the same namespace and name in each region", () => {
+  const f = file(
+    doc("apps", [], ["token"], "use1"),
+    doc("apps", [], ["token"], "use2"),
+  );
+
+  it("are told apart by their place in the file", () => {
+    const k = keyStatuses(f, pending(f, {}))[0];
+    expect(k?.lacking).toEqual([
+      "apps/billing in use1",
+      "apps/billing in use2",
+    ]);
+    const use1: PendingChange = {
+      id: "t",
+      path: f.path,
+      key: "token",
+      regions: ["use1"],
+      targets: [
+        {
+          index: 0,
+          namespace: "apps",
+          name: "billing",
+          scope: "strict",
+          region: "use1",
+        },
+      ],
+      sealed_at: "",
+      sealed_by: { id: "a" },
+      fingerprint: "",
+    };
+    expect(keyStatuses(f, pendingDocs([use1], f.path))[0]).toMatchObject({
+      state: "partial",
+      pending: 1,
+      lacking: ["apps/billing in use2"],
+    });
+  });
+
+  it("are told apart by region in changes stored without positions", () => {
+    const use2: PendingChange = {
+      id: "t",
+      path: f.path,
+      key: "token",
+      regions: ["use2"],
+      targets: [
+        { namespace: "apps", name: "billing", scope: "strict", region: "use2" },
+      ],
+      sealed_at: "",
+      sealed_by: { id: "a" },
+      fingerprint: "",
+    };
+    expect(keyStatuses(f, pendingDocs([use2], f.path))[0]).toMatchObject({
+      pending: 1,
+      lacking: ["apps/billing in use1"],
+    });
   });
 });

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -439,5 +440,130 @@ func TestRegionSeals(t *testing.T) {
 	}
 	if !strings.Contains(view.Message, "deploy/billing/sealed-secret.yaml: api-token, api-token (use1), db-password (use2)\n") {
 		t.Fatalf("commit message:\n%s", view.Message)
+	}
+}
+
+// regional is a file with one copy of a secret per region, each in the
+// same namespace and with the same name, as in clusters of their own.
+const regional = "deploy/regional/sealed-secret.yaml"
+
+const regionalFile = `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: payments
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/region: use1
+spec:
+  encryptedData: {}
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: payments
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/region: use2
+spec:
+  encryptedData: {}
+`
+
+func TestRegionSeals_SameNameInEachRegion(t *testing.T) {
+	sh := newSealHarness(t, map[string]string{regional: regionalFile})
+	sess := sh.openSession()
+	base := "/api/v1/repos/example-org/apps/session/" + sess.ID
+	changes := func() []changeView {
+		t.Helper()
+		rec := sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/session", nil, false)
+		return decode[sessionResponse](t, rec).Session.Changes
+	}
+	regionsOf := func(cs []changeView, key string) [][]string {
+		var out [][]string
+		for _, c := range cs {
+			if c.Key != key {
+				continue
+			}
+			var regions []string
+			for _, t := range c.Targets {
+				regions = append(regions, t.Region)
+			}
+			out = append(out, regions)
+		}
+		return out
+	}
+
+	// a value for each region: both stay pending
+	sh.sealNowIn(sess.ID, regional, "token", "use1-token", "use1")
+	sh.sealNowIn(sess.ID, regional, "token", "use2-token", "use2")
+	if got := regionsOf(changes(), "token"); !reflect.DeepEqual(got, [][]string{{"use1"}, {"use2"}}) {
+		t.Fatalf("token changes = %v", got)
+	}
+
+	// every region, then each region: the first stays, since removing a
+	// newer one brings it back where that one applied
+	sh.sealNowIn(sess.ID, regional, "password", "everywhere", "use1", "use2")
+	sh.sealNowIn(sess.ID, regional, "password", "use1-password", "use1")
+	use2 := sh.sealNowIn(sess.ID, regional, "password", "use2-password", "use2")
+	if got := regionsOf(changes(), "password"); !reflect.DeepEqual(got, [][]string{{"use1"}, {"use2"}}) {
+		t.Fatalf("password changes = %v", got)
+	}
+	stored, _ := sh.store.Changes(context.Background(), sess.ID, false)
+	if len(stored) != 5 {
+		t.Fatalf("stored changes = %d, want 5", len(stored))
+	}
+	if rec := sh.do("alice", http.MethodDelete, base+"/changes/"+changeID(regional, "password", use2.Regions), nil, true); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove use2 password = %d %s", rec.Code, rec.Body)
+	}
+	if got := regionsOf(changes(), "password"); !reflect.DeepEqual(got, [][]string{{"use2"}, {"use1"}}) {
+		t.Fatalf("password changes after removing use2's = %v", got)
+	}
+
+	// a seal one newer seal covers is no longer pending
+	first := sh.sealNowIn(sess.ID, regional, "url", "one", "use1")
+	sh.sealNowIn(sess.ID, regional, "url", "everywhere", "use1", "use2")
+	if got := sh.sealStatus(sess.ID, first.ID); got.Status != sealSuperseded || got.ChangeID != "" {
+		t.Fatalf("status of a covered seal = %+v", got)
+	}
+	if got := regionsOf(changes(), "url"); !reflect.DeepEqual(got, [][]string{{"use1", "use2"}}) {
+		t.Fatalf("url changes = %v", got)
+	}
+
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+	view, _ := sh.github.PullRequest("example-org", "apps", 1)
+	var after string
+	for _, f := range view.Files {
+		if f.Path == regional {
+			after = f.After
+		}
+	}
+	docs := encryptedData(t, after)
+	decrypt := func(i int, key string) string {
+		t.Helper()
+		raw, err := base64.StdEncoding.DecodeString(docs[i][key])
+		if err != nil {
+			t.Fatalf("%s in document %d: %v", key, i, err)
+		}
+		plain, err := sscrypto.HybridDecrypt(rand.Reader, map[string]*rsa.PrivateKey{"": sh.keyPriv}, raw,
+			ssv1alpha1.EncryptionLabel("apps", "payments", ssv1alpha1.StrictScope))
+		if err != nil {
+			t.Fatalf("%s in document %d: %v", key, i, err)
+		}
+		return string(plain)
+	}
+	for _, c := range []struct {
+		doc       int
+		key, want string
+	}{
+		{0, "token", "use1-token"}, {1, "token", "use2-token"},
+		{0, "password", "use1-password"}, {1, "password", "everywhere"},
+		{0, "url", "everywhere"}, {1, "url", "everywhere"},
+	} {
+		if got := decrypt(c.doc, c.key); got != c.want {
+			t.Errorf("%s in document %d = %q, want %q", c.key, c.doc, got, c.want)
+		}
 	}
 }

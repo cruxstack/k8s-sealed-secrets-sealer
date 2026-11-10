@@ -263,6 +263,20 @@ func (m *Memory) DeleteSession(_ context.Context, userID int64, repoKey, id stri
 	return true, nil
 }
 
+func (m *Memory) DiscardSession(_ context.Context, userID int64, repoKey, id string, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	switch {
+	case !ok || s.ID != id || !s.Live(now):
+		return false, nil
+	case s.Locked(now):
+		return false, ErrSessionBusy
+	}
+	delete(m.sessions[userID], repoKey)
+	return true, nil
+}
+
 func (m *Memory) PutSeal(_ context.Context, s Seal) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -307,10 +321,27 @@ func (m *Memory) Changes(_ context.Context, sessionID string, ciphertexts bool) 
 	return out, nil
 }
 
-func (m *Memory) DeleteChange(_ context.Context, sessionID, id string) (bool, error) {
+func (m *Memory) RemoveChange(_ context.Context, userID int64, repoKey, sessionID, id string, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	switch {
+	case !ok || s.ID != sessionID || !s.Live(now):
+		return false, nil
+	case s.Locked(now):
+		return false, ErrSessionBusy
+	}
 	if _, ok := m.changes[sessionID][id]; !ok {
+		return false, nil
+	}
+	delete(m.changes[sessionID], id)
+	return true, nil
+}
+
+func (m *Memory) PruneChange(_ context.Context, sessionID, id, commandID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c, ok := m.changes[sessionID][id]; !ok || c.CommandID != commandID {
 		return false, nil
 	}
 	delete(m.changes[sessionID], id)

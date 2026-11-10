@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -185,9 +186,25 @@ func TestStore_SessionLock(t *testing.T) {
 			if ok, _ := s.LockSession(ctx, user, key, "S1", later.Add(time.Minute), later); !ok {
 				t.Fatal("lock after the lock lapsed")
 			}
+			// a locked session cannot be discarded, nor another one
+			if ok, err := s.DiscardSession(ctx, user, key, "S1", later); !errors.Is(err, ErrSessionBusy) || ok {
+				t.Fatalf("discard while locked: %v, %v", ok, err)
+			}
+			if ok, err := s.DiscardSession(ctx, user, key, "S2", later); err != nil || ok {
+				t.Fatalf("discard of another session: %v, %v", ok, err)
+			}
 			// an expired session cannot be locked
 			if ok, err := s.LockSession(ctx, user, key, "S1", now.Add(3*time.Hour), now.Add(2*time.Hour)); err != nil || ok {
 				t.Fatalf("lock of an expired session: %v, %v", ok, err)
+			}
+			if err := s.UnlockSession(ctx, user, key, "S1"); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := s.DiscardSession(ctx, user, key, "S1", later); err != nil || !ok {
+				t.Fatalf("discard: %v, %v", ok, err)
+			}
+			if _, ok, _ := s.Session(ctx, user, key, later); ok {
+				t.Fatal("session still there after discard")
 			}
 			if err := s.UnlockSession(ctx, user, "example-org/none", "S9"); err != nil {
 				t.Fatalf("unlock of a missing session: %v", err)
@@ -202,7 +219,16 @@ func TestStore_SealsAndChanges(t *testing.T) {
 			ctx := context.Background()
 			now := time.Now().UTC().Truncate(time.Millisecond)
 			session := "SES-" + name + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-			targets := []Target{{Namespace: "apps", Name: "billing", Scope: protocol.ScopeStrict, Region: "use1"}}
+			user := time.Now().UnixNano()
+			repoKey := RepoKey("example-org", "apps")
+			if _, _, err := s.CreateSession(ctx, Session{
+				ID: session, UserID: user, UserLogin: "alice", Owner: "example-org", Repo: "apps", Branch: "main", Commit: "abc",
+				CreatedAt: now, UsedAt: now, ExpiresAt: now.Add(time.Hour), EndsAt: now.Add(8 * time.Hour),
+			}, 10, now); err != nil {
+				t.Fatal(err)
+			}
+			index := 3
+			targets := []Target{{Index: &index, Namespace: "apps", Name: "billing", Scope: protocol.ScopeStrict, Region: "use1"}}
 
 			seal := Seal{
 				SessionID: session, CommandID: "01J0000000000000000000000A", AgentID: "use1-blue",
@@ -213,7 +239,7 @@ func TestStore_SealsAndChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, ok, err := s.Seal(ctx, session, seal.CommandID)
-			if err != nil || !ok || got.AgentID != "use1-blue" || got.Path != seal.Path || !slices.Equal(got.Targets, targets) {
+			if err != nil || !ok || got.AgentID != "use1-blue" || got.Path != seal.Path || !reflect.DeepEqual(got.Targets, targets) {
 				t.Fatalf("Seal = %+v, %v, %v", got, ok, err)
 			}
 			if _, ok, err := s.Seal(ctx, "other-session", seal.CommandID); err != nil || ok {
@@ -248,7 +274,7 @@ func TestStore_SealsAndChanges(t *testing.T) {
 			if err != nil || len(list) != 2 || list[0].ID != "c1" || list[0].CommandID != "01J0000000000000000000000C" {
 				t.Fatalf("Changes = %+v, %v", list, err)
 			}
-			if list[0].Ciphertexts != nil || list[0].Path != seal.Path || !slices.Equal(list[0].Targets, targets) {
+			if list[0].Ciphertexts != nil || list[0].Path != seal.Path || !reflect.DeepEqual(list[0].Targets, targets) {
 				t.Fatalf("listed change = %+v", list[0])
 			}
 			full, err := s.Changes(ctx, session, true)
@@ -256,14 +282,38 @@ func TestStore_SealsAndChanges(t *testing.T) {
 				t.Fatalf("Changes with ciphertexts = %+v, %v", full, err)
 			}
 
-			if ok, err := s.DeleteChange(ctx, session, "c1"); err != nil || !ok {
-				t.Fatalf("delete change: %v %v", ok, err)
+			// pruning leaves a change a newer seal replaced since
+			if ok, err := s.PruneChange(ctx, session, "c1", "01J0000000000000000000000B"); err != nil || ok {
+				t.Fatalf("prune of a replaced change: %v %v", ok, err)
 			}
-			if ok, err := s.DeleteChange(ctx, session, "c1"); err != nil || ok {
-				t.Fatalf("delete change again: %v %v", ok, err)
+			if list, _ := s.Changes(ctx, session, false); len(list) != 2 {
+				t.Fatalf("after pruning a replaced change = %+v", list)
 			}
-			if list, _ := s.Changes(ctx, session, false); len(list) != 1 || list[0].ID != "c2" {
-				t.Fatalf("after delete = %+v", list)
+			if ok, err := s.PruneChange(ctx, session, "c2", "01J0000000000000000000000D"); err != nil || !ok {
+				t.Fatalf("prune: %v %v", ok, err)
+			}
+
+			// changes are not removed while a pull request is being opened
+			if ok, _ := s.LockSession(ctx, user, repoKey, session, now.Add(time.Minute), now); !ok {
+				t.Fatal("lock")
+			}
+			if ok, err := s.RemoveChange(ctx, user, repoKey, session, "c1", now); !errors.Is(err, ErrSessionBusy) || ok {
+				t.Fatalf("remove while locked: %v %v", ok, err)
+			}
+			if err := s.UnlockSession(ctx, user, repoKey, session); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := s.RemoveChange(ctx, user, repoKey, "SES-other", "c1", now); err != nil || ok {
+				t.Fatalf("remove from another session: %v %v", ok, err)
+			}
+			if ok, err := s.RemoveChange(ctx, user, repoKey, session, "c1", now); err != nil || !ok {
+				t.Fatalf("remove change: %v %v", ok, err)
+			}
+			if ok, err := s.RemoveChange(ctx, user, repoKey, session, "c1", now); err != nil || ok {
+				t.Fatalf("remove change again: %v %v", ok, err)
+			}
+			if list, _ := s.Changes(ctx, session, false); len(list) != 0 {
+				t.Fatalf("after remove = %+v", list)
 			}
 		})
 	}
