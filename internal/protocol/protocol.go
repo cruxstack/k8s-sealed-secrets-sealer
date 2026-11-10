@@ -124,12 +124,14 @@ type CheckInResponse struct {
 // Command types. Each is versioned; an agent advertises the ones it handles
 // in its check-in, and refuses any other.
 const (
+	CommandSeal          = "seal.v1"
 	CommandKeysRestore   = "keys.restore.v1"
 	CommandRenewalEnable = "renewal.enable.v1"
 )
 
 // CommandCapability is the capability each command needs.
 var CommandCapability = map[string]string{
+	CommandSeal:          CapabilitySeal,
 	CommandKeysRestore:   CapabilityKeys,
 	CommandRenewalEnable: CapabilityRenewal,
 }
@@ -187,6 +189,67 @@ type RenewalEnablePayload struct {
 	Period string `json:"period"`
 }
 
+// Sealing scopes a seal.v1 target may have. Cluster-wide is never one:
+// such ciphertext decrypts into any namespace.
+const (
+	ScopeStrict        = "strict"
+	ScopeNamespaceWide = "namespace-wide"
+)
+
+// Limits on a seal.
+const (
+	// MaxSealValueBytes bounds one value.
+	MaxSealValueBytes = 64 << 10
+	// MaxSealTargets bounds the documents one seal writes to.
+	MaxSealTargets = 100
+	// SealBudgetBytes bounds a seal's total size, (value + 1 KiB) per
+	// target, so all of its ciphertexts fit in one DynamoDB item.
+	SealBudgetBytes = 224 << 10
+	// SealOverheadBytes is what sealing adds to a value, at most: the
+	// RSA-wrapped session key (4096-bit keys), its length and the GCM tag.
+	SealOverheadBytes = 1 << 10
+)
+
+// SealFits reports whether a value of n bytes may be sealed for targets
+// documents.
+func SealFits(n, targets int) bool {
+	return n <= MaxSealValueBytes && targets <= MaxSealTargets && (n+SealOverheadBytes)*targets <= SealBudgetBytes
+}
+
+// SealPayload asks an agent to seal one value for each target, with the
+// certificate of the env key its own controller holds.
+type SealPayload struct {
+	// Key is the name in spec.encryptedData the value is sealed for.
+	Key         string       `json:"key"`
+	Fingerprint string       `json:"fingerprint"`
+	Targets     []SealTarget `json:"targets"`
+	// Value is the value, encrypted under the transit key for this command
+	// and agent (SealContext). The control plane stores it apart from the
+	// rest of the payload and drops it once the command is leased.
+	Value *Envelope `json:"value,omitempty"`
+}
+
+// SealTarget is one SealedSecret document's decryption label.
+type SealTarget struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+}
+
+// SealResult is a seal's ciphertexts, one per target in the same order, each
+// base64 as it goes in spec.encryptedData.
+type SealResult struct {
+	Fingerprint string         `json:"fingerprint"`
+	Targets     []SealedTarget `json:"targets"`
+}
+
+// SealedTarget is one target's ciphertext.
+type SealedTarget struct {
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	Ciphertext string `json:"ciphertext"`
+}
+
 // Envelope is data encrypted under a data key from KMS: AES-256-GCM, with
 // the encryption context as additional authenticated data and as the KMS
 // encryption context, so the ciphertext only opens for that context.
@@ -214,13 +277,28 @@ type EscrowRecord struct {
 	UploadedAt  time.Time `json:"uploaded_at"`
 }
 
-// Escrow encryption context keys.
+// Encryption context keys and purposes.
 const (
 	ContextEnv         = "env"
 	ContextFingerprint = "fingerprint"
 	ContextPurpose     = "purpose"
+	ContextCommandID   = "command_id"
+	ContextAgentID     = "agent_id"
 	PurposeKeyEscrow   = "key-escrow"
+	PurposeSeal        = "seal"
 )
+
+// SealContext is the transit encryption context of a seal.v1 value. It names
+// the one agent that may decrypt it, which the transit key's policy
+// enforces, and the command, so the value opens for nothing else.
+func SealContext(env, commandID, agentID string) map[string]string {
+	return map[string]string{
+		ContextEnv:       env,
+		ContextPurpose:   PurposeSeal,
+		ContextCommandID: commandID,
+		ContextAgentID:   agentID,
+	}
+}
 
 // fingerprintPath maps a fingerprint's base64 to the URL-safe alphabet, so a
 // fingerprint is one path segment that no proxy decodes or splits.

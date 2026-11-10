@@ -61,11 +61,11 @@ func TestCommands_RunsHandlersAndReports(t *testing.T) {
 	}}
 	c := NewCommands(q, nil, nil)
 	var ran []string
-	c.Handle(protocol.CommandRenewalEnable, func(_ context.Context, p json.RawMessage) (any, error) {
-		ran = append(ran, string(p))
+	c.Handle(protocol.CommandRenewalEnable, func(_ context.Context, cmd protocol.Command) (any, error) {
+		ran = append(ran, cmd.ID+" "+string(cmd.Payload))
 		return map[string]string{"period": "720h0m0s"}, nil
 	})
-	c.Handle(protocol.CommandKeysRestore, func(context.Context, json.RawMessage) (any, error) {
+	c.Handle(protocol.CommandKeysRestore, func(context.Context, protocol.Command) (any, error) {
 		return protocol.KeysRestoreResult{Failed: []protocol.KeyFailure{{Fingerprint: "SHA256:x", Error: "boom"}}}, errors.New(strings.Repeat("e", 2000))
 	})
 	if got := c.Types(); !slices.Equal(got, []string{protocol.CommandKeysRestore, protocol.CommandRenewalEnable}) {
@@ -90,7 +90,7 @@ func TestCommands_RunsHandlersAndReports(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if r, _ := q.result("ok"); r.Status != protocol.CommandSucceeded || string(r.Result) != `{"period":"720h0m0s"}` || len(ran) != 1 {
+	if r, _ := q.result("ok"); r.Status != protocol.CommandSucceeded || string(r.Result) != `{"period":"720h0m0s"}` || !slices.Equal(ran, []string{`ok {"period":"720h"}`}) {
 		t.Errorf("ok = %+v", r)
 	}
 	if r, _ := q.result("fails"); r.Status != protocol.CommandFailed || len(r.Error) != maxErrorLen || !strings.Contains(string(r.Result), "boom") {

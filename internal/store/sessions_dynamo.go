@@ -1,0 +1,349 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+// Session item keys; see docs/design.md, section 11.
+const (
+	userPrefix    = "USER#"
+	sessionPrefix = "SESSION#"
+	sealPrefix    = "SEAL#"
+	changePrefix  = "CHANGE#"
+)
+
+// sessionItem is a session under its user, one per repository. Its deadline
+// (epoch milliseconds) is the idle expiry, for condition expressions.
+type sessionItem struct {
+	PK        string `dynamodbav:"pk"`
+	SK        string `dynamodbav:"sk"`
+	Deadline  int64  `dynamodbav:"deadline"`
+	ExpiresAt int64  `dynamodbav:"expires_at"`
+	Session
+}
+
+type sealItem struct {
+	PK        string `dynamodbav:"pk"`
+	SK        string `dynamodbav:"sk"`
+	ExpiresAt int64  `dynamodbav:"expires_at"`
+	Seal
+}
+
+type changeItem struct {
+	PK        string `dynamodbav:"pk"`
+	SK        string `dynamodbav:"sk"`
+	ExpiresAt int64  `dynamodbav:"expires_at"`
+	Change
+}
+
+// changeListAttributes is every change attribute but its ciphertexts.
+var changeListAttributes = []string{
+	"pk", "sk", "session_id", "change_id", "path", "key", "command_id", "agent_id",
+	"fingerprint", "targets", "user_id", "user_login", "sealed_at", "change_expires_at",
+}
+
+func itemKey(pk, sk string) map[string]types.AttributeValue {
+	return map[string]types.AttributeValue{
+		attrPK: &types.AttributeValueMemberS{Value: pk},
+		attrSK: &types.AttributeValueMemberS{Value: sk},
+	}
+}
+
+func userPK(userID int64) string { return userPrefix + strconv.FormatInt(userID, 10) }
+
+func millis(t time.Time) *types.AttributeValueMemberN {
+	return &types.AttributeValueMemberN{Value: strconv.FormatInt(t.UnixMilli(), 10)}
+}
+
+func (d *Dynamo) CreateSession(ctx context.Context, s Session, maxSessions int, now time.Time) (Session, bool, error) {
+	key := RepoKey(s.Owner, s.Repo)
+	live, err := d.Sessions(ctx, s.UserID, now)
+	if err != nil {
+		return Session{}, false, err
+	}
+	for _, existing := range live {
+		if RepoKey(existing.Owner, existing.Repo) == key {
+			return existing, false, nil
+		}
+	}
+	if len(live) >= maxSessions {
+		return Session{}, false, ErrTooManySessions
+	}
+
+	item, err := attributevalue.MarshalMap(sessionItem{
+		PK:        userPK(s.UserID),
+		SK:        sessionPrefix + key,
+		Deadline:  s.ExpiresAt.UnixMilli(),
+		ExpiresAt: s.ExpiresAt.Unix(),
+		Session:   s,
+	})
+	if err != nil {
+		return Session{}, false, fmt.Errorf("failed to encode session %s: %w", s.ID, err)
+	}
+	// an expired session for the repository is replaced, a live one kept
+	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:                 &d.table,
+		Item:                      item,
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR " + attrDeadline + " <= :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":now": millis(now)},
+	})
+	var exists *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &exists):
+		// created concurrently
+		existing, ok, err := d.Session(ctx, s.UserID, key, now)
+		if err != nil {
+			return Session{}, false, err
+		}
+		if !ok {
+			return Session{}, false, fmt.Errorf("failed to create session for %s: it changed while being created", key)
+		}
+		return existing, false, nil
+	case err != nil:
+		return Session{}, false, fmt.Errorf("failed to store session %s: %w", s.ID, err)
+	}
+	return s, true, nil
+}
+
+func (d *Dynamo) Session(ctx context.Context, userID int64, repoKey string, now time.Time) (Session, bool, error) {
+	res, err := d.api.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      &d.table,
+		Key:            itemKey(userPK(userID), sessionPrefix+repoKey),
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return Session{}, false, fmt.Errorf("failed to read session for %s: %w", repoKey, err)
+	}
+	if len(res.Item) == 0 {
+		return Session{}, false, nil
+	}
+	var item sessionItem
+	if err := attributevalue.UnmarshalMap(res.Item, &item); err != nil {
+		return Session{}, false, fmt.Errorf("failed to decode session for %s: %w", repoKey, err)
+	}
+	if !item.Live(now) {
+		return Session{}, false, nil
+	}
+	return item.Session, true, nil
+}
+
+func (d *Dynamo) Sessions(ctx context.Context, userID int64, now time.Time) ([]Session, error) {
+	out := []Session{}
+	err := d.query(ctx, userPK(userID), sessionPrefix, nil, func(raw map[string]types.AttributeValue) error {
+		var item sessionItem
+		if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
+			return fmt.Errorf("failed to decode session: %w", err)
+		}
+		if item.Live(now) {
+			out = append(out, item.Session)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read sessions of user %d: %w", userID, err)
+	}
+	return out, nil
+}
+
+func (d *Dynamo) TouchSession(ctx context.Context, userID int64, repoKey, id string, expires, now time.Time) (bool, error) {
+	usedAt, err := attributevalue.Marshal(now)
+	if err != nil {
+		return false, fmt.Errorf("failed to encode session use: %w", err)
+	}
+	expiresAt, err := attributevalue.Marshal(expires)
+	if err != nil {
+		return false, fmt.Errorf("failed to encode session expiry: %w", err)
+	}
+	_, err = d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &d.table,
+		Key:       itemKey(userPK(userID), sessionPrefix+repoKey),
+		UpdateExpression: aws.String("SET used_at = :used, session_expires_at = :expires, " +
+			attrDeadline + " = :deadline, " + attrExpiresAt + " = :ttl"),
+		ConditionExpression: aws.String("session_id = :id AND " + attrDeadline + " > :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":used":     usedAt,
+			":expires":  expiresAt,
+			":deadline": millis(expires),
+			":ttl":      &types.AttributeValueMemberN{Value: strconv.FormatInt(expires.Unix(), 10)},
+			":id":       &types.AttributeValueMemberS{Value: id},
+			":now":      millis(now),
+		},
+	})
+	var failed *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &failed):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to update session %s: %w", id, err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) DeleteSession(ctx context.Context, userID int64, repoKey, id string) (bool, error) {
+	_, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:                 &d.table,
+		Key:                       itemKey(userPK(userID), sessionPrefix+repoKey),
+		ConditionExpression:       aws.String("session_id = :id"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":id": &types.AttributeValueMemberS{Value: id}},
+	})
+	var failed *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &failed):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to delete session %s: %w", id, err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) PutSeal(ctx context.Context, s Seal) error {
+	item, err := attributevalue.MarshalMap(sealItem{
+		PK:        sessionPrefix + s.SessionID,
+		SK:        sealPrefix + s.CommandID,
+		ExpiresAt: s.ExpiresAt.Unix(),
+		Seal:      s,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to encode seal %s: %w", s.CommandID, err)
+	}
+	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           &d.table,
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(pk)"),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to store seal %s: %w", s.CommandID, err)
+	}
+	return nil
+}
+
+func (d *Dynamo) Seal(ctx context.Context, sessionID, commandID string) (Seal, bool, error) {
+	res, err := d.api.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      &d.table,
+		Key:            itemKey(sessionPrefix+sessionID, sealPrefix+commandID),
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return Seal{}, false, fmt.Errorf("failed to read seal %s: %w", commandID, err)
+	}
+	if len(res.Item) == 0 {
+		return Seal{}, false, nil
+	}
+	var item sealItem
+	if err := attributevalue.UnmarshalMap(res.Item, &item); err != nil {
+		return Seal{}, false, fmt.Errorf("failed to decode seal %s: %w", commandID, err)
+	}
+	return item.Seal, true, nil
+}
+
+func (d *Dynamo) PutChange(ctx context.Context, c Change) (bool, error) {
+	item, err := attributevalue.MarshalMap(changeItem{
+		PK:        sessionPrefix + c.SessionID,
+		SK:        changePrefix + c.ID,
+		ExpiresAt: c.ExpiresAt.Unix(),
+		Change:    c,
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to encode change %s: %w", c.ID, err)
+	}
+	// command IDs are ULIDs: a newer seal of the same key wins
+	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:                 &d.table,
+		Item:                      item,
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR command_id <= :cmd"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":cmd": &types.AttributeValueMemberS{Value: c.CommandID}},
+	})
+	var newer *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &newer):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to store change %s: %w", c.ID, err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) Changes(ctx context.Context, sessionID string, ciphertexts bool) ([]Change, error) {
+	var projection []string
+	if !ciphertexts {
+		projection = changeListAttributes
+	}
+	out := []Change{}
+	err := d.query(ctx, sessionPrefix+sessionID, changePrefix, projection, func(raw map[string]types.AttributeValue) error {
+		var item changeItem
+		if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
+			return fmt.Errorf("failed to decode change: %w", err)
+		}
+		out = append(out, item.Change)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read changes of session %s: %w", sessionID, err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (d *Dynamo) DeleteChange(ctx context.Context, sessionID, id string) (bool, error) {
+	res, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:    &d.table,
+		Key:          itemKey(sessionPrefix+sessionID, changePrefix+id),
+		ReturnValues: types.ReturnValueAllOld,
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to delete change %s: %w", id, err)
+	}
+	return len(res.Attributes) > 0, nil
+}
+
+// query reads every item under pk whose sort key starts with prefix,
+// optionally projecting only some attributes.
+func (d *Dynamo) query(ctx context.Context, pk, prefix string, projection []string, fn func(map[string]types.AttributeValue) error) error {
+	in := &dynamodb.QueryInput{
+		TableName:              &d.table,
+		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :prefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk":     &types.AttributeValueMemberS{Value: pk},
+			":prefix": &types.AttributeValueMemberS{Value: prefix},
+		},
+		ConsistentRead: aws.Bool(true),
+	}
+	if len(projection) > 0 {
+		// names such as "path" and "key" are reserved words
+		names := map[string]string{}
+		refs := make([]string, len(projection))
+		for i, attr := range projection {
+			ref := "#a" + strconv.Itoa(i)
+			names[ref] = attr
+			refs[i] = ref
+		}
+		in.ProjectionExpression = aws.String(strings.Join(refs, ", "))
+		in.ExpressionAttributeNames = names
+	}
+	for {
+		res, err := d.api.Query(ctx, in)
+		if err != nil {
+			return err
+		}
+		for _, raw := range res.Items {
+			if err := fn(raw); err != nil {
+				return err
+			}
+		}
+		if len(res.LastEvaluatedKey) == 0 {
+			return nil
+		}
+		in.ExclusiveStartKey = res.LastEvaluatedKey
+	}
+}

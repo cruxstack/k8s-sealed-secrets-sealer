@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,10 +16,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/controlplane"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
@@ -117,6 +120,11 @@ func run() error {
 		return err
 	}
 
+	transit, err := newKMS(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
 	logger.InfoContext(ctx, "starting control plane",
 		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
 		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams)
@@ -134,12 +142,37 @@ func run() error {
 		AdminToken: cfg.AdminToken,
 		Users:      users,
 		Repos:      repoService,
-		WebUI:      webui.Handler(),
-		HSTS:       strings.HasPrefix(cfg.PublicURL, "https://"),
+		// the control plane only ever generates data keys with it
+		Transit:      transit,
+		TransitKeyID: cfg.KMSTransitKeyID,
+		WebUI:        webui.Handler(),
+		HSTS:         strings.HasPrefix(cfg.PublicURL, "https://"),
 
 		KeyRenewPeriod: cfg.KeyRenewPeriod,
 	})
 	return httpserver.Serve(ctx, cfg.HTTPAddr, srv.Handler(), logger)
+}
+
+// newKMS returns the client for the transit key, as the one thing it may do
+// with it: generate data keys. Credentials come from the SDK's default chain.
+func newKMS(ctx context.Context, cfg *config.ControlPlane) (envelope.DataKeyGenerator, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
+	}
+	region := cfg.KMSRegion
+	if region == "" {
+		region = awsCfg.Region
+	}
+	if region == "" {
+		return nil, errors.New("sealing needs a KMS region: set APP_KMS_REGION or AWS_REGION")
+	}
+	return kms.NewFromConfig(awsCfg, func(o *kms.Options) {
+		o.Region = region
+		if cfg.KMSEndpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.KMSEndpoint)
+		}
+	}), nil
 }
 
 func newStore(ctx context.Context, cfg *config.ControlPlane, logger *slog.Logger) (*store.Dynamo, error) {

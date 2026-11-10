@@ -7,10 +7,12 @@ file, type a value, and get a pull request. They never pick a cluster, a
 region or a certificate.
 
 > **Status:** early development. People sign in with GitHub, see the fleet
-> (every agent, its controller's keys and the env's key state), and browse
-> the SealedSecrets for their env in the repositories they can read. Agents
-> keep every cluster holding the same keys. Sealing is next. See
-> [the design](docs/design.md) for where it is going.
+> (every agent, its controller's keys and the env's key state), browse the
+> SealedSecrets for their env in the repositories they can read, and seal
+> values into them as pending changes; an agent seals each value with the
+> env key. Agents keep every cluster holding the same keys. Opening pull
+> requests from pending changes is next. See [the design](docs/design.md)
+> for where it is going.
 
 ## How it works
 

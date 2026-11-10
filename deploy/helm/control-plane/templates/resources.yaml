@@ -98,6 +98,16 @@ spec:
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}
+            - name: APP_KMS_TRANSIT_KEY_ID
+              value: {{ required "kms.transitKeyId is required" .Values.kms.transitKeyId | quote }}
+            {{- with .Values.kms.region }}
+            - name: APP_KMS_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.kms.endpoint }}
+            - name: APP_KMS_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
             - name: APP_GITHUB_ORG
               value: {{ required "github.org is required" .Values.github.org | quote }}
             - name: APP_GITHUB_OAUTH_CLIENT_ID

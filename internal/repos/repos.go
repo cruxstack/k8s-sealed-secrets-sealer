@@ -27,8 +27,11 @@ import (
 
 // Errors for users. ErrNotFound covers repositories a user cannot read.
 var (
-	ErrNotFound  = errors.New("repository not found")
-	ErrForbidden = errors.New("you do not have write access to this repository")
+	ErrNotFound       = errors.New("repository not found")
+	ErrForbidden      = errors.New("you do not have write access to this repository")
+	ErrArchived       = errors.New("this repository is archived")
+	ErrCommitNotFound = errors.New("commit not found")
+	ErrFileNotFound   = errors.New("no SealedSecret file at that path")
 )
 
 // Defaults and limits.
@@ -43,6 +46,7 @@ const (
 	// cache sizes; a full cache is emptied rather than evicted piecemeal
 	maxPermissionEntries = 10_000
 	maxParsedBlobs       = 5_000
+	maxSnapshots         = 1_000
 )
 
 // DefaultFileGlobs select the files discovery reads: YAML files with
@@ -85,6 +89,14 @@ type Service struct {
 	mu          sync.Mutex
 	permissions map[string]permissionEntry
 	parsed      map[string]parsedBlob
+	snapshots   map[string]snapshot
+}
+
+// snapshot is a commit's discovery candidates: the files whose name matches
+// the globs, sorted by path. Commits never change, so it is cached.
+type snapshot struct {
+	candidates []githubapp.TreeEntry
+	truncated  bool
 }
 
 type permissionEntry struct {
@@ -130,6 +142,7 @@ func New(opts Options) (*Service, error) {
 		now:           now,
 		permissions:   map[string]permissionEntry{},
 		parsed:        map[string]parsedBlob{},
+		snapshots:     map[string]snapshot{},
 	}, nil
 }
 
@@ -285,7 +298,7 @@ type File struct {
 	Error string `json:"error,omitempty"`
 }
 
-// Listing is a repository's SealedSecret files for the env, at the head of
+// Listing is a repository's SealedSecret files for the env at a commit of
 // its default branch.
 type Listing struct {
 	Repo   Repo   `json:"repository"`
@@ -299,63 +312,36 @@ type Listing struct {
 	FileGlobs []string `json:"file_globs"`
 }
 
-// Files lists the files on the repository's default branch that hold
-// SealedSecret documents for the env. Files with no such documents are
-// left out; files that match but cannot be parsed are listed with an error.
-func (s *Service) Files(ctx context.Context, user *userauth.User, owner, name string) (Listing, error) {
-	a, err := s.Require(ctx, user, owner, name, false)
+// Files lists the files that hold SealedSecret documents for the env, at a
+// commit or, when commit is empty, the head of the default branch. Files
+// with no such documents are left out; files that match but cannot be
+// parsed are listed with an error.
+func (s *Service) Files(ctx context.Context, user *userauth.User, owner, name, commit string) (Listing, error) {
+	r, a, err := s.repository(ctx, user, owner, name, false)
 	if err != nil {
 		return Listing{}, err
 	}
-	r, err := s.gh.Repository(ctx, owner, name)
-	if errors.Is(err, githubapp.ErrNotFound) {
-		return Listing{}, ErrNotFound
-	}
-	if err != nil {
-		return Listing{}, err
-	}
-	if r.Archived {
-		// nothing can be pushed to an archived repository
-		a.Write = false
-	}
-	head, err := s.gh.BranchHead(ctx, r.Owner, r.Name, r.DefaultBranch)
-	if err != nil {
-		return Listing{}, err
-	}
-	tree, err := s.gh.Tree(ctx, r.Owner, r.Name, head)
-	if err != nil {
-		return Listing{}, err
-	}
-
-	var candidates []githubapp.TreeEntry
-	for _, e := range tree.Entries {
-		if e.Type == "blob" && e.Size <= manifest.MaxFileBytes && s.matches(e.Path) {
-			candidates = append(candidates, e)
+	if commit == "" {
+		if commit, err = s.gh.BranchHead(ctx, r.Owner, r.Name, r.DefaultBranch); err != nil {
+			return Listing{}, err
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Path < candidates[j].Path })
+	snap, err := s.snapshot(ctx, r, commit)
+	if err != nil {
+		return Listing{}, err
+	}
 	listing := Listing{
 		Repo:      repo(r, a),
 		Branch:    r.DefaultBranch,
-		Commit:    head,
+		Commit:    commit,
 		Files:     []File{},
-		Truncated: tree.Truncated,
+		Truncated: snap.truncated,
 		FileGlobs: s.globs,
 	}
-	if len(candidates) > maxCandidates {
-		candidates = candidates[:maxCandidates]
-		listing.Truncated = true
-	}
 
-	files := make([]File, len(candidates))
-	forEach(ctx, len(candidates), func(i int) {
-		e := candidates[i]
-		docs, err := s.parse(ctx, r.Owner, r.Name, e.SHA)
-		files[i] = File{Path: e.Path, Blob: e.SHA, Documents: docs}
-		if err != nil {
-			files[i].Error = userError(err)
-			s.logger.DebugContext(ctx, "skipping unreadable file", "repository", r.FullName, "path", e.Path, "error", err)
-		}
+	files := make([]File, len(snap.candidates))
+	forEach(ctx, len(snap.candidates), func(i int) {
+		files[i] = s.file(ctx, r, snap.candidates[i])
 	})
 	if err := ctx.Err(); err != nil {
 		return Listing{}, err
@@ -366,6 +352,117 @@ func (s *Service) Files(ctx context.Context, user *userauth.User, owner, name st
 		}
 	}
 	return listing, nil
+}
+
+// Head checks the user's access, read or write, and returns the repository
+// with the head of its default branch. Writing to an archived repository is
+// refused.
+func (s *Service) Head(ctx context.Context, user *userauth.User, owner, name string, write bool) (Repo, string, error) {
+	r, a, err := s.repository(ctx, user, owner, name, write)
+	if err != nil {
+		return Repo{}, "", err
+	}
+	head, err := s.gh.BranchHead(ctx, r.Owner, r.Name, r.DefaultBranch)
+	if err != nil {
+		return Repo{}, "", err
+	}
+	return repo(r, a), head, nil
+}
+
+// File checks the user's access, read or write, and returns a discovered
+// file's documents for the env at a commit; its Error says why it could not
+// be read. ErrFileNotFound means no file at that path matches the discovery
+// globs.
+func (s *Service) File(ctx context.Context, user *userauth.User, owner, name, commit, filePath string, write bool) (File, error) {
+	r, _, err := s.repository(ctx, user, owner, name, write)
+	if err != nil {
+		return File{}, err
+	}
+	snap, err := s.snapshot(ctx, r, commit)
+	if err != nil {
+		return File{}, err
+	}
+	i := sort.Search(len(snap.candidates), func(i int) bool { return snap.candidates[i].Path >= filePath })
+	if i == len(snap.candidates) || snap.candidates[i].Path != filePath {
+		return File{}, ErrFileNotFound
+	}
+	return s.file(ctx, r, snap.candidates[i]), nil
+}
+
+// repository checks the user's access and returns the repository and that
+// access. Nothing can be pushed to an archived repository, so it is never
+// writable.
+func (s *Service) repository(ctx context.Context, user *userauth.User, owner, name string, write bool) (githubapp.Repository, Access, error) {
+	a, err := s.Require(ctx, user, owner, name, write)
+	if err != nil {
+		return githubapp.Repository{}, Access{}, err
+	}
+	r, err := s.gh.Repository(ctx, owner, name)
+	if errors.Is(err, githubapp.ErrNotFound) {
+		return githubapp.Repository{}, Access{}, ErrNotFound
+	}
+	if err != nil {
+		return githubapp.Repository{}, Access{}, err
+	}
+	if r.Archived {
+		if write {
+			return githubapp.Repository{}, Access{}, ErrArchived
+		}
+		a.Write = false
+	}
+	return r, a, nil
+}
+
+// snapshot returns a commit's discovery candidates, from the cache when it
+// has them.
+func (s *Service) snapshot(ctx context.Context, r githubapp.Repository, commit string) (snapshot, error) {
+	if !githubapp.ValidSHA(commit) {
+		return snapshot{}, ErrCommitNotFound
+	}
+	key := strings.ToLower(r.FullName) + "@" + commit
+	s.mu.Lock()
+	if snap, ok := s.snapshots[key]; ok {
+		s.mu.Unlock()
+		return snap, nil
+	}
+	s.mu.Unlock()
+
+	tree, err := s.gh.Tree(ctx, r.Owner, r.Name, commit)
+	if errors.Is(err, githubapp.ErrNotFound) {
+		return snapshot{}, ErrCommitNotFound
+	}
+	if err != nil {
+		return snapshot{}, err
+	}
+	snap := snapshot{truncated: tree.Truncated}
+	for _, e := range tree.Entries {
+		if e.Type == "blob" && e.Size <= manifest.MaxFileBytes && s.matches(e.Path) {
+			snap.candidates = append(snap.candidates, e)
+		}
+	}
+	sort.Slice(snap.candidates, func(i, j int) bool { return snap.candidates[i].Path < snap.candidates[j].Path })
+	if len(snap.candidates) > maxCandidates {
+		snap.candidates = snap.candidates[:maxCandidates]
+		snap.truncated = true
+	}
+	s.mu.Lock()
+	if len(s.snapshots) >= maxSnapshots {
+		s.snapshots = map[string]snapshot{}
+	}
+	s.snapshots[key] = snap
+	s.mu.Unlock()
+	return snap, nil
+}
+
+// file reads and parses one candidate.
+func (s *Service) file(ctx context.Context, r githubapp.Repository, e githubapp.TreeEntry) File {
+	docs, err := s.parse(ctx, r.Owner, r.Name, e.SHA)
+	f := File{Path: e.Path, Blob: e.SHA, Documents: docs}
+	if err != nil {
+		f.Error = userError(err)
+		s.logger.DebugContext(ctx, "skipping unreadable file", "repository", r.FullName, "path", e.Path, "error", err)
+	}
+	return f
 }
 
 // matches reports whether a path is a discovery candidate.

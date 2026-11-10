@@ -30,6 +30,7 @@ type counting struct {
 	GitHub
 	permissions atomic.Int32
 	blobs       atomic.Int32
+	trees       atomic.Int32
 	// answerFor, when set, makes permission answers claim another user
 	answerFor int64
 }
@@ -46,6 +47,11 @@ func (c *counting) Permission(ctx context.Context, owner, repo, login string) (g
 func (c *counting) Blob(ctx context.Context, owner, repo, sha string) ([]byte, error) {
 	c.blobs.Add(1)
 	return c.GitHub.Blob(ctx, owner, repo, sha)
+}
+
+func (c *counting) Tree(ctx context.Context, owner, repo, commit string) (githubapp.Tree, error) {
+	c.trees.Add(1)
+	return c.GitHub.Tree(ctx, owner, repo, commit)
 }
 
 func newService(t *testing.T, repos []mockgithub.Repo) (*Service, *counting, *time.Time) {
@@ -167,7 +173,7 @@ func TestRequire_DeniesAnswersForAnotherUser(t *testing.T) {
 func TestFiles(t *testing.T) {
 	s, gh, _ := newService(t, nil)
 	ctx := context.Background()
-	l, err := s.Files(ctx, alice, "example-org", "apps")
+	l, err := s.Files(ctx, alice, "example-org", "apps", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +197,13 @@ func TestFiles(t *testing.T) {
 
 	// blobs are parsed once
 	blobs := gh.blobs.Load()
-	if _, err := s.Files(ctx, bob, "example-org", "apps"); err != nil {
+	if _, err := s.Files(ctx, bob, "example-org", "apps", ""); err != nil {
 		t.Fatal(err)
 	}
 	if gh.blobs.Load() != blobs {
 		t.Error("blobs were fetched again")
 	}
-	if _, err := s.Files(ctx, carol, "example-org", "apps"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Files(ctx, carol, "example-org", "apps", ""); !errors.Is(err, ErrNotFound) {
 		t.Errorf("carol: %v", err)
 	}
 }
@@ -213,7 +219,7 @@ func TestFiles_UnreadableAndCustomGlobs(t *testing.T) {
 		},
 	}}
 	s, _, _ := newService(t, repos)
-	l, err := s.Files(context.Background(), alice, "example-org", "odd")
+	l, err := s.Files(context.Background(), alice, "example-org", "odd", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +229,58 @@ func TestFiles_UnreadableAndCustomGlobs(t *testing.T) {
 
 	// a glob with a slash matches whole paths
 	s.globs = []string{"secrets/*/*.yml"}
-	l, err = s.Files(context.Background(), alice, "example-org", "odd")
+	s.snapshots = map[string]snapshot{}
+	l, err = s.Files(context.Background(), alice, "example-org", "odd", "")
 	if err != nil || len(l.Files) != 1 || l.Files[0].Path != "secrets/dev/creds.yml" {
 		t.Fatalf("files = %+v, %v", l.Files, err)
 	}
 	if _, err := New(Options{FileGlobs: []string{"[bad"}}); err == nil || !strings.Contains(err.Error(), "glob") {
 		t.Errorf("bad glob: %v", err)
+	}
+}
+
+func TestHeadAndFile(t *testing.T) {
+	s, gh, _ := newService(t, nil)
+	ctx := context.Background()
+
+	r, head, err := s.Head(ctx, alice, "Example-Org", "APPS", true)
+	if err != nil || r.FullName != "example-org/apps" || r.Access != "write" || !githubapp.ValidSHA(head) {
+		t.Fatalf("Head = %+v, %s, %v", r, head, err)
+	}
+	if _, _, err := s.Head(ctx, bob, "example-org", "apps", true); !errors.Is(err, ErrForbidden) {
+		t.Errorf("bob's write head: %v", err)
+	}
+
+	// a listing at a commit, then single files at it, share one tree read
+	l, err := s.Files(ctx, alice, "example-org", "apps", head)
+	if err != nil || l.Commit != head || len(l.Files) != 3 {
+		t.Fatalf("Files at %s = %+v, %v", head, l, err)
+	}
+	f, err := s.File(ctx, alice, "example-org", "apps", head, "deploy/billing/sealed-secret.yaml", true)
+	if err != nil || len(f.Documents) != 3 || f.Error != "" {
+		t.Fatalf("File = %+v, %v", f, err)
+	}
+	if n := gh.trees.Load(); n != 1 {
+		t.Errorf("trees read = %d, want 1", n)
+	}
+
+	cases := map[string]struct {
+		user   *userauth.User
+		commit string
+		path   string
+		write  bool
+		want   error
+	}{
+		"not matching the globs": {alice, head, "deploy/billing/deployment.yaml", true, ErrFileNotFound},
+		"missing":                {alice, head, "deploy/nothing/sealed-secret.yaml", true, ErrFileNotFound},
+		"invalid commit":         {alice, "main", "deploy/billing/sealed-secret.yaml", true, ErrCommitNotFound},
+		"unknown commit":         {alice, strings.Repeat("0", 40), "deploy/billing/sealed-secret.yaml", true, ErrCommitNotFound},
+		"read only":              {bob, head, "deploy/billing/sealed-secret.yaml", true, ErrForbidden},
+		"no access":              {carol, head, "deploy/billing/sealed-secret.yaml", false, ErrNotFound},
+	}
+	for name, tc := range cases {
+		if _, err := s.File(ctx, tc.user, "example-org", "apps", tc.commit, tc.path, tc.write); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", name, err, tc.want)
+		}
 	}
 }

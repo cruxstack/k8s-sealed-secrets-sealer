@@ -57,11 +57,16 @@ aws:
   # AWS SDK's region (AWS_REGION)
   region: ""
 
-# The KMS escrow key, used with the keys capability. The agent's IAM role
-# (EKS Pod Identity or IRSA) needs kms:GenerateDataKey and kms:Decrypt on it.
+# KMS keys. The agent's IAM role (EKS Pod Identity or IRSA) needs:
+#   transit  kms:Decrypt, only when the encryption context's agent_id is
+#            this agent's ID (seal capability)
+#   escrow   kms:GenerateDataKey and kms:Decrypt (keys capability)
+# For a multi-Region key, use the replica in this cluster's region.
 kms:
-  # key ID, ARN or alias (required with capabilities.keys); for a
-  # multi-Region key, the replica in this cluster's region
+  # the key values to seal arrive encrypted under: ID, ARN or alias
+  # (required with capabilities.seal)
+  transitKeyId: ""
+  # key ID, ARN or alias (required with capabilities.keys)
   escrowKeyId: ""
   # region of the KMS endpoint; empty uses the AWS SDK's region (AWS_REGION)
   region: ""

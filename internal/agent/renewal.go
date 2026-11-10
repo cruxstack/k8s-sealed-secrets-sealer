@@ -51,9 +51,9 @@ type renewalResult struct {
 
 // Enable runs renewal.enable.v1: it sets the controller's --key-renew-period,
 // unless renewal is already on. Changing the arguments rolls the controller.
-func (r *Renewal) Enable(ctx context.Context, raw json.RawMessage) (any, error) {
+func (r *Renewal) Enable(ctx context.Context, cmd protocol.Command) (any, error) {
 	var p protocol.RenewalEnablePayload
-	if err := strictDecode(raw, &p); err != nil {
+	if err := strictDecode(cmd.Payload, &p); err != nil {
 		return nil, err
 	}
 	period, err := time.ParseDuration(p.Period)

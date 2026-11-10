@@ -284,4 +284,67 @@ while read -r name; do
   check "controller ${name} unseals a value sealed with the env key into ${apps_ns}"
 done < <(stack_clusters)
 
+# --- sealing: alice seals one value into the billing file, which has a dev
+# document for each simulated cluster. One agent decrypts it from transit
+# and seals it for all three with the env key. ---
+[[ "$(sign_in alice)" == "${control_plane}/fleet" ]] || die "alice could not sign in again"
+csrf="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me" | jq -r .csrf_token)"
+# as_alice <method> <path> [json body]: prints "<status> <body>"
+as_alice() {
+  local args=(-sS -o "${work}/body" -w '%{http_code}' -X "$1" -b "${work}/cookies-alice"
+    -H 'Content-Type: application/json' -H "X-CSRF-Token: ${csrf}")
+  [[ -n "${3:-}" ]] && args+=(--data "$3")
+  printf '%s %s' "$(curl "${args[@]}" "${control_plane}$2")" "$(/bin/cat "${work}/body")"
+}
+apps=/api/v1/repos/example-org/apps
+out="$(as_alice POST "${apps}/session" "$(jq -nc --arg c "$(jq -r .commit <<<"$files")" '{commit: $c}')")"
+[[ "${out%% *}" == 201 ]] || die "alice could not open a session: ${out}"
+session="$(jq -r .session.id <<<"${out#* }")"
+check "alice opens a session on example-org/apps at the commit she saw"
+
+value="e2e-$(openssl rand -hex 12)"
+out="$(as_alice POST "${apps}/session/${session}/seals" \
+  "$(jq -nc --arg v "$value" '{path: "deploy/billing/sealed-secret.yaml", key: "api-token", value: $v}')")"
+[[ "${out%% *}" == 202 ]] || die "seal request: ${out}"
+seal="$(jq -r .id <<<"${out#* }")"
+status=""
+for _ in $(seq 1 60); do
+  out="$(as_alice GET "${apps}/session/${session}/seals/${seal}")"
+  status="$(jq -r .status <<<"${out#* }")"
+  [[ "$status" == queued || "$status" == sealing ]] || break
+  sleep 1
+done
+[[ "$status" == sealed ]] || die "the seal did not finish: ${out}"
+sealer="$(jq -r .agent.id <<<"${out#* }")"
+[[ "$(jq -r .fingerprint <<<"${out#* }")" == "$env_key" ]] || die "sealed with a key other than the env key: ${out}"
+check "agent ${sealer} seals the value with the env key"
+
+out="$(as_alice GET "${apps}/session")"
+jq -e --arg fp "$env_key" '
+  .session.changes as $c
+  | ($c | length) == 1 and $c[0].key == "api-token" and $c[0].fingerprint == $fp
+  and ($c[0].targets | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"]
+  and ([.. | objects | select(has("ciphertext") or has("ciphertexts"))] | length) == 0
+' <<<"${out#* }" >/dev/null || die "pending changes: ${out}"
+check "the session holds one pending change for the three dev documents, without ciphertexts"
+
+[[ "$(log_events sealer-system sealer-control-plane seal.succeeded | wc -l | tr -d ' ')" == 1 ]] \
+  || die "the control plane did not log seal.succeeded once"
+[[ -n "$(log_events "${sealer}-sealer" sealer-agent seal.sealed)" ]] || die "agent ${sealer} did not log seal.sealed"
+for deploy in sealer-system/sealer-control-plane $(stack_clusters | sed 's|$|-sealer/sealer-agent|'); do
+  if kubectl --context "$KUBE_CONTEXT" -n "${deploy%%/*}" logs "deploy/${deploy#*/}" 2>/dev/null | grep -qF -- "$value"; then
+    die "the value appears in the log of ${deploy}"
+  fi
+done
+check "the seal is logged by the control plane and the agent, and the value by neither"
+
+code="$(as_alice POST "${apps}/session/${session}/seals" \
+  '{"path":"deploy/legacy/sealed-secret.yaml","key":"k","value":"v"}' | cut -d' ' -f1)"
+[[ "$code" == 422 ]] || die "a seal into a cluster-wide document answered ${code}"
+code="$(as_alice POST /api/v1/repos/example-org/platform/session '{}' | cut -d' ' -f1)"
+[[ "$code" == 403 ]] || die "a session on a read-only repository answered ${code}"
+code="$(as_alice POST /api/v1/repos/example-org/restricted/session '{}' | cut -d' ' -f1)"
+[[ "$code" == 404 ]] || die "a session on a repository alice cannot read answered ${code}"
+check "sealing refuses cluster-wide documents and repositories alice cannot write"
+
 echo "e2e: ${passed} checks passed" >&2

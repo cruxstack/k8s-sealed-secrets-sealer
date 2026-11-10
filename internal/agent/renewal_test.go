@@ -9,6 +9,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
 func TestRenewal_Enable(t *testing.T) {
@@ -40,7 +42,7 @@ func TestRenewal_Enable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			kube := fake.NewClientset(controllerDeployment(tc.args...))
 			r := NewRenewal(kube, ns, "sealed-secrets-controller", nil)
-			out, err := r.Enable(context.Background(), json.RawMessage(`{"period":"720h0m0s"}`))
+			out, err := r.Enable(context.Background(), protocol.Command{Payload: json.RawMessage(`{"period":"720h0m0s"}`)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -58,7 +60,7 @@ func TestRenewal_Enable(t *testing.T) {
 func TestRenewal_RejectsBadPeriods(t *testing.T) {
 	r := NewRenewal(fake.NewClientset(controllerDeployment("--key-renew-period=0")), ns, "sealed-secrets-controller", nil)
 	for _, raw := range []string{`{"period":"1m"}`, `{"period":"10000h"}`, `{"period":"soon"}`, `{"period":"720h","x":1}`} {
-		if _, err := r.Enable(context.Background(), json.RawMessage(raw)); err == nil || !strings.Contains(err.Error(), "invalid payload") {
+		if _, err := r.Enable(context.Background(), protocol.Command{Payload: json.RawMessage(raw)}); err == nil || !strings.Contains(err.Error(), "invalid payload") {
 			t.Errorf("%s: err = %v", raw, err)
 		}
 	}

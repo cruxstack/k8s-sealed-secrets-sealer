@@ -65,9 +65,12 @@ controller.
 The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
 and an `escrow` key (`dev/local-kms/seed.yaml`; throwaway key material, local
-use only). Agents use the escrow key through `alias/sealer-escrow`. local-kms
-does not enforce key policies, so "the control plane cannot decrypt" is
-tested with the Terraform module, not here.
+use only). The control plane and the agents use the transit key through
+`alias/sealer-transit`, and agents the escrow key through
+`alias/sealer-escrow`. local-kms does not enforce key policies, so "the
+control plane cannot decrypt" and "an agent can decrypt only its own seals"
+are tested with the Terraform module, not here; the control plane's transit
+client has no decrypt method either way.
 
 Every simulated controller starts with its own key and with key renewal off
 (`--key-renew-period 0`). Within a minute or so of `atmos dev up`, the agents
@@ -174,7 +177,12 @@ the run for inspection. Besides bringing the stack up, it checks that:
   sign-out requires the CSRF token;
 - alice sees only the repositories she can read, with her access, discovery
   finds the dev SealedSecrets (and flags cluster-wide scope), and a
-  repository she cannot read is not found.
+  repository she cannot read is not found;
+- alice opens a session on `example-org/apps` and seals a value into the
+  billing file: one agent seals it with the env key for all three dev
+  documents, the session lists the pending change without its ciphertexts,
+  and the value appears in no log; sealing into a cluster-wide document, or
+  into a repository she cannot write, is refused.
 
 ## Local agent identity
 
@@ -196,40 +204,51 @@ local-only secrets, including the admin token `atmos dev status` uses, are in
 The binaries read `APP_` environment variables, all in `internal/config`.
 Invalid or missing settings are reported together at startup.
 
-| Variable                           | Component     | Default                       |
-| ---------------------------------- | ------------- | ----------------------------- |
-| `APP_HTTP_ADDR`                    | both          | `:8080` / `:8081` (agent)     |
-| `APP_LOG_LEVEL`                    | both          | `info`                        |
-| `APP_LOG_FORMAT`                   | both          | `json` (or `text`)            |
-| `APP_ENV_NAME`                     | control plane | required                      |
-| `APP_PUBLIC_URL`                   | control plane | required                      |
-| `APP_AGENT_AUDIENCE`               | control plane | `APP_PUBLIC_URL`              |
-| `APP_REGISTRY_FILE`                | control plane | required                      |
-| `APP_AGENT_SESSION_KEY`            | control plane | required, at least 32 bytes   |
-| `APP_ADMIN_TOKEN`                  | control plane | unset: admin API disabled     |
-| `APP_DYNAMODB_TABLE`               | control plane | required                      |
-| `APP_DYNAMODB_ENDPOINT`            | control plane | AWS (set for emulators)       |
-| `APP_DYNAMODB_CREATE_TABLE`        | control plane | `false` (emulators only)      |
-| `APP_AWS_STS_HOSTS`                | control plane | AWS's public STS hosts        |
-| `APP_GITHUB_ORG`                   | control plane | required                      |
-| `APP_GITHUB_ALLOWED_TEAMS`         | control plane | unset: any org member         |
-| `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required                      |
-| `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required                      |
-| `APP_GITHUB_URL`                   | control plane | `https://github.com`          |
-| `APP_GITHUB_API_URL`               | control plane | `https://api.github.com`      |
-| `APP_GITHUB_OAUTH_TOKEN_URL`       | control plane | `APP_GITHUB_URL` + token path |
-| `APP_ALLOW_INSECURE_GITHUB`        | control plane | `false` (local mocks only)    |
-| `APP_USER_SESSION_KEY`             | control plane | required, at least 32 bytes   |
-| `APP_USER_SESSION_TTL`             | control plane | `8h` (15m to 24h)             |
-| `APP_CONTROL_PLANE_URL`            | agent         | required, https               |
-| `APP_ALLOW_INSECURE_CONTROL_PLANE` | agent         | `false` (local stacks only)   |
-| `APP_IDENTITY_MODE`                | agent         | `k8s-oidc` (or `aws-sts`)     |
-| `APP_IDENTITY_AUDIENCE`            | agent         | `APP_CONTROL_PLANE_URL`       |
-| `APP_IDENTITY_TOKEN_FILE`          | agent         | the chart's projected token   |
-| `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region          |
-| `APP_CAPABILITIES`                 | agent         | `seal`                        |
-| `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)              |
-| `APP_CONTROLLER_NAMESPACE`         | agent         | required                      |
-| `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`   |
-| `APP_CONTROLLER_DEPLOYMENT`        | agent         | `APP_CONTROLLER_NAME`         |
-| `APP_KUBE_CONTEXT`                 | agent         | in-cluster configuration      |
+| Variable                           | Component     | Default                            |
+| ---------------------------------- | ------------- | ---------------------------------- |
+| `APP_HTTP_ADDR`                    | both          | `:8080` / `:8081` (agent)          |
+| `APP_LOG_LEVEL`                    | both          | `info`                             |
+| `APP_LOG_FORMAT`                   | both          | `json` (or `text`)                 |
+| `APP_ENV_NAME`                     | both          | required                           |
+| `APP_PUBLIC_URL`                   | control plane | required                           |
+| `APP_AGENT_AUDIENCE`               | control plane | `APP_PUBLIC_URL`                   |
+| `APP_REGISTRY_FILE`                | control plane | required                           |
+| `APP_AGENT_SESSION_KEY`            | control plane | required, at least 32 bytes        |
+| `APP_ADMIN_TOKEN`                  | control plane | unset: admin API disabled          |
+| `APP_DYNAMODB_TABLE`               | control plane | required                           |
+| `APP_DYNAMODB_ENDPOINT`            | control plane | AWS (set for emulators)            |
+| `APP_DYNAMODB_CREATE_TABLE`        | control plane | `false` (emulators only)           |
+| `APP_AWS_STS_HOSTS`                | control plane | AWS's public STS hosts             |
+| `APP_GITHUB_ORG`                   | control plane | required                           |
+| `APP_GITHUB_ALLOWED_TEAMS`         | control plane | unset: any org member              |
+| `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required                           |
+| `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required                           |
+| `APP_GITHUB_URL`                   | control plane | `https://github.com`               |
+| `APP_GITHUB_API_URL`               | control plane | `https://api.github.com`           |
+| `APP_GITHUB_OAUTH_TOKEN_URL`       | control plane | `APP_GITHUB_URL` + token path      |
+| `APP_ALLOW_INSECURE_GITHUB`        | control plane | `false` (local mocks only)         |
+| `APP_USER_SESSION_KEY`             | control plane | required, at least 32 bytes        |
+| `APP_USER_SESSION_TTL`             | control plane | `8h` (15m to 24h)                  |
+| `APP_GITHUB_APP_ID`                | control plane | required                           |
+| `APP_GITHUB_APP_PRIVATE_KEY`       | control plane | required, PEM                      |
+| `APP_GITHUB_APP_INSTALLATION_ID`   | control plane | looked up on the org               |
+| `APP_ENV_ANNOTATION`               | control plane | `k8s-sealed-secrets-sealer/env`    |
+| `APP_REGION_ANNOTATION`            | control plane | `k8s-sealed-secrets-sealer/region` |
+| `APP_DISCOVERY_FILE_GLOBS`         | control plane | `*sealed*.yaml,*sealed*.yml`       |
+| `APP_KEY_RENEW_PERIOD`             | control plane | `720h`                             |
+| `APP_KMS_TRANSIT_KEY_ID`           | both          | required (agent: with `seal`)      |
+| `APP_KMS_ESCROW_KEY_ID`            | agent         | required with `keys`               |
+| `APP_KMS_REGION`                   | both          | the AWS SDK's region               |
+| `APP_KMS_ENDPOINT`                 | both          | AWS (set for emulators)            |
+| `APP_CONTROL_PLANE_URL`            | agent         | required, https                    |
+| `APP_ALLOW_INSECURE_CONTROL_PLANE` | agent         | `false` (local stacks only)        |
+| `APP_IDENTITY_MODE`                | agent         | `k8s-oidc` (or `aws-sts`)          |
+| `APP_IDENTITY_AUDIENCE`            | agent         | `APP_CONTROL_PLANE_URL`            |
+| `APP_IDENTITY_TOKEN_FILE`          | agent         | the chart's projected token        |
+| `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region               |
+| `APP_CAPABILITIES`                 | agent         | `seal`                             |
+| `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)                   |
+| `APP_CONTROLLER_NAMESPACE`         | agent         | required                           |
+| `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |
+| `APP_CONTROLLER_DEPLOYMENT`        | agent         | `APP_CONTROLLER_NAME`              |
+| `APP_KUBE_CONTEXT`                 | agent         | in-cluster configuration           |

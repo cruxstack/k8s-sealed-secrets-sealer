@@ -26,9 +26,9 @@ type CommandClient interface {
 	Result(ctx context.Context, id string, res protocol.CommandResult) error
 }
 
-// HandlerFunc runs one command's payload. It returns the result to report;
-// a non-nil error fails the command, with the result still reported.
-type HandlerFunc func(ctx context.Context, payload json.RawMessage) (any, error)
+// HandlerFunc runs one command. It returns the result to report; a non-nil
+// error fails the command, with the result still reported.
+type HandlerFunc func(ctx context.Context, cmd protocol.Command) (any, error)
 
 // Commands leases commands from the control plane and runs them, one at a
 // time. Only command types with a handler are run; each handler is
@@ -116,7 +116,7 @@ func (c *Commands) execute(ctx context.Context, cmd protocol.Command) {
 	} else {
 		runCtx, cancel := context.WithDeadline(ctx, cmd.ExpiresAt)
 		log.InfoContext(ctx, "running command", "event", "command.started")
-		out, err := h(runCtx, cmd.Payload)
+		out, err := h(runCtx, cmd)
 		cancel()
 		if out != nil {
 			if b, mErr := json.Marshal(out); mErr == nil {
