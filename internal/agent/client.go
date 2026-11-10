@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,11 +20,51 @@ import (
 // sessionRefreshBefore renews a session this long before it expires.
 const sessionRefreshBefore = time.Minute
 
+// maxResponseBytes bounds a control plane response. It is above the 6 MB a
+// Lambda response can be, so no response the control plane can send is cut;
+// a larger one fails as too large rather than as broken JSON.
+const maxResponseBytes = 8 << 20
+
+// Clock skew, measured against the control plane's Date header.
+const (
+	// minSkew ignores differences the Date header's whole seconds and the
+	// network cause.
+	minSkew = 2 * time.Second
+	// warnSkew logs a clock this far off.
+	warnSkew = time.Minute
+)
+
 // errUnauthorized marks a 401 from the control plane.
 var errUnauthorized = errors.New("control plane rejected the agent's credentials")
 
 // errNotFound marks a 404 from the control plane.
 var errNotFound = errors.New("not found")
+
+// statusError is a response the control plane refused.
+type statusError struct {
+	path string
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("control plane %s returned %d: %s", e.path, e.code, e.msg)
+}
+
+// retryable reports whether a failed call may succeed if sent again: the
+// control plane could not be reached, or answered that it is busy or
+// failing. A refusal is final.
+func retryable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.code == http.StatusTooManyRequests || se.code >= 500
+	}
+	var ue *url.Error
+	return errors.As(err, &ue)
+}
 
 // Client talks to the control plane's agent API. It logs in with its
 // Identity and keeps the session token it gets back.
@@ -33,12 +74,17 @@ type Client struct {
 	identity  Identity
 	env       string
 	userAgent string
+	logger    *slog.Logger
 	now       func() time.Time
+
+	// login holds one login at a time
+	login chan struct{}
 
 	mu      sync.Mutex
 	session string
 	expires time.Time
 	agentID string
+	skew    time.Duration
 }
 
 // ClientOptions configures a Client.
@@ -51,16 +97,25 @@ type ClientOptions struct {
 	Env     string
 	Version string
 	// HTTPClient defaults to one with a 60-second timeout, above the
-	// longest commands poll.
+	// longest commands poll. Redirects are never followed.
 	HTTPClient *http.Client
+	Logger     *slog.Logger
 	Now        func() time.Time
 }
 
 // NewClient returns a Client. It makes no network calls.
 func NewClient(opts ClientOptions) *Client {
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: 60 * time.Second}
+	hc := &http.Client{Timeout: 60 * time.Second}
+	if opts.HTTPClient != nil {
+		copied := *opts.HTTPClient
+		hc = &copied
+	}
+	// a redirect would resend a signed login or an escrowed key to another
+	// URL; the control plane never sends one
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 	now := opts.Now
 	if now == nil {
@@ -72,7 +127,9 @@ func NewClient(opts ClientOptions) *Client {
 		identity:  opts.Identity,
 		env:       opts.Env,
 		userAgent: "k8s-sealed-secrets-sealer-agent/" + opts.Version,
+		logger:    logger,
 		now:       now,
+		login:     make(chan struct{}, 1),
 	}
 }
 
@@ -81,6 +138,15 @@ func (c *Client) AgentID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.agentID
+}
+
+// Now is the control plane's time as this agent best knows it: its own
+// clock, corrected by how far it was off the control plane's in the last
+// response. Commands and sessions expire in the control plane's time.
+func (c *Client) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now().Add(c.skew)
 }
 
 // CheckIn reports the agent's state.
@@ -140,14 +206,24 @@ func (c *Client) call(ctx context.Context, method, path string, in, out any) err
 	}
 }
 
+// ensureSession returns a session that is not about to expire, logging in
+// when there is none. Logins happen one at a time: the check-in and command
+// loops start together, and two AWS logins signed in the same second are
+// the same request, which the control plane accepts only once.
 func (c *Client) ensureSession(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	if c.session != "" && c.now().Before(c.expires.Add(-sessionRefreshBefore)) {
-		s := c.session
-		c.mu.Unlock()
+	if s, ok := c.currentSession(); ok {
 		return s, nil
 	}
-	c.mu.Unlock()
+	select {
+	case c.login <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-c.login }()
+	// another caller may have logged in meanwhile
+	if s, ok := c.currentSession(); ok {
+		return s, nil
+	}
 
 	login, err := c.identity.LoginRequest(ctx)
 	if err != nil {
@@ -167,6 +243,17 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 	c.session, c.expires, c.agentID = resp.Token, resp.ExpiresAt, resp.AgentID
 	c.mu.Unlock()
 	return resp.Token, nil
+}
+
+// currentSession returns the session unless it is about to expire, in the
+// control plane's time, which set its expiry.
+func (c *Client) currentSession() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == "" || !c.now().Add(c.skew).Before(c.expires.Add(-sessionRefreshBefore)) {
+		return "", false
+	}
+	return c.session, true
 }
 
 func (c *Client) dropSession(session string) {
@@ -206,9 +293,13 @@ func (c *Client) do(ctx context.Context, method, path, session string, in, out a
 		return fmt.Errorf("failed to call control plane %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	c.noteClock(ctx, resp.Header.Get("Date"))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("failed to read control plane response from %s: %w", path, err)
+	}
+	if len(data) > maxResponseBytes {
+		return fmt.Errorf("failed to read control plane response from %s: larger than %d bytes", path, maxResponseBytes)
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -219,10 +310,33 @@ func (c *Client) do(ctx context.Context, method, path, session string, in, out a
 	default:
 		var e protocol.Error
 		_ = json.Unmarshal(data, &e)
-		return fmt.Errorf("control plane %s returned %d: %s", path, resp.StatusCode, e.Error)
+		return &statusError{path: path, code: resp.StatusCode, msg: e.Error}
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("failed to decode control plane response from %s: %w", path, err)
 	}
 	return nil
+}
+
+// noteClock measures how far this agent's clock is off the control plane's,
+// from a response's Date header. Commands and sessions expire in the control
+// plane's time, so a clock a few minutes fast would otherwise drop every
+// command as expired.
+func (c *Client) noteClock(ctx context.Context, date string) {
+	served, err := http.ParseTime(date)
+	if err != nil {
+		return
+	}
+	skew := served.Sub(c.now())
+	if skew.Abs() < minSkew {
+		skew = 0
+	}
+	c.mu.Lock()
+	was := c.skew
+	c.skew = skew
+	c.mu.Unlock()
+	if skew.Abs() >= warnSkew && was.Abs() < warnSkew {
+		c.logger.WarnContext(ctx, "this agent's clock is off the control plane's; using the control plane's time",
+			"event", "agent.clock_skew", "skew", skew.Round(time.Second).String())
+	}
 }
