@@ -9,9 +9,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -522,18 +524,26 @@ func TestSeal_ResultsAndExpiry(t *testing.T) {
 	}
 }
 
-func TestViewSession_SortsChangesByFileAndKey(t *testing.T) {
+func TestViewSession_SortsChangesByFileKeyAndRegions(t *testing.T) {
+	use1 := []store.Target{{Namespace: "use1", Name: "x", Region: "use1"}}
+	use2 := []store.Target{{Namespace: "use2", Name: "x", Region: "use2"}}
+	both := append(slices.Clone(use1), use2...)
 	changes := []store.Change{
-		{ID: "1", Path: "b.yaml", Key: "a"},
-		{ID: "2", Path: "a.yaml", Key: "z"},
-		{ID: "3", Path: "a.yaml", Key: "b"},
+		{ID: "1", Path: "b.yaml", Key: "a", CommandID: "01A", Targets: both},
+		{ID: "2", Path: "a.yaml", Key: "z", CommandID: "01B", Regions: []string{"use2"}, Targets: use2},
+		{ID: "3", Path: "a.yaml", Key: "b", CommandID: "01C", Targets: both},
+		{ID: "4", Path: "a.yaml", Key: "z", CommandID: "01D", Targets: both},
+		{ID: "5", Path: "a.yaml", Key: "b", CommandID: "01E", Regions: []string{"use1"}, Targets: use1},
 	}
 	v := viewSession(store.Session{}, changes, func(id string) agentView { return agentView{ID: id} })
 	var got []string
 	for _, c := range v.Changes {
-		got = append(got, c.Path+":"+c.Key)
+		got = append(got, fmt.Sprintf("%s:%s%v:%d", c.Path, c.Key, c.Regions, len(c.Targets)))
 	}
-	if strings.Join(got, ",") != "a.yaml:b,a.yaml:z,b.yaml:a" || changes[0].ID != "1" {
-		t.Fatalf("changes = %v", got)
+	// z for use2 was sealed before z for both, which covers it; b for use1
+	// was sealed after b for both, which keeps use2
+	want := "a.yaml:b[]:1,a.yaml:b[use1]:1,a.yaml:z[]:2,b.yaml:a[]:2"
+	if strings.Join(got, ",") != want || v.PendingChanges != 4 || changes[0].ID != "1" {
+		t.Fatalf("changes = %v (%d)", got, v.PendingChanges)
 	}
 }

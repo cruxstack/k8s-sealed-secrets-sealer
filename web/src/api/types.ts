@@ -147,13 +147,19 @@ export interface AgentRef {
 }
 
 /**
- * A value sealed for every document of a file, waiting to be committed.
+ * A value sealed for the documents of a file, waiting to be committed.
  * Ciphertexts are never sent to the browser.
  */
 export interface PendingChange {
   id: string;
   path: string;
   key: string;
+  /** The regions the value was sealed for; absent for every document. */
+  regions?: string[];
+  /**
+   * The documents it sets. A newer change of the same key takes over the
+   * documents both name.
+   */
   targets: SealTarget[];
   sealed_at: string;
   sealed_by: AgentRef;
@@ -207,6 +213,8 @@ export interface Seal {
   status: SealStatus;
   path: string;
   key: string;
+  /** The regions the seal was limited to; absent for every document. */
+  regions?: string[];
   targets: SealTarget[];
   agent: AgentRef;
   fingerprint: string;

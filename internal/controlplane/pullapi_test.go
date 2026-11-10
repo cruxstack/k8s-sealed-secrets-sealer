@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -225,7 +226,7 @@ func TestPullRequest_Refuses(t *testing.T) {
 	if rec := sh.seal(sess.ID, billing, "other", "v"); rec.Code != http.StatusConflict {
 		t.Fatalf("seal while locked = %d %s", rec.Code, rec.Body)
 	}
-	changeURL := base + "/changes/" + changeID(billing, "api-token")
+	changeURL := base + "/changes/" + changeID(billing, "api-token", nil)
 	if rec := sh.do("alice", http.MethodDelete, changeURL, nil, true); rec.Code != http.StatusConflict {
 		t.Fatalf("remove while locked = %d", rec.Code)
 	}
@@ -291,7 +292,7 @@ func TestSeal_CapsPendingChanges(t *testing.T) {
 	for i := range maxChangesPerSession {
 		k := fmt.Sprintf("key-%d", i)
 		_, err := sh.store.PutChange(ctx, store.Change{
-			SessionID: sess.ID, ID: changeID(billing, k), Path: billing, Key: k, CommandID: "01J0000000000000000000000" + string(rune('A'+i%26)),
+			SessionID: sess.ID, ID: changeID(billing, k, nil), Path: billing, Key: k, CommandID: "01J0000000000000000000000" + string(rune('A'+i%26)),
 			ExpiresAt: stored.EndsAt,
 		})
 		if err != nil {
@@ -326,5 +327,117 @@ func TestStatus(t *testing.T) {
 	sh.checkIn("dev-use1-green", sh.key.Key)
 	if got := status(); got.Sealing != "degraded" || got.Clusters.Ready != 2 || !strings.Contains(got.Message, "1 of 3") {
 		t.Fatalf("status = %+v", got)
+	}
+}
+
+// sealNowIn seals a value for the documents in some regions and runs the
+// agent that was sent it.
+func (sh *sealHarness) sealNowIn(sessionID, path, key, value string, regions ...string) sealView {
+	sh.t.Helper()
+	rec := sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sessionID+"/seals",
+		map[string]any{"path": path, "key": key, "value": value, "regions": regions}, true)
+	if rec.Code != http.StatusAccepted {
+		sh.t.Fatalf("seal %s in %v = %d %s", key, regions, rec.Code, rec.Body)
+	}
+	seal := decode[sealView](sh.t, rec)
+	sh.runAgent(seal.Agent.ID)
+	if got := sh.sealStatus(sessionID, seal.ID); got.Status != sealSealed {
+		sh.t.Fatalf("seal %s = %+v", key, got)
+	}
+	return seal
+}
+
+func TestRegionSeals(t *testing.T) {
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	base := "/api/v1/repos/example-org/apps/session/" + sess.ID
+	changes := func() []changeView {
+		t.Helper()
+		rec := sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/session", nil, false)
+		return decode[sessionResponse](t, rec).Session.Changes
+	}
+
+	// regions must be ones the file's documents are in
+	for _, regions := range [][]string{{"use9"}, {""}, {"use1", "use9"}} {
+		rec := sh.do("alice", http.MethodPost, base+"/seals",
+			map[string]any{"path": billing, "key": "k", "value": "v", "regions": regions}, true)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("regions %q = %d %s", regions, rec.Code, rec.Body)
+		}
+	}
+
+	// a value for every document, then another for use1: use1 gets the
+	// newer one, use2 keeps the first
+	sh.sealNow(sess.ID, billing, "api-token", "everywhere-s3cr3t")
+	seal := sh.sealNowIn(sess.ID, billing, "api-token", "use1-s3cr3t", "use1")
+	if !slices.Equal(seal.Regions, []string{"use1"}) || len(seal.Targets) != 2 || seal.Agent.Region != "use1" {
+		t.Fatalf("seal for use1 = %+v", seal)
+	}
+	sh.sealNowIn(sess.ID, billing, "db-password", "use2-db-s3cr3t", "use2")
+	got := changes()
+	if len(got) != 3 ||
+		got[0].Key != "api-token" || got[0].Regions != nil || len(got[0].Targets) != 1 || got[0].Targets[0].Region != "use2" ||
+		got[1].Key != "api-token" || !slices.Equal(got[1].Regions, []string{"use1"}) || len(got[1].Targets) != 2 ||
+		got[2].Key != "db-password" || !slices.Equal(got[2].Regions, []string{"use2"}) {
+		t.Fatalf("changes = %+v", got)
+	}
+
+	// naming every region is sealing for every document, and replaces what
+	// it covers
+	seal = sh.sealNowIn(sess.ID, billing, "smtp", "a", "use2")
+	seal = sh.sealNowIn(sess.ID, billing, "smtp", "b", "use2", "use1", "use1")
+	if seal.Regions != nil || len(seal.Targets) != 3 {
+		t.Fatalf("seal for every region = %+v", seal)
+	}
+	stored, _ := sh.store.Changes(context.Background(), sess.ID, false)
+	smtp := 0
+	for _, c := range stored {
+		if c.Key == "smtp" {
+			smtp++
+			if c.ID != changeID(billing, "smtp", nil) {
+				t.Errorf("smtp change = %+v", c)
+			}
+		}
+	}
+	if smtp != 1 || len(changes()) != 4 {
+		t.Fatalf("the covered change was kept: %+v", stored)
+	}
+	if rec := sh.do("alice", http.MethodDelete, base+"/changes/"+changeID(billing, "smtp", nil), nil, true); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove smtp = %d", rec.Code)
+	}
+
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+	view, _ := sh.github.PullRequest("example-org", "apps", 1)
+	docs := encryptedData(t, view.Files[0].After)
+	namespaces := []string{"dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"}
+	decrypt := func(i int, key string) string {
+		t.Helper()
+		raw, err := base64.StdEncoding.DecodeString(docs[i][key])
+		if err != nil {
+			t.Fatalf("%s in %s: %v", key, namespaces[i], err)
+		}
+		plain, err := sscrypto.HybridDecrypt(rand.Reader, map[string]*rsa.PrivateKey{"": sh.keyPriv}, raw,
+			ssv1alpha1.EncryptionLabel(namespaces[i], "billing", ssv1alpha1.StrictScope))
+		if err != nil {
+			t.Fatalf("%s in %s: %v", key, namespaces[i], err)
+		}
+		return string(plain)
+	}
+	if decrypt(0, "api-token") != "use1-s3cr3t" || decrypt(1, "api-token") != "use1-s3cr3t" ||
+		decrypt(2, "api-token") != "everywhere-s3cr3t" || decrypt(2, "db-password") != "use2-db-s3cr3t" {
+		t.Fatal("values are not in their regions' documents")
+	}
+	if _, ok := docs[0]["db-password"]; ok {
+		t.Fatal("db-password was written outside use2")
+	}
+	if !strings.Contains(view.Body, "| `deploy/billing/sealed-secret.yaml` | `api-token` in `use1` | `dev-use1-blue-apps/billing`, `dev-use1-green-apps/billing` |") ||
+		!strings.Contains(view.Body, "| `deploy/billing/sealed-secret.yaml` | `api-token` | `dev-use2-blue-apps/billing` |") ||
+		!strings.Contains(view.Body, "or those in the regions named") {
+		t.Fatalf("body:\n%s", view.Body)
+	}
+	if !strings.Contains(view.Message, "deploy/billing/sealed-secret.yaml: api-token, api-token (use1), db-password (use2)\n") {
+		t.Fatalf("commit message:\n%s", view.Message)
 	}
 }

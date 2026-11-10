@@ -154,9 +154,11 @@ export function fakeApi(opts: {
         return reply(204, "");
       }
       if (method === "POST" && rest === "/seals") {
-        const { path, key: secretKey } = body as { path: string; key: string };
         polls = 0;
-        return reply(202, { ...SEAL, path, key: secretKey, status: "queued" });
+        return reply(202, {
+          ...sealOf(body as SealRequest),
+          status: "queued",
+        });
       }
       const sealPoll = /^\/seals\/([^/]+)$/.exec(rest);
       if (method === "GET" && sealPoll) {
@@ -164,8 +166,8 @@ export function fakeApi(opts: {
         const status =
           statuses[Math.min(polls++, statuses.length - 1)] ?? "sealed";
         const last = calls.filter((c) => c.url.endsWith("/seals")).at(-1)
-          ?.body as { path: string; key: string };
-        const seal: Seal = { ...SEAL, path: last.path, key: last.key, status };
+          ?.body as SealRequest;
+        const seal: Seal = { ...sealOf(last), status };
         if (status === "sealed") {
           const change = changeFor(seal);
           current.changes = [
@@ -384,11 +386,31 @@ export const SEAL: Seal = {
   created_at: iso(1_000),
 };
 
+interface SealRequest {
+  path: string;
+  key: string;
+  regions?: string[];
+}
+
+/** The seal the API answers a request with: its regions' documents. */
+function sealOf({ path, key, regions }: SealRequest): Seal {
+  return {
+    ...SEAL,
+    path,
+    key,
+    regions,
+    targets: SEAL.targets.filter(
+      (t) => !regions || regions.includes(t.region ?? ""),
+    ),
+  };
+}
+
 export function changeFor(seal: Seal): PendingChange {
   return {
-    id: `change-${seal.key}`,
+    id: ["change", seal.key, ...(seal.regions ?? [])].join("-"),
     path: seal.path,
     key: seal.key,
+    regions: seal.regions,
     targets: seal.targets,
     sealed_at: iso(500),
     sealed_by: seal.agent,

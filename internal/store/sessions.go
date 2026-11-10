@@ -62,32 +62,39 @@ type Target struct {
 // Seal is a seal requested in a session: which command carries it and to
 // which agent, so its progress can be looked up.
 type Seal struct {
-	SessionID   string    `dynamodbav:"session_id"`
-	CommandID   string    `dynamodbav:"command_id"`
-	AgentID     string    `dynamodbav:"agent_id"`
-	Path        string    `dynamodbav:"path"`
-	Key         string    `dynamodbav:"key"`
-	Fingerprint string    `dynamodbav:"fingerprint"`
-	Targets     []Target  `dynamodbav:"targets"`
-	UserID      int64     `dynamodbav:"user_id"`
-	UserLogin   string    `dynamodbav:"user_login"`
-	CreatedAt   time.Time `dynamodbav:"created_at"`
+	SessionID   string `dynamodbav:"session_id"`
+	CommandID   string `dynamodbav:"command_id"`
+	AgentID     string `dynamodbav:"agent_id"`
+	Path        string `dynamodbav:"path"`
+	Key         string `dynamodbav:"key"`
+	Fingerprint string `dynamodbav:"fingerprint"`
+	// Regions limits the seal to the file's documents in these regions;
+	// empty seals it for every document.
+	Regions   []string  `dynamodbav:"regions,omitempty"`
+	Targets   []Target  `dynamodbav:"targets"`
+	UserID    int64     `dynamodbav:"user_id"`
+	UserLogin string    `dynamodbav:"user_login"`
+	CreatedAt time.Time `dynamodbav:"created_at"`
 	// ExpiresAt is the session's EndsAt.
 	ExpiresAt time.Time `dynamodbav:"seal_expires_at"`
 }
 
-// Change is a pending change: a value sealed for every target document of a
-// file, waiting to be committed. There is one per file and key in a session;
-// sealing the same key into the same file again replaces it.
+// Change is a pending change: a value sealed for the target documents of a
+// file, waiting to be committed. There is one per file, key and regions in a
+// session; sealing the same key into the same file for the same regions
+// again replaces it. Changes of one key may overlap, and the newest wins for
+// each document (see Effective).
 type Change struct {
-	SessionID   string   `dynamodbav:"session_id"`
-	ID          string   `dynamodbav:"change_id"`
-	Path        string   `dynamodbav:"path"`
-	Key         string   `dynamodbav:"key"`
-	CommandID   string   `dynamodbav:"command_id"`
-	AgentID     string   `dynamodbav:"agent_id"`
-	Fingerprint string   `dynamodbav:"fingerprint"`
-	Targets     []Target `dynamodbav:"targets"`
+	SessionID   string `dynamodbav:"session_id"`
+	ID          string `dynamodbav:"change_id"`
+	Path        string `dynamodbav:"path"`
+	Key         string `dynamodbav:"key"`
+	CommandID   string `dynamodbav:"command_id"`
+	AgentID     string `dynamodbav:"agent_id"`
+	Fingerprint string `dynamodbav:"fingerprint"`
+	// Regions is what the seal was limited to; empty for every document.
+	Regions []string `dynamodbav:"regions,omitempty"`
+	Targets []Target `dynamodbav:"targets"`
 	// Ciphertexts holds one ciphertext per target, in order. It is stored
 	// apart from Targets so listings can leave it out. Nil when not read.
 	Ciphertexts []string  `dynamodbav:"ciphertexts,omitempty"`

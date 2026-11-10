@@ -50,6 +50,15 @@ The keys come first because they are what people act on: picking a row fills
 the form's key and moves to the value. The documents come last because they
 rarely change and only need checking.
 
+When a file's documents are in more than one region, each key row also shows
+a chip per region with where the key stands there, and the form gets a
+choice of regions, all chosen at first. Picking a region's chip fills the
+key and limits the seal to that region. A limited seal says so everywhere it
+shows: the form's heading and note name the regions, the documents left out
+are dimmed, and the pending change carries its regions as badges. The
+regions chosen stay for the next value, since values that differ by region
+usually come several at a time.
+
 Show hints where the decision is made. A file's description sits under its
 path in the list and in its header, its docs are a link in its header, and
 expected keys it lacks are dashed amber: in the list as a count and in the

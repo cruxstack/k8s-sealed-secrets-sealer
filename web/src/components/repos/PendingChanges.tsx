@@ -17,6 +17,7 @@ import {
 } from "@/api/queries/sessions";
 import type { PendingChange, PullRequest, SealSession } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
+import { regionList } from "./keys";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,11 +34,16 @@ function plural(n: number, one: string, many: string) {
   return n === 1 ? `1 ${one}` : `${n} ${many}`;
 }
 
+/** A change's key, with the regions it was sealed for when limited. */
+function keyIn(c: PendingChange): string {
+  return c.regions?.length ? `${c.key} in ${regionList(c.regions)}` : c.key;
+}
+
 /** The files a session changes, each with its keys, in order. */
 function filesOf(changes: PendingChange[]): [string, string[]][] {
   const files = new Map<string, string[]>();
   for (const c of changes)
-    files.set(c.path, [...(files.get(c.path) ?? []), c.key]);
+    files.set(c.path, [...(files.get(c.path) ?? []), keyIn(c)]);
   return [...files];
 }
 
@@ -59,9 +65,21 @@ function ChangeItem({
   return (
     <li className="flex items-start gap-2 py-2 pr-2 pl-4">
       <div className="min-w-0 flex-1 space-y-0.5">
-        <code className="block truncate font-mono text-[13px] font-medium">
-          {change.key}
-        </code>
+        <p className="flex min-w-0 items-center gap-1.5">
+          <code className="truncate font-mono text-[13px] font-medium">
+            {change.key}
+          </code>
+          {change.regions?.map((r) => (
+            <Badge
+              key={r}
+              variant="outline"
+              className="shrink-0 font-mono"
+              title={`Sealed for ${r} only`}
+            >
+              {r}
+            </Badge>
+          ))}
+        </p>
         <button
           type="button"
           onClick={onSelectFile}
@@ -73,6 +91,7 @@ function ChangeItem({
         <p className="text-xs text-muted-foreground">
           <span title={targets}>
             {plural(change.targets.length, "document", "documents")}
+            {change.regions?.length ? ` in ${regionList(change.regions)}` : ""}
           </span>{" "}
           ·{" "}
           <time
@@ -89,7 +108,7 @@ function ChangeItem({
         className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
         onClick={onRemove}
         disabled={removing}
-        aria-label={`Remove ${change.key} from ${change.path}`}
+        aria-label={`Remove ${keyIn(change)} from ${change.path}`}
         title="Remove this change"
       >
         <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -189,7 +208,7 @@ function SessionChanges({
     mutationFn: (change: PendingChange) =>
       removeChange(owner, repo, session.id, change.id),
     onSuccess: (_, change) =>
-      toast(`Removed ${change.key}`, { description: change.path }),
+      toast(`Removed ${keyIn(change)}`, { description: change.path }),
     onSettled: refresh,
   });
   const openBlocked = sealing

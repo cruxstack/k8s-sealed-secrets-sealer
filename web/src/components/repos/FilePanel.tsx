@@ -6,6 +6,7 @@ import type {
   SealedSecretDocument,
 } from "@/api/types";
 import { CopyButton } from "@/components/fleet/CopyButton";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,7 +17,7 @@ import {
 import { FilePath, fileStatus } from "./FileList";
 import { fileHints } from "./hints";
 import { KeyList } from "./KeyList";
-import { keyStatuses } from "./keys";
+import { NO_PENDING, keyStatuses, pendingDocs } from "./keys";
 import { SealForm, type SealFormHandle } from "./SealForm";
 
 const SCOPES: Record<
@@ -74,30 +75,39 @@ function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
 }
 
 /**
- * The documents a value is sealed for: where each lives, and its scope. A
- * document values can't be sealed into says why.
+ * The documents a value is sealed for: where each lives, and its scope. When
+ * the seal is limited to some regions, the others are dimmed. A document
+ * values can't be sealed into says why.
  */
 function Documents({
   file,
   docs,
   sealing,
+  regions,
 }: {
   file: RepositoryFile;
   docs: SealedSecretDocument[];
   /** Whether the form above seals into them. */
   sealing: boolean;
+  /** The regions the seal is limited to; null for every document. */
+  regions: string[] | null;
 }) {
   if (docs.length === 0) return null;
+  const left = (d: SealedSecretDocument) =>
+    regions !== null && !regions.includes(d.region ?? "");
+  const count = docs.filter((d) => !left(d)).length;
   return (
     <div className="border-t border-border">
       <h3 className="px-5 pt-4 pb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-        {sealing
+        {!sealing
           ? docs.length === 1
-            ? "Sealed for this document"
-            : `Sealed for these ${docs.length} documents`
-          : docs.length === 1
             ? "1 document"
-            : `${docs.length} documents`}
+            : `${docs.length} documents`
+          : regions !== null
+            ? `Sealed for ${count} of these ${docs.length} documents`
+            : docs.length === 1
+              ? "Sealed for this document"
+              : `Sealed for these ${docs.length} documents`}
       </h3>
       <table className="w-full text-sm">
         <caption className="sr-only">
@@ -114,7 +124,10 @@ function Documents({
           {docs.map((d) => (
             <tr
               key={d.index}
-              className="border-t border-border/60 align-top first:border-0"
+              className={cn(
+                "border-t border-border/60 align-top transition-opacity first:border-0",
+                left(d) && "opacity-45",
+              )}
             >
               <th
                 scope="row"
@@ -123,6 +136,11 @@ function Documents({
                 {d.namespace || <Dash />}
                 <span className="text-muted-foreground">/</span>
                 {d.name || <Dash />}
+                {left(d) && (
+                  <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">
+                    not in this seal
+                  </span>
+                )}
                 {d.problem && (
                   <p className="mt-1 max-w-md font-sans text-xs font-normal text-warning">
                     {d.problem}
@@ -209,13 +227,11 @@ export function FilePanel({
   const status = fileStatus(file);
   const docs = file.documents ?? [];
   const hints = fileHints(file);
-  const pending = new Set(
-    (session?.changes ?? [])
-      .filter((c) => c.path === file.path)
-      .map((c) => c.key),
-  );
+  const pending = pendingDocs(session?.changes ?? [], file.path);
   const form = useRef<SealFormHandle>(null);
   const [current, setCurrent] = useState("");
+  // the regions the form's seal is limited to; null for every document
+  const [regions, setRegions] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const busyChange = useCallback(
     (b: boolean) => {
@@ -270,10 +286,10 @@ export function FilePanel({
     >
       {docs.length > 0 && (
         <KeyList
-          keys={keyStatuses(file, sealing ? pending : new Set())}
+          keys={keyStatuses(file, sealing ? pending : NO_PENDING)}
           docs={docs.length}
           current={sealing ? current : undefined}
-          onPick={sealing ? (k) => form.current?.pick(k) : undefined}
+          onPick={sealing ? (k, rs) => form.current?.pick(k, rs) : undefined}
           disabled={busy}
         />
       )}
@@ -287,9 +303,10 @@ export function FilePanel({
           file={file}
           commit={commit}
           session={session}
-          pendingKeys={pending}
+          pending={pending}
           onBusyChange={busyChange}
           onKeyChange={setCurrent}
+          onRegionsChange={setRegions}
           autoFocus={focusForm}
         />
       ) : (
@@ -299,7 +316,12 @@ export function FilePanel({
             : "A document in this file can't be sealed into, so the file can't be either. Fix it in the repository, then reload."}
         </p>
       )}
-      <Documents file={file} docs={docs} sealing={sealing} />
+      <Documents
+        file={file}
+        docs={docs}
+        sealing={sealing}
+        regions={sealing ? regions : null}
+      />
     </Panel>
   );
 }

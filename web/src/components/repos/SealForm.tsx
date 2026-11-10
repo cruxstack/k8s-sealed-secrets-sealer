@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
 import { fileHints } from "./hints";
+import { docId, fileRegions, regionList, type PendingDocs } from "./keys";
 
 /** How often a seal's progress is checked; tests shorten it. */
 export const sealPolling = { intervalMs: 1000 };
@@ -57,8 +58,11 @@ function documents(n: number): string {
 
 /** What the rest of the panel may do with the form. */
 export interface SealFormHandle {
-  /** Fill the key and move to the value. */
-  pick: (key: string) => void;
+  /**
+   * Fill the key and move to the value; with regions, limit the seal to
+   * them too.
+   */
+  pick: (key: string, regions?: string[]) => void;
 }
 
 interface SealFormProps {
@@ -69,21 +73,28 @@ interface SealFormProps {
   /** The commit the page shows; a new session opens there. */
   commit: string;
   session: SealSession | null;
-  /** Keys of this file with a value waiting in the session. */
-  pendingKeys: Set<string>;
+  /** This file's documents with a value waiting in the session, per key. */
+  pending: PendingDocs;
   /** Told when a seal starts and ends, and that none runs on unmount. */
   onBusyChange?: (busy: boolean) => void;
   /** Focus the key on mount, when the user just picked this file. */
   autoFocus?: boolean;
   /** Told the key as it changes, from "" on mount. */
   onKeyChange?: (key: string) => void;
+  /**
+   * Told the regions the seal is limited to as they change, or null for
+   * every document, from null on mount.
+   */
+  onRegionsChange?: (regions: string[] | null) => void;
 }
 
 /**
- * Seals one value into every document of a file, from the keyboard: Enter
- * in the key moves to the value, and ⌘/Ctrl+Enter seals. The value lives
- * only in this form: it is sent once, kept until the seal succeeds (so a
- * failed seal can be retried) and cleared then.
+ * Seals one value into the documents of a file, from the keyboard: Enter
+ * in the key moves to the value, and ⌘/Ctrl+Enter seals. When the file's
+ * documents are in more than one region, the seal can be limited to some
+ * of them, for a value that differs by region. The value lives only in this
+ * form: it is sent once, kept until the seal succeeds (so a failed seal can
+ * be retried) and cleared then.
  */
 export function SealForm({
   ref,
@@ -92,10 +103,11 @@ export function SealForm({
   file,
   commit,
   session,
-  pendingKeys,
+  pending,
   onBusyChange,
   autoFocus = false,
   onKeyChange,
+  onRegionsChange,
 }: SealFormProps) {
   const queryClient = useQueryClient();
   const id = useId();
@@ -111,6 +123,10 @@ export function SealForm({
   const refocus = useRef(false);
   const [seal, setSeal] = useState<Seal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // the regions to choose between, and those chosen: all of them at first
+  const choices = fileRegions(file).filter((r) => r !== "");
+  const [chosen, setChosen] = useState<string[]>(choices);
+  const everywhere = chosen.length === choices.length;
 
   // the form is keyed by file: autoFocus matters only when it mounts
   const focusOnMount = useRef(autoFocus);
@@ -134,9 +150,17 @@ export function SealForm({
   useEffect(() => {
     onKeyChange?.(key);
   }, [key, onKeyChange]);
+  const limitedTo = everywhere ? null : chosen.join("\n");
+  useEffect(() => {
+    onRegionsChange?.(limitedTo === null ? null : limitedTo.split("\n"));
+  }, [limitedTo, onRegionsChange]);
   useImperativeHandle(ref, () => ({
-    pick: (k: string) => {
+    pick: (k: string, regions?: string[]) => {
       setKey(k);
+      if (regions) {
+        const known = choices.filter((r) => regions.includes(r));
+        if (known.length > 0) setChosen(known);
+      }
       valueRef.current?.focus();
     },
   }));
@@ -147,13 +171,18 @@ export function SealForm({
   }, [justSealed]);
 
   const docs = file.documents ?? [];
+  // the documents this seal is for
+  const targets = everywhere
+    ? docs
+    : docs.filter((d) => chosen.includes(d.region ?? ""));
+  const unlabelled = docs.some((d) => !d.region);
   const existing = [...new Set(docs.flatMap((d) => d.keys))];
   const { expected } = fileHints(file);
   // the keys the file expects first, then the rest it holds
   const suggestions = [
     ...new Set([
       ...expected,
-      ...[...new Set([...existing, ...pendingKeys])].sort(),
+      ...[...new Set([...existing, ...pending.keys()])].sort(),
     ]),
   ];
   const problem = keyProblem(key);
@@ -164,21 +193,35 @@ export function SealForm({
     expected.length > 0 &&
     !expected.includes(key) &&
     !existing.includes(key) &&
-    !pendingKeys.has(key);
+    !pending.has(key);
+  const pendingHere = targets.some((d) => pending.get(key)?.has(docId(d)));
+  const held = targets.filter((d) => d.keys.includes(key)).length;
+  const where = everywhere ? "" : ` in ${regionList(chosen)}`;
   const canSubmit = !busy && key !== "" && !problem && value !== "";
   const note = problem
     ? problem
-    : pendingKeys.has(key)
-      ? `Replaces the value of ${key} you sealed in this session.`
-      : existing.includes(key)
-        ? `Replaces the current value of ${key} in the file.`
-        : unexpected
-          ? `Adds ${key} to spec.encryptedData, but this file does not expect it. Check the name.`
-          : key
-            ? `Adds ${key} to spec.encryptedData.`
-            : expected.length > 0
-              ? "The name in spec.encryptedData; pick a key above or type one."
-              : "The name in spec.encryptedData; existing keys are suggested.";
+    : pendingHere
+      ? `Replaces the value of ${key} you sealed in this session${where}.`
+      : held === targets.length && held > 0
+        ? `Replaces the current value of ${key}${everywhere ? " in the file" : where}.`
+        : held > 0
+          ? `Replaces ${key} where it is set${where} and adds it to the other documents.`
+          : unexpected
+            ? `Adds ${key} to spec.encryptedData, but this file does not expect it. Check the name.`
+            : key
+              ? `Adds ${key} to spec.encryptedData${where}.`
+              : expected.length > 0
+                ? "The name in spec.encryptedData; pick a key above or type one."
+                : "The name in spec.encryptedData; existing keys are suggested.";
+  const toggle = (r: string) =>
+    setChosen((c) =>
+      c.includes(r)
+        ? // at least one region stays chosen
+          c.length === 1
+          ? c
+          : c.filter((x) => x !== r)
+        : choices.filter((x) => x === r || c.includes(x)),
+    );
 
   async function submit(e?: FormEvent) {
     e?.preventDefault();
@@ -197,6 +240,7 @@ export function SealForm({
       }
       let progress = await requestSeal(owner, repo, current.id, {
         path: file.path,
+        regions: everywhere ? undefined : chosen,
         key,
         value,
       });
@@ -244,9 +288,11 @@ export function SealForm({
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="text-sm font-semibold">Seal a value</h3>
         <p className="text-xs text-muted-foreground">
-          {docs.length === 1
-            ? "Sealed for the document below"
-            : `Sealed once for each of the ${docs.length} documents below`}
+          {targets.length === 1
+            ? `Sealed for the document${where} below`
+            : everywhere
+              ? `Sealed once for each of the ${docs.length} documents below`
+              : `Sealed for the ${targets.length} documents${where} below`}
         </p>
       </div>
 
@@ -293,6 +339,73 @@ export function SealForm({
           {note}
         </p>
       </div>
+
+      {choices.length > 1 && (
+        <div className="space-y-1.5">
+          <span id={`${id}-regions`} className="text-sm font-medium">
+            Regions
+          </span>
+          <div
+            role="group"
+            aria-labelledby={`${id}-regions`}
+            aria-describedby={`${id}-regions-help`}
+            className="flex flex-wrap items-center gap-1.5"
+          >
+            {choices.map((r) => {
+              const on = chosen.includes(r);
+              const n = docs.filter((d) => d.region === r).length;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={on}
+                  onClick={() => toggle(r)}
+                  className={cn(
+                    "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-sm transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50",
+                    on
+                      ? "border-primary/40 bg-primary/10 text-primary dark:bg-primary/20"
+                      : "border-dashed border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {on ? (
+                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <span className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span className="font-mono">{r}</span>
+                  <span className="text-xs opacity-70">
+                    {n === 1 ? "1 doc" : `${n} docs`}
+                  </span>
+                </button>
+              );
+            })}
+            {!everywhere && (
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-8 px-1.5 text-xs"
+                disabled={busy}
+                onClick={() => setChosen(choices)}
+              >
+                All regions
+              </Button>
+            )}
+          </div>
+          <p
+            id={`${id}-regions-help`}
+            className={cn(
+              "text-xs",
+              everywhere ? "text-muted-foreground" : "text-primary",
+            )}
+          >
+            {everywhere
+              ? "Every document gets the value. For a value that differs by region, choose the regions it is for."
+              : `Only the documents in ${regionList(chosen)} get the value${unlabelled ? "; documents without a region are left out" : ""}.`}
+          </p>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <Label htmlFor={`${id}-value`}>Value</Label>
@@ -418,7 +531,10 @@ function SealProgress({
           />
           <span>
             Sealed <code className="font-mono text-xs">{seal.key}</code> for{" "}
-            {documents(seal.targets.length)} in {agentName(seal)} with{" "}
+            {documents(seal.targets.length)}
+            {seal.regions?.length
+              ? ` in ${regionList(seal.regions)}`
+              : ""} by {agentName(seal)} with{" "}
             <code className="font-mono text-xs" title={seal.fingerprint}>
               {shortFingerprint(seal.fingerprint)}
             </code>

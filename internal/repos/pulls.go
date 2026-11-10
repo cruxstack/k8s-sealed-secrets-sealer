@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
@@ -19,12 +20,15 @@ type Target struct {
 }
 
 // Value is a sealed value to write into a file: one ciphertext for each of
-// the file's documents for the env, in file order.
+// the file's documents for the env in its regions, in file order.
 type Value struct {
 	Path string
 	Key  string
+	// Regions limits the value to the documents in these regions; empty
+	// means every document for the env.
+	Regions []string
 	// Targets are the documents the value was sealed for. They must still
-	// be exactly the file's documents for the env.
+	// be exactly the file's documents for the env in its regions.
 	Targets     []Target
 	Ciphertexts []string
 }
@@ -38,7 +42,9 @@ type NewPullRequest struct {
 	Title   string
 	Body    string
 	Message string
-	Values  []Value
+	// Values are written in order: where two set the same key of the same
+	// document, the later one wins.
+	Values []Value
 }
 
 // FileError says why a file could not be written. Its message is shown to
@@ -129,13 +135,25 @@ func (s *Service) render(ctx context.Context, r githubapp.Repository, snap snaps
 	if err != nil {
 		return githubapp.FileChange{}, &FileError{Path: filePath, Reason: userError(err)}
 	}
+	type slot struct {
+		doc int
+		key string
+	}
 	var edits []manifest.Edit
+	at := map[slot]int{}
 	for _, v := range values {
-		if !sameTargets(docs, v.Targets) || len(v.Ciphertexts) != len(docs) {
+		want := inRegions(docs, v.Regions)
+		if !sameTargets(want, v.Targets) || len(v.Ciphertexts) != len(want) {
 			return githubapp.FileChange{}, &FileError{Path: filePath,
 				Reason: "its documents for the " + s.env + " env no longer match what " + v.Key + " was sealed for; seal it again"}
 		}
-		for j, d := range docs {
+		for j, d := range want {
+			// a later value of the same key replaces an earlier one
+			if i, ok := at[slot{d.Index, v.Key}]; ok {
+				edits[i].Value = v.Ciphertexts[j]
+				continue
+			}
+			at[slot{d.Index, v.Key}] = len(edits)
 			edits = append(edits, manifest.Edit{Document: d.Index, Key: v.Key, Value: v.Ciphertexts[j]})
 		}
 	}
@@ -153,8 +171,23 @@ func (s *Service) render(ctx context.Context, r githubapp.Repository, snap snaps
 	return githubapp.FileChange{Path: filePath, Mode: entry.Mode, Content: out}, nil
 }
 
-// sameTargets reports whether a file's documents for the env are exactly
-// the targets, in order, and can all be sealed into.
+// inRegions returns the documents in the regions, or all of them when no
+// region is named.
+func inRegions(docs []manifest.Document, regions []string) []manifest.Document {
+	if len(regions) == 0 {
+		return docs
+	}
+	var out []manifest.Document
+	for _, d := range docs {
+		if slices.Contains(regions, d.Region) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// sameTargets reports whether a file's documents are exactly the targets,
+// in order, and can all be sealed into.
 func sameTargets(docs []manifest.Document, targets []Target) bool {
 	if len(docs) == 0 || len(docs) != len(targets) {
 		return false

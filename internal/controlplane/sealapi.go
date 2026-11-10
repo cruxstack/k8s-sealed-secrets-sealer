@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
@@ -36,6 +38,9 @@ const (
 	maxPathBytes = 1024
 	// maxCiphertextChars bounds one base64 ciphertext in a seal result.
 	maxCiphertextChars = (protocol.MaxSealValueBytes+protocol.SealOverheadBytes)*4/3 + 4
+	// maxRegions bounds the regions a seal names, and maxRegionBytes each.
+	maxRegions     = 64
+	maxRegionBytes = 253
 )
 
 // Seal statuses, as users see them.
@@ -53,6 +58,7 @@ type sealView struct {
 	Status      string       `json:"status"`
 	Path        string       `json:"path"`
 	Key         string       `json:"key"`
+	Regions     []string     `json:"regions,omitempty"`
 	Targets     []targetView `json:"targets"`
 	Agent       agentView    `json:"agent"`
 	Fingerprint string       `json:"fingerprint"`
@@ -62,11 +68,51 @@ type sealView struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// changeID is the ID of the pending change for a key in a file: sealing the
-// same key into the same file again replaces it.
-func changeID(path, key string) string {
-	sum := sha256.Sum256([]byte(path + "\x00" + key))
+// changeID is the ID of the pending change for a key in a file, sealed for
+// some regions or, with none, every document: sealing the same key into the
+// same file for the same regions again replaces it.
+func changeID(path, key string, regions []string) string {
+	id := path + "\x00" + key
+	if len(regions) > 0 {
+		id += "\x00" + strings.Join(regions, "\x00")
+	}
+	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:16])
+}
+
+// sealRegions checks the regions a seal names against a file's documents
+// and returns them sorted, or nil when they reach every document: naming
+// every region is sealing for all. Each must be the region of a document.
+func sealRegions(named []string, docs []manifest.Document) ([]string, error) {
+	if len(named) == 0 {
+		return nil, nil
+	}
+	if len(named) > maxRegions {
+		return nil, fmt.Errorf("at most %d regions can be named", maxRegions)
+	}
+	have := map[string]bool{}
+	unlabelled := false
+	for _, d := range docs {
+		if d.Region == "" {
+			unlabelled = true
+		}
+		have[d.Region] = true
+	}
+	regions := slices.Clone(named)
+	slices.Sort(regions)
+	regions = slices.Compact(regions)
+	for _, r := range regions {
+		if r == "" || len(r) > maxRegionBytes {
+			return nil, errors.New("regions must be non-empty names")
+		}
+		if !have[r] {
+			return nil, fmt.Errorf("no document of this file for the env is in region %q", r)
+		}
+	}
+	if !unlabelled && len(regions) == len(have) {
+		return nil, nil
+	}
+	return regions, nil
 }
 
 func validChangeID(id string) bool {
@@ -77,14 +123,17 @@ func validChangeID(id string) bool {
 	return err == nil && strings.ToLower(id) == id
 }
 
-// requestSeal seals a value into every SealedSecret document for this env in
-// a file, as one seal.v1 command. The value is encrypted under the transit
-// key as soon as it arrives and is never stored, logged or returned.
+// requestSeal seals a value into the SealedSecret documents for this env in
+// a file, as one seal.v1 command: every document, or with regions named,
+// those in the regions. The value is encrypted under the transit key as
+// soon as it arrives and is never stored, logged or returned.
 func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Path  string `json:"path"`
 		Key   string `json:"key"`
 		Value string `json:"value"`
+		// Regions limits the seal to the file's documents in them.
+		Regions []string `json:"regions"`
 	}
 	if !decodeJSON(w, r, maxSealBody, &in) {
 		return
@@ -129,13 +178,23 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "this file has no SealedSecret for the "+s.env+" env")
 		return
 	}
-	var targets []store.Target
-	var regions []string
 	for _, d := range file.Documents {
 		if !d.Sealable() {
 			writeError(w, http.StatusUnprocessableEntity,
 				fmt.Sprintf("this file cannot be sealed into: %s/%s: %s", d.Namespace, d.Name, d.Problem))
 			return
+		}
+	}
+	sealFor, err := sealRegions(in.Regions, file.Documents)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	var targets []store.Target
+	var regions []string
+	for _, d := range file.Documents {
+		if len(sealFor) > 0 && !slices.Contains(sealFor, d.Region) {
+			continue
 		}
 		targets = append(targets, store.Target{Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
 		if d.Region != "" {
@@ -153,7 +212,7 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(changes) >= maxChangesPerSession && !slices.ContainsFunc(changes, func(c store.Change) bool {
-		return c.ID == changeID(file.Path, in.Key)
+		return c.ID == changeID(file.Path, in.Key, sealFor)
 	}) {
 		writeError(w, http.StatusConflict, fmt.Sprintf(
 			"this session holds %d pending changes, the most it can; open a pull request with them first", maxChangesPerSession))
@@ -199,6 +258,7 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		Path:        file.Path,
 		Key:         in.Key,
 		Fingerprint: envKey,
+		Regions:     sealFor,
 		Targets:     targets,
 		UserID:      user.ID,
 		UserLogin:   user.Login,
@@ -247,7 +307,7 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	s.logger.InfoContext(ctx, "seal requested",
 		"event", "seal.requested", "env", s.env, "session_id", sess.ID, "command_id", commandID,
 		"user", user.Login, "user_id", user.ID, "repository", sess.Owner+"/"+sess.Repo, "path", file.Path,
-		"key", in.Key, "targets", len(targets), "agent_id", agent.ID, "fingerprint", envKey)
+		"key", in.Key, "regions", sealFor, "targets", len(targets), "agent_id", agent.ID, "fingerprint", envKey)
 	httpserver.WriteJSON(w, http.StatusAccepted, s.viewSeal(seal, sealQueued, ""))
 }
 
@@ -291,6 +351,7 @@ func (s *Server) viewSeal(seal store.Seal, status, errMsg string) sealView {
 		Status:      status,
 		Path:        seal.Path,
 		Key:         seal.Key,
+		Regions:     seal.Regions,
 		Targets:     viewTargets(seal.Targets),
 		Agent:       s.agentView(seal.AgentID),
 		Fingerprint: seal.Fingerprint,
@@ -337,7 +398,7 @@ func (s *Server) getSeal(w http.ResponseWriter, r *http.Request) {
 		v = s.viewSeal(seal, sealSealing, "")
 	case cmd.Status == store.CommandSucceeded:
 		v = s.viewSeal(seal, sealSealed, "")
-		v.ChangeID = changeID(seal.Path, seal.Key)
+		v.ChangeID = changeID(seal.Path, seal.Key, seal.Regions)
 	default:
 		v = s.viewSeal(seal, sealFailed, cmd.Error)
 		if v.Error == "" {
@@ -386,12 +447,13 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 		}
 		stored, err := s.store.PutChange(ctx, store.Change{
 			SessionID:   seal.SessionID,
-			ID:          changeID(seal.Path, seal.Key),
+			ID:          changeID(seal.Path, seal.Key, seal.Regions),
 			Path:        seal.Path,
 			Key:         seal.Key,
 			CommandID:   cmd.ID,
 			AgentID:     agent.ID,
 			Fingerprint: res.Fingerprint,
+			Regions:     seal.Regions,
 			Targets:     seal.Targets,
 			Ciphertexts: ciphertexts,
 			UserID:      seal.UserID,
@@ -406,6 +468,8 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 		}
 		if !stored {
 			log.InfoContext(ctx, "a newer seal of the same key already landed", "event", "seal.superseded")
+		} else {
+			s.pruneChanges(ctx, seal.SessionID, log)
 		}
 		b, _ := json.Marshal(map[string]any{"fingerprint": res.Fingerprint, "targets": len(res.Targets)})
 		summary = string(b)
@@ -431,6 +495,30 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 		return
 	}
 	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+// pruneChanges removes the session's changes that newer ones cover for
+// every document, such as a seal for one region followed by one for all.
+// Overlapping changes are resolved when read anyway (store.Effective), so a
+// failure here only leaves the list longer than it needs to be.
+func (s *Server) pruneChanges(ctx context.Context, sessionID string, log *slog.Logger) {
+	changes, err := s.store.Changes(ctx, sessionID, false)
+	if err != nil {
+		log.WarnContext(ctx, "failed to read changes to prune", "error", err)
+		return
+	}
+	live := map[string]bool{}
+	for _, c := range store.Effective(changes) {
+		live[c.ID] = true
+	}
+	for _, c := range changes {
+		if live[c.ID] {
+			continue
+		}
+		if _, err := s.store.DeleteChange(ctx, sessionID, c.ID); err != nil {
+			log.WarnContext(ctx, "failed to prune a covered change", "change_id", c.ID, "error", err)
+		}
+	}
 }
 
 // checkSealResult checks that a result has one well-formed ciphertext for

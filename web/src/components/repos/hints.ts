@@ -27,22 +27,3 @@ export function fileHints(file: RepositoryFile): FileHints {
     expected,
   };
 }
-
-/**
- * The expected keys some document of the file still lacks, counting values
- * waiting in the session as there.
- */
-export function missingKeys(
-  file: RepositoryFile,
-  pending: ReadonlySet<string>,
-): string[] {
-  const missing: string[] = [];
-  for (const d of file.documents ?? []) {
-    for (const k of d.expected_keys ?? []) {
-      if (!d.keys.includes(k) && !pending.has(k) && !missing.includes(k)) {
-        missing.push(k);
-      }
-    }
-  }
-  return missing;
-}

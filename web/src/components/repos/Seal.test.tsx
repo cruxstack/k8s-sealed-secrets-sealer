@@ -95,7 +95,7 @@ describe("sealing", () => {
 
     const done = await within(form).findByText(/sealed/i, { selector: "span" });
     expect(done).toHaveTextContent(
-      /Sealed api-token for 2 documents in dev-use1-blue/,
+      /Sealed api-token for 2 documents by dev-use1-blue/,
     );
     // ready for the next value, with a notice that names no value
     expect(done.closest("[role=status]")).not.toHaveTextContent("s3cr3t");
@@ -179,9 +179,10 @@ describe("sealing", () => {
     expect(key).toHaveAttribute("aria-invalid", "true");
     expect(seal).toBeDisabled();
     fireEvent.change(key, { target: { value: "api-key" } });
+    // one document holds it, the other doesn't
     expect(
       within(form).getByText(
-        "Replaces the current value of api-key in the file.",
+        "Replaces api-key where it is set and adds it to the other documents.",
       ),
     ).toBeVisible();
     expect(seal).toBeEnabled();
@@ -474,7 +475,7 @@ describe("sealing", () => {
     // nor can a key be picked while it runs
     const keys = screen.getByRole("list", { name: "Keys" });
     expect(
-      within(keys).getByRole("button", { name: /api-key/ }),
+      within(keys).getByRole("button", { name: /^api-key/ }),
     ).toBeDisabled();
     await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
   });
@@ -566,16 +567,27 @@ describe("hints", () => {
     );
     expect(docs).toHaveAttribute("rel", "noopener noreferrer");
 
-    // the expected keys come first: api-key is in one document of two,
-    // db-password in none
+    // the expected keys come first: api-key is in use2 but not use1,
+    // db-password in neither
     const keys = within(panel).getByRole("list", { name: "Keys" });
     expect(
-      within(keys)
+      within(keys).getByRole("button", { name: /^api-key/ }),
+    ).toHaveTextContent("api-keyMissing in use1Seal");
+    expect(
+      within(keys).getByRole("button", { name: /^db-password/ }),
+    ).toHaveTextContent("db-passwordExpected, not set yetSeal");
+    // and per region, each a way to seal it there only
+    const byRegion = (key: string) =>
+      within(within(keys).getByRole("list", { name: `${key} by region` }))
         .getAllByRole("button")
-        .map((b) => b.textContent),
-    ).toEqual([
-      "api-keyIn 1 of 2; not in dev-use1-blue-apps/billingSeal",
-      "db-passwordExpected, in none of the 2 documentsSeal",
+        .map((b) => b.getAttribute("aria-label"));
+    expect(byRegion("api-key")).toEqual([
+      "use1: missing. Seal api-key for use1 only",
+      "use2: set. Seal api-key for use2 only",
+    ]);
+    expect(byRegion("db-password")).toEqual([
+      "use1: missing. Seal db-password for use1 only",
+      "use2: missing. Seal db-password for use2 only",
     ]);
     expect(within(panel).getByText("2 to seal")).toBeVisible();
 
@@ -624,5 +636,127 @@ describe("hints", () => {
     // a warning, not a block
     fireEvent.change(value, { target: { value: "v" } });
     expect(within(form).getByRole("button", { name: "Seal" })).toBeEnabled();
+  });
+});
+
+describe("regions", () => {
+  const originalAdapter = apiClient.defaults.adapter;
+  beforeEach(() => {
+    sealPolling.intervalMs = 5;
+  });
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter;
+  });
+
+  it("seals a value for one region from its chip, and only there", async () => {
+    const api = fakeApi({ me: ME, files: { "example-org/apps": hinted() } });
+    renderAt(PAGE, api);
+    const { form, key, value } = await openForm();
+    const panel = screen.getByRole("region", { name: BILLING });
+
+    // db-password is missing in both regions; its use2 chip picks use2
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "use2: missing. Seal db-password for use2 only",
+      }),
+    );
+    expect(key).toHaveValue("db-password");
+    expect(value).toHaveFocus();
+    const regions = within(form).getByRole("group", { name: "Regions" });
+    expect(
+      within(regions).getByRole("button", { name: /use1/ }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(
+      within(regions).getByRole("button", { name: /use2/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(form).getByText(/Sealed for the document in use2/),
+    ).toBeVisible();
+    expect(
+      within(form).getByText("Adds db-password to spec.encryptedData in use2."),
+    ).toBeVisible();
+    // the document left out says so
+    expect(
+      within(panel).getByText("Sealed for 1 of these 2 documents"),
+    ).toBeVisible();
+    const use1 = within(panel).getByRole("rowheader", {
+      name: /dev-use1-blue-apps\/billing/,
+    });
+    expect(use1).toHaveTextContent("not in this seal");
+
+    fireEvent.change(value, { target: { value: "s3cr3t" } });
+    fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
+    expect(
+      await within(form).findByText(/sealed/i, { selector: "span" }),
+    ).toHaveTextContent(/Sealed db-password for 1 document in use2 by/);
+    const seal = api.calls.find((c) => c.url.endsWith("/seals"));
+    expect(seal?.body).toEqual({
+      path: BILLING,
+      key: "db-password",
+      value: "s3cr3t",
+      regions: ["use2"],
+    });
+
+    // the change names its region, and the key is still missing in use1
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    const item = within(
+      (await within(pending).findByText("db-password")).closest(
+        "li",
+      ) as HTMLElement,
+    );
+    expect(item.getByText("1 document in use2")).toBeInTheDocument();
+    expect(
+      item.getByRole("button", {
+        name: `Remove db-password in use2 from ${BILLING}`,
+      }),
+    ).toBeInTheDocument();
+    const keys = within(panel).getByRole("list", { name: "Keys" });
+    await waitFor(() =>
+      expect(
+        within(keys).getByRole("button", { name: /^db-password/ }),
+      ).toHaveTextContent("Missing in use1"),
+    );
+    expect(
+      within(keys).getByRole("button", {
+        name: "use2: pending. Seal db-password for use2 only",
+      }),
+    ).toBeInTheDocument();
+    // the regions chosen stay for the next value
+    expect(
+      within(regions).getByRole("button", { name: /use1/ }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps at least one region chosen, and seals everywhere with all", async () => {
+    const api = fakeApi({ me: ME, files: { "example-org/apps": hinted() } });
+    renderAt(PAGE, api);
+    const { form, key, value } = await openForm();
+    const regions = within(form).getByRole("group", { name: "Regions" });
+    const chip = (r: string) =>
+      within(regions).getByRole("button", { name: new RegExp(r) });
+    expect(chip("use1")).toHaveAttribute("aria-pressed", "true");
+    expect(chip("use2")).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(chip("use1"));
+    expect(chip("use1")).toHaveAttribute("aria-pressed", "false");
+    // the last one chosen stays
+    fireEvent.click(chip("use2"));
+    expect(chip("use2")).toHaveAttribute("aria-pressed", "true");
+    expect(within(form).getByText(/Only the documents in use2/)).toBeVisible();
+
+    fireEvent.click(
+      within(regions).getByRole("button", { name: "All regions" }),
+    );
+    expect(chip("use1")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(key, { target: { value: "api-key" } });
+    fireEvent.change(value, { target: { value: "v" } });
+    fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
+    await within(form).findByText(/sealed/i, { selector: "span" });
+    // every region is every document: no regions are sent
+    expect(api.calls.find((c) => c.url.endsWith("/seals"))?.body).toEqual({
+      path: BILLING,
+      key: "api-key",
+      value: "v",
+    });
   });
 });

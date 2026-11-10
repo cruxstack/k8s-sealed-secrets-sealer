@@ -75,7 +75,13 @@ export async function requestSeal(
   owner: string,
   repo: string,
   sessionId: string,
-  body: { path: string; key: string; value: string },
+  body: {
+    path: string;
+    key: string;
+    value: string;
+    /** Limits the seal to the file's documents in these regions. */
+    regions?: string[];
+  },
 ): Promise<Seal> {
   const { data } = await apiClient.post<Seal>(
     `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}/seals`,
