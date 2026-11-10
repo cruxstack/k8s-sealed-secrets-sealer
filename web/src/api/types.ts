@@ -64,3 +64,53 @@ export interface Fleet {
 export interface ApiErrorEnvelope {
   error: string;
 }
+
+/** A repository the signed-in user can read. */
+export interface Repository {
+  owner: string;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  /** "write" or "read": the user's own permission on GitHub. */
+  access: "write" | "read";
+}
+
+/** GET /api/v1/repos */
+export interface RepositoryList {
+  repositories: Repository[];
+}
+
+/** A SealedSecret document for this env. */
+export interface SealedSecretDocument {
+  /** Position in the file, counting from 0. */
+  index: number;
+  name: string;
+  namespace: string;
+  region?: string;
+  scope: "strict" | "namespace-wide" | "cluster-wide";
+  /** Names in spec.encryptedData. */
+  keys: string[];
+  /** Why values cannot be sealed into it; absent when they can. */
+  problem?: string;
+}
+
+/** A file holding SealedSecret documents for this env. */
+export interface RepositoryFile {
+  path: string;
+  blob: string;
+  documents: SealedSecretDocument[] | null;
+  /** Why the file could not be read. */
+  error?: string;
+}
+
+/** GET /api/v1/repos/{owner}/{repo}/files */
+export interface FileListing {
+  repository: Repository;
+  branch: string;
+  commit: string;
+  files: RepositoryFile[];
+  truncated: boolean;
+  /** Globs that select the files searched. */
+  file_globs: string[];
+}

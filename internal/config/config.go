@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,6 +94,20 @@ type ControlPlane struct {
 	// lifetime.
 	UserSessionKey []byte
 	UserSessionTTL time.Duration
+
+	// The GitHub App that reads repositories and opens pull requests: its
+	// ID, private key (PEM) and, optionally, its installation on GitHubOrg
+	// (looked up when zero).
+	GitHubAppID             string
+	GitHubAppPrivateKey     []byte
+	GitHubAppInstallationID int64
+	// EnvAnnotation and RegionAnnotation are the annotation keys that place
+	// a SealedSecret document in an env and a region.
+	EnvAnnotation    string
+	RegionAnnotation string
+	// DiscoveryFileGlobs select the files read when looking for
+	// SealedSecrets; empty means the default.
+	DiscoveryFileGlobs []string
 
 	// KeyRenewPeriod is the period the control plane asks a controller to
 	// renew its key with, when no cluster in the env renews.
@@ -200,6 +215,24 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 	cfg.GitHubOAuthClientSecret = r.secret("APP_GITHUB_OAUTH_CLIENT_SECRET", 1, true)
 	cfg.UserSessionKey = []byte(r.secret("APP_USER_SESSION_KEY", MinSessionKeyBytes, true))
 	cfg.UserSessionTTL = r.duration("APP_USER_SESSION_TTL", 8*time.Hour, 15*time.Minute, 24*time.Hour)
+	cfg.GitHubAppID = r.required(r.str("APP_GITHUB_APP_ID", ""), "APP_GITHUB_APP_ID")
+	cfg.GitHubAppPrivateKey = []byte(r.secret("APP_GITHUB_APP_PRIVATE_KEY", 1, true))
+	if len(cfg.GitHubAppPrivateKey) > 0 && !strings.Contains(string(cfg.GitHubAppPrivateKey), "PRIVATE KEY-----") {
+		r.fail("APP_GITHUB_APP_PRIVATE_KEY must be a PEM private key")
+	}
+	cfg.GitHubAppInstallationID = r.integer("APP_GITHUB_APP_INSTALLATION_ID", 0)
+	cfg.EnvAnnotation = r.qualifiedName("APP_ENV_ANNOTATION", "k8s-sealed-secrets-sealer/env")
+	cfg.RegionAnnotation = r.qualifiedName("APP_REGION_ANNOTATION", "k8s-sealed-secrets-sealer/region")
+	for _, g := range strings.Split(r.str("APP_DISCOVERY_FILE_GLOBS", ""), ",") {
+		if g = strings.TrimSpace(g); g == "" {
+			continue
+		}
+		if _, err := path.Match(g, ""); err != nil {
+			r.fail("APP_DISCOVERY_FILE_GLOBS: %q is not a valid glob", g)
+			continue
+		}
+		cfg.DiscoveryFileGlobs = append(cfg.DiscoveryFileGlobs, g)
+	}
 	cfg.KeyRenewPeriod = r.duration("APP_KEY_RENEW_PERIOD", 720*time.Hour, time.Hour, 365*24*time.Hour)
 	for _, h := range strings.Split(r.str("APP_AWS_STS_HOSTS", ""), ",") {
 		if h = strings.TrimSpace(h); h == "" {
@@ -345,6 +378,29 @@ func (r *reader) boolean(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// integer reads a non-negative integer.
+func (r *reader) integer(key string, fallback int64) int64 {
+	v := r.str(key, "")
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		r.fail("%s must be a non-negative whole number: %q", key, v)
+		return fallback
+	}
+	return n
+}
+
+// qualifiedName reads a Kubernetes annotation key.
+func (r *reader) qualifiedName(key, fallback string) string {
+	v := r.str(key, fallback)
+	if msgs := validation.IsQualifiedName(v); len(msgs) > 0 {
+		r.fail("%s must be an annotation key: %s", key, strings.Join(msgs, "; "))
+	}
+	return v
 }
 
 func (r *reader) duration(key string, fallback, minimum, maximum time.Duration) time.Duration {

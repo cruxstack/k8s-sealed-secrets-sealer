@@ -11,6 +11,8 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as ReposIndexRouteImport } from './routes/repos.index'
+import { Route as ReposOwnerRepoRouteImport } from './routes/repos.$owner.$repo'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +24,49 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReposIndexRoute = ReposIndexRouteImport.update({
+  id: '/repos/',
+  path: '/repos/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReposOwnerRepoRoute = ReposOwnerRepoRouteImport.update({
+  id: '/repos/$owner/$repo',
+  path: '/repos/$owner/$repo',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/repos/': typeof ReposIndexRoute
+  '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/repos': typeof ReposIndexRoute
+  '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/repos/': typeof ReposIndexRoute
+  '/repos/$owner/$repo': typeof ReposOwnerRepoRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login'
+  fullPaths: '/' | '/login' | '/repos/' | '/repos/$owner/$repo'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login'
-  id: '__root__' | '/' | '/login'
+  to: '/' | '/login' | '/repos' | '/repos/$owner/$repo'
+  id: '__root__' | '/' | '/login' | '/repos/' | '/repos/$owner/$repo'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
+  ReposIndexRoute: typeof ReposIndexRoute
+  ReposOwnerRepoRoute: typeof ReposOwnerRepoRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +85,28 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/repos/': {
+      id: '/repos/'
+      path: '/repos'
+      fullPath: '/repos/'
+      preLoaderRoute: typeof ReposIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repos/$owner/$repo': {
+      id: '/repos/$owner/$repo'
+      path: '/repos/$owner/$repo'
+      fullPath: '/repos/$owner/$repo'
+      preLoaderRoute: typeof ReposOwnerRepoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
+  ReposIndexRoute: ReposIndexRoute,
+  ReposOwnerRepoRoute: ReposOwnerRepoRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

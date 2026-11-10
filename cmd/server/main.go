@@ -19,9 +19,12 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/controlplane"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version"
@@ -93,6 +96,27 @@ func run() error {
 		Logger:       logger,
 	})
 
+	githubApp, err := githubapp.New(githubapp.Options{
+		APIURL:         cfg.GitHubAPIURL,
+		AppID:          cfg.GitHubAppID,
+		PrivateKey:     cfg.GitHubAppPrivateKey,
+		Org:            cfg.GitHubOrg,
+		InstallationID: cfg.GitHubAppInstallationID,
+	})
+	if err != nil {
+		return err
+	}
+	repoService, err := repos.New(repos.Options{
+		GitHub:      githubApp,
+		Env:         cfg.EnvName,
+		Annotations: manifest.Annotations{Env: cfg.EnvAnnotation, Region: cfg.RegionAnnotation},
+		FileGlobs:   cfg.DiscoveryFileGlobs,
+		Logger:      logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	logger.InfoContext(ctx, "starting control plane",
 		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
 		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams)
@@ -109,6 +133,7 @@ func run() error {
 		Store:      st,
 		AdminToken: cfg.AdminToken,
 		Users:      users,
+		Repos:      repoService,
 		WebUI:      webui.Handler(),
 		HSTS:       strings.HasPrefix(cfg.PublicURL, "https://"),
 

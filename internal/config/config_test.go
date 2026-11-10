@@ -25,6 +25,8 @@ func controlPlaneEnv(extra map[string]string) map[string]string {
 		"APP_GITHUB_OAUTH_CLIENT_ID":     "client-id",
 		"APP_GITHUB_OAUTH_CLIENT_SECRET": "client-secret",
 		"APP_USER_SESSION_KEY":           strings.Repeat("u", 32),
+		"APP_GITHUB_APP_ID":              "12345",
+		"APP_GITHUB_APP_PRIVATE_KEY":     "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n",
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -60,6 +62,35 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	}
 	if cfg.KeyRenewPeriod != 720*time.Hour {
 		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)
+	}
+	if cfg.GitHubAppID != "12345" || cfg.GitHubAppInstallationID != 0 || cfg.EnvAnnotation != "k8s-sealed-secrets-sealer/env" ||
+		cfg.RegionAnnotation != "k8s-sealed-secrets-sealer/region" || cfg.DiscoveryFileGlobs != nil {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadControlPlane_GitHubAppAndDiscovery(t *testing.T) {
+	cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{
+		"APP_GITHUB_APP_INSTALLATION_ID": "77",
+		"APP_ENV_ANNOTATION":             "acme.io/env",
+		"APP_DISCOVERY_FILE_GLOBS":       "*.sealed.yaml, secrets/*/*.yaml",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubAppInstallationID != 77 || cfg.EnvAnnotation != "acme.io/env" || len(cfg.DiscoveryFileGlobs) != 2 {
+		t.Errorf("cfg = %+v", cfg)
+	}
+	_, err = loadControlPlane(env(controlPlaneEnv(map[string]string{
+		"APP_GITHUB_APP_PRIVATE_KEY":     "not a key",
+		"APP_GITHUB_APP_INSTALLATION_ID": "-1",
+		"APP_REGION_ANNOTATION":          "not a key!",
+		"APP_DISCOVERY_FILE_GLOBS":       "[bad",
+	})))
+	for _, want := range []string{"must be a PEM private key", "APP_GITHUB_APP_INSTALLATION_ID", "APP_REGION_ANNOTATION", "not a valid glob"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
 	}
 }
 

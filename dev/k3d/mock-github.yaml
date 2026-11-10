@@ -1,4 +1,5 @@
-# The GitHub mock for local sign-in (cmd/mock-github). Its client ID and
+# The GitHub mock (cmd/mock-github): sign-in, and a GitHub App installed on
+# the fixture repositories in internal/mockgithub/fixtures. Its client ID and
 # secret are local-only values matching dev/values/control-plane.yaml and
 # dev/k3d/control-plane-secret.yaml.
 apiVersion: apps/v1
@@ -38,6 +39,12 @@ spec:
             # the control plane's callback; Tilt sets it from the stack's port
             - name: MOCK_GITHUB_CALLBACK_URLS
               value: http://localhost:4100/api/v1/auth/callback
+            # the GitHub App's ID (matching dev/values/control-plane.yaml) and
+            # public key, which Tilt generates per stack
+            - name: MOCK_GITHUB_APP_ID
+              value: "1"
+            - name: MOCK_GITHUB_APP_PUBLIC_KEY
+              value: ""
           ports:
             - name: http
               containerPort: 8080

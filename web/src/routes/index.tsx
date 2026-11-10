@@ -1,33 +1,16 @@
-import { useEffect } from "react";
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import { AppShell } from "@/components/layout/AppShell";
+import { createFileRoute } from "@tanstack/react-router";
 import { FleetView } from "@/components/fleet/FleetView";
-import { resolveCurrentUser, useAuth } from "@/lib/auth";
+import { requireSignedIn, SignedInPage } from "@/lib/require-auth";
 
 export const Route = createFileRoute("/")({
-  beforeLoad: async ({ context, location }) => {
-    if (!(await resolveCurrentUser(context.queryClient))) {
-      throw redirect({
-        to: "/login",
-        search: location.href === "/" ? {} : { return_to: location.href },
-        replace: true,
-      });
-    }
-  },
+  beforeLoad: requireSignedIn,
   component: FleetPage,
 });
 
 function FleetPage() {
-  const { isAuthenticated, isLoading } = useAuth();
-  const navigate = useNavigate();
-  const signedOut = !isLoading && !isAuthenticated;
-
-  // The route guard ran before this rendered; this only handles the session
-  // ending while the page is open. The effect depends on the auth state
-  // alone, so it navigates once.
-  useEffect(() => {
-    if (signedOut) void navigate({ to: "/login", replace: true });
-  }, [signedOut, navigate]);
-
-  return <AppShell>{signedOut ? null : <FleetView />}</AppShell>;
+  return (
+    <SignedInPage>
+      <FleetView />
+    </SignedInPage>
+  );
 }

@@ -102,6 +102,20 @@ spec:
               value: {{ required "github.org is required" .Values.github.org | quote }}
             - name: APP_GITHUB_OAUTH_CLIENT_ID
               value: {{ required "github.oauthClientID is required" .Values.github.oauthClientID | quote }}
+            - name: APP_GITHUB_APP_ID
+              value: {{ required "github.appID is required" .Values.github.appID | quote }}
+            {{- with .Values.github.installationID }}
+            - name: APP_GITHUB_APP_INSTALLATION_ID
+              value: {{ . | quote }}
+            {{- end }}
+            - name: APP_ENV_ANNOTATION
+              value: {{ .Values.annotations.env | quote }}
+            - name: APP_REGION_ANNOTATION
+              value: {{ .Values.annotations.region | quote }}
+            {{- with .Values.discovery.fileGlobs }}
+            - name: APP_DISCOVERY_FILE_GLOBS
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: APP_GITHUB_URL
               value: {{ .Values.github.url | quote }}
             - name: APP_GITHUB_API_URL

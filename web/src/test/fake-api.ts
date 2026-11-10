@@ -1,5 +1,11 @@
 import { AxiosError, type AxiosAdapter } from "axios";
-import type { Fleet, FleetAgent, MeResponse } from "@/api/types";
+import type {
+  FileListing,
+  Fleet,
+  FleetAgent,
+  MeResponse,
+  Repository,
+} from "@/api/types";
 
 export const ME: MeResponse = {
   user: {
@@ -31,6 +37,10 @@ export function fakeApi(opts: {
   me: MeResponse | null;
   fleet?: Fleet | null;
   fleetStatus?: number;
+  repos?: Repository[];
+  /** File listings by "owner/repo"; others answer 404. */
+  files?: Record<string, FileListing>;
+  reposStatus?: number;
 }): FakeApi {
   const calls: Recorded[] = [];
   const adapter: AxiosAdapter = async (config) => {
@@ -60,6 +70,24 @@ export function fakeApi(opts: {
       return reply(200, opts.fleet ?? emptyFleet());
     }
     if (url === "/auth/logout" && method === "POST") return reply(204, "");
+    if (url === "/repos") {
+      if (!opts.me) return reply(401, { error: "unauthorized" });
+      if (opts.reposStatus)
+        return reply(opts.reposStatus, { error: "GitHub request failed" });
+      return reply(200, { repositories: opts.repos ?? [] });
+    }
+    const files = /^\/repos\/([^/]+)\/([^/]+)\/files$/.exec(url);
+    if (files) {
+      if (!opts.me) return reply(401, { error: "unauthorized" });
+      const [, owner = "", repo = ""] = files;
+      const listing =
+        opts.files?.[
+          `${decodeURIComponent(owner)}/${decodeURIComponent(repo)}`
+        ];
+      return listing
+        ? reply(200, listing)
+        : reply(404, { error: "repository not found" });
+    }
     return reply(404, { error: "not found" });
   };
   return { adapter, calls };
@@ -112,3 +140,76 @@ export function agent(
 }
 
 export { iso };
+
+export const REPO_APPS: Repository = {
+  owner: "example-org",
+  name: "apps",
+  full_name: "example-org/apps",
+  private: true,
+  default_branch: "main",
+  access: "write",
+};
+
+export const REPO_PLATFORM: Repository = {
+  owner: "example-org",
+  name: "platform",
+  full_name: "example-org/platform",
+  private: false,
+  default_branch: "main",
+  access: "read",
+};
+
+export function listing(overrides: Partial<FileListing> = {}): FileListing {
+  return {
+    repository: REPO_APPS,
+    branch: "main",
+    commit: "0123456789abcdef0123456789abcdef01234567",
+    truncated: false,
+    file_globs: ["*sealed*.yaml", "*sealed*.yml"],
+    files: [
+      {
+        path: "deploy/billing/sealed-secret.yaml",
+        blob: "1111111111111111111111111111111111111111",
+        documents: [
+          {
+            index: 0,
+            name: "billing",
+            namespace: "dev-use1-blue-apps",
+            region: "use1",
+            scope: "strict",
+            keys: [],
+          },
+          {
+            index: 2,
+            name: "billing",
+            namespace: "dev-use2-blue-apps",
+            region: "use2",
+            scope: "strict",
+            keys: ["api-key"],
+          },
+        ],
+      },
+      {
+        path: "deploy/legacy/sealed-secret.yaml",
+        blob: "2222222222222222222222222222222222222222",
+        documents: [
+          {
+            index: 0,
+            name: "legacy",
+            namespace: "dev-use1-blue-apps",
+            scope: "cluster-wide",
+            keys: [],
+            problem: "cluster-wide scope is not allowed",
+          },
+        ],
+      },
+      {
+        path: "deploy/broken/sealed-secret.yaml",
+        blob: "3333333333333333333333333333333333333333",
+        documents: null,
+        error: "file is not valid YAML",
+      },
+    ],
+    ...overrides,
+  };
+}

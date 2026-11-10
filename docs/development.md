@@ -108,6 +108,26 @@ Open http://localhost:4100 and sign in. GitHub is a mock
 | `bob`   | Refused: in the org, not in the allowed team             |
 | `carol` | Refused: not in the org                                  |
 
+The mock is also a GitHub App, installed on the fixture repositories in
+`internal/mockgithub/fixtures`:
+
+| Repository               | alice | bob  | carol |
+| ------------------------ | ----- | ---- | ----- |
+| `example-org/apps`       | write | read | none  |
+| `example-org/platform`   | read  | none | none  |
+| `example-org/restricted` | none  | none | none  |
+
+In `example-org/apps`, `deploy/billing/sealed-secret.yaml` has one dev
+document per simulated cluster (one seal updates all three) and a prod
+document the dev stack ignores; the other files cover namespace-wide and
+cluster-wide scope and a prod-only file.
+
+Its installation tokens carry the permissions they were minted with, and every
+repository call checks them, as GitHub does. Tilt generates the App's key pair
+for each stack (`.tools/dev/<context>/github-app.pem`, never committed): the
+control plane signs App JWTs with the private key and the mock checks them
+with the public key.
+
 The UI is built into the control plane binary; Tilt rebuilds it when
 `web/` changes. For hot reload while working on the UI, run
 `atmos web dev` (Vite on http://localhost:5173, proxying `/api` to the
@@ -151,7 +171,10 @@ the run for inspection. Besides bringing the stack up, it checks that:
   unseals in every cluster;
 - the UI is served with a strict content security policy, the fleet API
   requires sign-in, alice can sign in while bob and carol are refused, and
-  sign-out requires the CSRF token.
+  sign-out requires the CSRF token;
+- alice sees only the repositories she can read, with her access, discovery
+  finds the dev SealedSecrets (and flags cluster-wide scope), and a
+  repository she cannot read is not found.
 
 ## Local agent identity
 
