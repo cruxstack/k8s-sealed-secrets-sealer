@@ -24,9 +24,11 @@ const (
 	agentPrefix  = "AGENT#"
 	keyPrefix    = "KEY#"
 	replayPrefix = "REPLAY#"
+	ratePrefix   = "RATE#"
 	skState      = "STATE"
 	skMeta       = "META"
 	skReplay     = "REPLAY"
+	skRate       = "RATE"
 	skEscrow     = "ESCROW"
 	cmdPrefix    = "CMD#"
 
@@ -187,6 +189,31 @@ func (d *Dynamo) PutReplayIfAbsent(ctx context.Context, key string, expires time
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("failed to record one-time key: %w", err)
+	}
+	return true, nil
+}
+
+func (d *Dynamo) CountRequest(ctx context.Context, key string, limit int, windowEnd time.Time) (bool, error) {
+	end := strconv.FormatInt(windowEnd.Unix(), 10)
+	// one item per window; "count" is a reserved word
+	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &d.table,
+		Key:                      itemKey(ratePrefix+key+"#"+end, skRate),
+		UpdateExpression:         aws.String("ADD #n :one SET " + attrExpiresAt + " = :ttl"),
+		ConditionExpression:      aws.String("attribute_not_exists(#n) OR #n < :limit"),
+		ExpressionAttributeNames: map[string]string{"#n": "requests"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":one":   &types.AttributeValueMemberN{Value: "1"},
+			":limit": &types.AttributeValueMemberN{Value: strconv.Itoa(limit)},
+			":ttl":   &types.AttributeValueMemberN{Value: end},
+		},
+	})
+	var over *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &over):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to count request for %s: %w", key, err)
 	}
 	return true, nil
 }

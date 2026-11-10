@@ -325,6 +325,39 @@ func TestSeal_CapsPendingChanges(t *testing.T) {
 	}
 }
 
+// Seals still running count toward the cap: their changes have not landed
+// yet, and requests in quick succession must not each see room for one.
+func TestSeal_CapCountsSealsInFlight(t *testing.T) {
+	sh := newSealHarness(t)
+	ctx := context.Background()
+	sess := sh.openSession()
+	stored, _, _ := sh.store.Session(ctx, testUsers["alice"].ID, store.RepoKey("example-org", "apps"), sh.clock())
+	for i := range maxChangesPerSession - 1 {
+		k := fmt.Sprintf("key-%d", i)
+		_, err := sh.store.PutChange(ctx, store.Change{
+			SessionID: sess.ID, ID: changeID(billing, k, nil), Path: billing, Key: k, CommandID: "01J0000000000000000000000" + string(rune('A'+i%26)),
+			ExpiresAt: stored.EndsAt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rec := sh.seal(sess.ID, billing, "last", "v"); rec.Code != http.StatusAccepted {
+		t.Fatalf("seal of the last change = %d %s", rec.Code, rec.Body)
+	}
+	if rec := sh.seal(sess.ID, billing, "one-more", "v"); rec.Code != http.StatusConflict {
+		t.Fatalf("seal past the cap while the last is running = %d %s", rec.Code, rec.Body)
+	}
+	// the last seal expires without a result, and its place is free again
+	sh.advance(sealChangeHold + time.Second)
+	for id := range sh.agents {
+		sh.checkIn(id, sh.key.Key)
+	}
+	if rec := sh.seal(sess.ID, billing, "one-more", "v"); rec.Code != http.StatusAccepted {
+		t.Fatalf("seal after the last expired = %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	sh := newSealHarness(t)
 	status := func() statusView {

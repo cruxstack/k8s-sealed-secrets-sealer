@@ -899,9 +899,12 @@ shows creating one.
 | Key            | `KEY#<fp>`         | `META`              | none                  |
 | Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
 | Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
+| Session count  | `USER#<user id>`   | `SESSIONS`          | session's maximum age |
 | Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
 | Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | session's maximum age |
+| Change places  | `SESSION#<id>`     | `CHANGES`           | last place's end      |
 | Login replay   | `REPLAY#<hash>`    | `REPLAY`            | signature expiry      |
+| Rate window    | `RATE#<key>#<end>` | `RATE`              | window end            |
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
   controller settings, key set. Commands in flight are counted from the
@@ -926,14 +929,24 @@ shows creating one.
   idle expiry and maximum age. Using a session (sealing, removing a change)
   moves its idle expiry an hour on, but never past its maximum age of 8
   hours. Keying sessions by user makes ownership structural: a user can only
-  ever address their own. Live sessions per user are capped at 10 by
-  counting them with a query, and a session holds at most 50 pending
-  changes. While a pull request is opened from it, the session is locked
+  ever address their own. Live sessions per user are capped at 10, and a
+  session at 50 pending changes, even under concurrent requests (below).
+  While a pull request is opened from it, the session is locked
   (`submit_deadline`, epoch milliseconds, 2 minutes at most): sealing,
   removing a change and discarding are refused, and a seal queues its
   command before it marks the session used, so a seal is either in the pull
   request or refused. File content is not stored; it is fetched again at the
   base commit when the pull request is opened.
+- **Session count:** a version number. Opening a session counts the user's
+  live sessions with a query, then writes the session and the next version
+  in one transaction, on condition the version is still the one read before
+  the query. Of two sessions opened at once, one is written and the other
+  counts again.
+- **Change places:** a version, and the changes that seals still running
+  will make, each held until its seal's command expires and a minute more.
+  A seal counts the session's pending changes and these places, and adds its
+  own on condition the version has not moved, so seals still running count
+  toward the 50. A seal that fails keeps its place until it lapses.
 - **Seal:** the command carrying a requested seal and the agent it went to,
   with the file, key, regions, targets and requesting user, so the UI can
   follow its progress.
@@ -948,6 +961,9 @@ shows creating one.
   stored apart from the targets so listings leave them out; they are
   never returned to clients. Never plaintext. Discarding a session leaves
   its seals and changes to expire unreachable.
+
+- **Rate window:** how many requests of one kind a user (or session) made in
+  one fixed minute (section 12). A request over the limit is not counted.
 
 **Audit trail.** The table keeps no audit records: commands and sessions
 expire, and agent state is replaced on every check-in. The audit trail is
@@ -1049,9 +1065,23 @@ one. The pull requests are a second, lasting record: each commit's
   `/api/v1/envs/{env}/`; signing in, `/me` (the user and their envs) and
   signing out are under `/api/v1/auth/`. With a single env its API is also
   at `/api/v1/`.
-- **Rate limits** use API Gateway throttling and WAF rate-based rules.
-  In-memory limiters do not hold across Lambda instances, so limits that
-  matter (sessions per user) are enforced with DynamoDB.
+- **Rate limits** use API Gateway throttling and WAF rate-based rules per
+  client. In-memory limiters do not hold across Lambda instances, so limits
+  that matter (sessions per user, and the per-user limits below) are
+  enforced with DynamoDB. Each call that costs GitHub requests, KMS or agent
+  work has a fixed one-minute window per user, generous for a person using
+  the UI and tight for a script. A request over a limit gets 429 with
+  `Retry-After` and logs `request.rate_limited`; a request that fails still
+  counts. When the count cannot be written the request goes through: the
+  limits guard the service and must not stop it.
+
+  | Call                      | Requests a minute           |
+  | ------------------------- | --------------------------- |
+  | List repositories         | 10 per user                 |
+  | List a repository's files | 30 per user                 |
+  | Open a session            | 10 per user                 |
+  | Seal a value              | 20 per session, 30 per user |
+  | Open a pull request       | 5 per user                  |
 - **Secrets the control plane needs** (GitHub App private key, OAuth client
   secret, session keys, admin token) come from SSM Parameter Store, which
   suits Lambda: a setting may hold a parameter's ARN, read once at start.

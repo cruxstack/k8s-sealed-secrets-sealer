@@ -31,6 +31,10 @@ import (
 const (
 	// sealCommandTTL is how long a seal waits to be leased and run.
 	sealCommandTTL = 2 * time.Minute
+	// sealChangeHold is how long a seal holds a place among its session's
+	// pending changes: until its command expires, and a minute for a
+	// result recorded as it does.
+	sealChangeHold = sealCommandTTL + time.Minute
 	// maxSealBody bounds a seal request: a value of MaxSealValueBytes,
 	// even with JSON escaping, and its path and key.
 	maxSealBody = 512 << 10
@@ -213,11 +217,22 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "failed to read pending changes", err)
 		return
 	}
-	if len(changes) >= maxChangesPerSession && !slices.ContainsFunc(changes, func(c store.Change) bool {
-		return c.ID == changeID(file.Path, in.Key, sealFor)
-	}) {
+	existing := make([]string, len(changes))
+	for i, c := range changes {
+		existing[i] = c.ID
+	}
+	// seals still running count toward the cap too: each holds its
+	// change's place until it is done
+	reservedAt := s.now().UTC()
+	err = s.store.ReserveChange(ctx, sess.ID, changeID(file.Path, in.Key, sealFor), existing,
+		maxChangesPerSession, reservedAt.Add(sealChangeHold), reservedAt)
+	switch {
+	case errors.Is(err, store.ErrTooManyChanges):
 		writeError(w, http.StatusConflict, fmt.Sprintf(
 			"this session holds %d pending changes, the most it can; open a pull request with them first", maxChangesPerSession))
+		return
+	case err != nil:
+		s.internalError(w, r, "failed to reserve a pending change", err)
 		return
 	}
 

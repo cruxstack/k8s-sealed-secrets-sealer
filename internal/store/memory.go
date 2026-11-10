@@ -23,6 +23,16 @@ type Memory struct {
 	sessions map[int64]map[string]Session
 	seals    map[string]map[string]Seal
 	changes  map[string]map[string]Change
+	// reserved holds the places seals hold among a session's changes, by
+	// session ID, then change ID
+	reserved map[string]map[string]int64
+	// requests counts requests by rate limit window
+	requests map[rateWindow]int
+}
+
+type rateWindow struct {
+	key string
+	end int64
 }
 
 // NewMemory returns an empty in-memory Store.
@@ -36,6 +46,8 @@ func NewMemory() *Memory {
 		sessions: map[int64]map[string]Session{},
 		seals:    map[string]map[string]Seal{},
 		changes:  map[string]map[string]Change{},
+		reserved: map[string]map[string]int64{},
+		requests: map[rateWindow]int{},
 	}
 }
 
@@ -81,6 +93,17 @@ func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.T
 		return false, nil
 	}
 	m.replays[key] = expires
+	return true, nil
+}
+
+func (m *Memory) CountRequest(_ context.Context, key string, limit int, windowEnd time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w := rateWindow{key: key, end: windowEnd.Unix()}
+	if m.requests[w] >= limit {
+		return false, nil
+	}
+	m.requests[w]++
 	return true, nil
 }
 
@@ -308,6 +331,17 @@ func (m *Memory) Seal(_ context.Context, sessionID, commandID string) (Seal, boo
 	defer m.mu.Unlock()
 	s, ok := m.seals[sessionID][commandID]
 	return s, ok, nil
+}
+
+func (m *Memory) ReserveChange(_ context.Context, sessionID, changeID string, existing []string, maxChanges int, until, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept, err := reserveChange(m.reserved[sessionID], changeID, existing, maxChanges, until, now)
+	if err != nil {
+		return err
+	}
+	m.reserved[sessionID] = kept
+	return nil
 }
 
 func (m *Memory) PutChange(_ context.Context, c Change) (bool, error) {

@@ -245,9 +245,11 @@ func (s *Server) Handler() http.Handler {
 		// the fleet is for admins; everyone sees whether sealing works
 		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(u.RequireAdmin(s.fleet)))
 		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
+		// calls that cost GitHub requests, KMS or agent work are rate
+		// limited per user, after sign-in and CSRF checks
 		if s.repos != nil {
-			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.listRepos))
-			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.listFiles))
+			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.limit(s.listRepos, limitRepos)))
+			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.limit(s.listFiles, limitFiles)))
 		}
 		if s.repos != nil && s.transit != nil {
 			// state-changing routes need the CSRF token
@@ -255,12 +257,12 @@ func (s *Server) Handler() http.Handler {
 			const session = "/api/v1/repos/{owner}/{repo}/session"
 			mux.HandleFunc("GET /api/v1/sessions", u.RequireUser(s.listSessions))
 			mux.HandleFunc("GET "+session, u.RequireUser(s.getSession))
-			mux.HandleFunc("POST "+session, write(s.createSession))
+			mux.HandleFunc("POST "+session, write(s.limit(s.createSession, limitSessions)))
 			mux.HandleFunc("DELETE "+session+"/{id}", write(s.deleteSession))
-			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.requestSeal))
+			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.limit(s.requestSeal, limitSessionSeals, limitSeals)))
 			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
 			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
-			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.createPullRequest))
+			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.limit(s.createPullRequest, limitPulls)))
 		}
 	}
 

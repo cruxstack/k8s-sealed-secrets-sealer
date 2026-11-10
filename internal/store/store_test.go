@@ -275,6 +275,28 @@ func TestDynamo_CommandsSinceReadsAKeyRange(t *testing.T) {
 	}
 }
 
+func TestStore_CountRequest(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			key := "seals#" + name + "-" + time.Now().Format("150405.000000")
+			end := time.Now().Add(time.Minute).Truncate(time.Minute)
+			for i, want := range []bool{true, true, false, false} {
+				if ok, err := s.CountRequest(ctx, key, 2, end); err != nil || ok != want {
+					t.Fatalf("request %d: ok=%v err=%v, want %v", i, ok, err, want)
+				}
+			}
+			// the next window, and another key, count afresh
+			if ok, err := s.CountRequest(ctx, key, 2, end.Add(time.Minute)); err != nil || !ok {
+				t.Fatalf("next window: ok=%v err=%v", ok, err)
+			}
+			if ok, err := s.CountRequest(ctx, key+"-other", 2, end); err != nil || !ok {
+				t.Fatalf("other key: ok=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
 func TestStore_Escrow(t *testing.T) {
 	for name, s := range stores(t) {
 		t.Run(name, func(t *testing.T) {

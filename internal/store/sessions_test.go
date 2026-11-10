@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +133,119 @@ func TestStore_Sessions(t *testing.T) {
 			}
 			if _, ok, _ := s.Session(ctx, user, key, expiredAt); ok {
 				t.Fatal("deleted session is still returned")
+			}
+		})
+	}
+}
+
+func TestStore_SessionCapHoldsUnderConcurrency(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			user := time.Now().UnixNano()
+			const limit, tries = 3, 8
+			var created, refused atomic.Int32
+			var wg sync.WaitGroup
+			for i := range tries {
+				wg.Go(func() {
+					sess := Session{
+						ID: "S" + strconv.Itoa(i), UserID: user, UserLogin: "alice", Owner: "example-org", Repo: "repo-" + strconv.Itoa(i),
+						Branch: "main", Commit: "abc", CreatedAt: now, UsedAt: now, ExpiresAt: now.Add(time.Hour), EndsAt: now.Add(8 * time.Hour),
+					}
+					_, ok, err := s.CreateSession(ctx, sess, limit, now)
+					switch {
+					case errors.Is(err, ErrTooManySessions):
+						refused.Add(1)
+					case err != nil:
+						t.Errorf("create %d: %v", i, err)
+					case ok:
+						created.Add(1)
+					}
+				})
+			}
+			wg.Wait()
+			live, err := s.Sessions(ctx, user, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if created.Load() != limit || refused.Load() != tries-limit || len(live) != limit {
+				t.Fatalf("created %d, refused %d, live %d; want %d created", created.Load(), refused.Load(), len(live), limit)
+			}
+		})
+	}
+}
+
+func TestStore_ReserveChange(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			session := "SES-reserve-" + name + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			existing := []string{"x"}
+			// a seal holds its place for three minutes
+			reserve := func(id string, at time.Time) error {
+				return s.ReserveChange(ctx, session, id, existing, 3, at.Add(3*time.Minute), at)
+			}
+			// one change exists; two seals of new changes in flight fill
+			// the session
+			for _, id := range []string{"a", "b"} {
+				if err := reserve(id, now); err != nil {
+					t.Fatalf("reserve %s: %v", id, err)
+				}
+			}
+			if err := reserve("c", now); !errors.Is(err, ErrTooManyChanges) {
+				t.Fatalf("reserve past the cap: %v", err)
+			}
+			// sealing a change again, existing or in flight, takes no
+			// other place
+			if err := reserve("x", now); err != nil {
+				t.Fatalf("reserve an existing change: %v", err)
+			}
+			if err := reserve("a", now.Add(2*time.Minute)); err != nil {
+				t.Fatalf("reserve a again: %v", err)
+			}
+			// b's seal has had its time and its place lapses; a's second
+			// seal still holds one
+			later := now.Add(3*time.Minute + time.Second)
+			if err := reserve("c", later); err != nil {
+				t.Fatalf("reserve after b's place lapsed: %v", err)
+			}
+			if err := reserve("d", later); !errors.Is(err, ErrTooManyChanges) {
+				t.Fatalf("reserve past the cap again: %v", err)
+			}
+			if err := s.ReserveChange(ctx, "SES-other-"+session, "d", nil, 3, now.Add(time.Minute), now); err != nil {
+				t.Fatalf("reserve in another session: %v", err)
+			}
+		})
+	}
+}
+
+func TestStore_ChangeCapHoldsUnderConcurrency(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			session := "SES-race-" + name + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			const limit, tries = 3, 6
+			var reserved, refused atomic.Int32
+			var wg sync.WaitGroup
+			for i := range tries {
+				wg.Go(func() {
+					err := s.ReserveChange(ctx, session, "c"+strconv.Itoa(i), nil, limit, now.Add(time.Minute), now)
+					switch {
+					case errors.Is(err, ErrTooManyChanges):
+						refused.Add(1)
+					case err != nil:
+						t.Errorf("reserve %d: %v", i, err)
+					default:
+						reserved.Add(1)
+					}
+				})
+			}
+			wg.Wait()
+			if reserved.Load() != limit || refused.Load() != tries-limit {
+				t.Fatalf("reserved %d, refused %d; want %d reserved", reserved.Load(), refused.Load(), limit)
 			}
 		})
 	}
