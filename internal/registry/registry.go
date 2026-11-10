@@ -173,6 +173,7 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 	fail := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
 	issuers := map[string]bool{}
+	issuerURLs := map[string]string{}
 	for i := range f.Issuers {
 		is := &f.Issuers[i]
 		where := fmt.Sprintf("issuers[%d]", i)
@@ -184,7 +185,12 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 		issuers[is.Name] = true
 		if u, err := url.Parse(is.URL); err != nil || u.Scheme != "https" || u.Host == "" {
 			fail("%s: url must be an absolute https URL", where)
+		} else if other, dup := issuerURLs[is.URL]; dup {
+			// tokens name their issuer by URL, so two names for one URL
+			// would make the same service account two identities
+			fail("%s: url is also issuer %q's", where, other)
 		}
+		issuerURLs[is.URL] = is.Name
 		switch {
 		case (is.JWKSURL == "") == (is.JWKSFile == ""):
 			fail("%s: set exactly one of jwksURL and jwksFile", where)
@@ -273,6 +279,43 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 		return nil, errors.Join(errs...)
 	}
 	return r, nil
+}
+
+// Identities returns each agent's identity, keyed the same way in every
+// registry: an IAM role by partition, account and name, as STS reports it,
+// or a service account by its issuer's URL and its subject, as its tokens
+// carry them. The values are agent IDs.
+func (r *Registry) Identities() map[string]string {
+	urls := map[string]string{}
+	for _, is := range r.Issuers {
+		urls[is.Name] = is.URL
+	}
+	out := make(map[string]string, len(r.Agents))
+	for _, a := range r.Agents {
+		switch {
+		case a.Identity.AWS != nil:
+			role, _ := ParseRoleARN(a.Identity.AWS.RoleARN)
+			out[fmt.Sprintf("IAM role %s in account %s (%s)", role.Name, role.Account, role.Partition)] = a.ID
+		case a.Identity.K8s != nil:
+			out[fmt.Sprintf("service account %s of issuer %s", a.Identity.K8s.Subject, urls[a.Identity.K8s.Issuer])] = a.ID
+		}
+	}
+	return out
+}
+
+// SharedIdentities describes each identity that both registries register,
+// sorted. Envs on one URL share the agent audience, so an identity in two
+// of them could use one login in both.
+func SharedIdentities(r, other *Registry) []string {
+	theirs := other.Identities()
+	var out []string
+	for id, agent := range r.Identities() {
+		if o, ok := theirs[id]; ok {
+			out = append(out, fmt.Sprintf("agent %q: %s is also agent %q's", agent, id, o))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func resolve(baseDir, path string) string {

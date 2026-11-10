@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,11 +31,16 @@ type ParameterReader func(ctx context.Context, arn string) (string, error)
 // resolveTimeout bounds reading every parameter at start.
 const resolveTimeout = 15 * time.Second
 
+// rereadSettings are read from SSM by loadControlPlanes rather than
+// resolveParameters, which keeps their ARNs so the control plane can read
+// them again: the agent registry may change while it runs.
+var rereadSettings = []string{"APP_REGISTRY"}
+
 // resolveParameters returns a lookup over environ in which every APP_
 // variable whose value is an SSM parameter ARN reads as that parameter's
-// value. newReader is called only when there is a parameter to read, so a
-// process with no ARNs needs no AWS credentials. Values are never logged or
-// put in errors.
+// value, except rereadSettings. newReader is called only when there is a
+// parameter to read, so a process with no ARNs needs no AWS credentials.
+// Values are never logged or put in errors.
 func resolveParameters(ctx context.Context, environ []string, newReader func(context.Context) (ParameterReader, error)) (lookupFunc, error) {
 	vars := map[string]string{}
 	var names []string
@@ -44,7 +50,7 @@ func resolveParameters(ctx context.Context, environ []string, newReader func(con
 			continue
 		}
 		vars[k] = v
-		if strings.HasPrefix(k, "APP_") && IsSSMParameterARN(v) {
+		if strings.HasPrefix(k, "APP_") && IsSSMParameterARN(v) && !slices.Contains(rereadSettings, k) {
 			names = append(names, k)
 		}
 	}
@@ -86,6 +92,13 @@ func resolveParameters(ctx context.Context, environ []string, newReader func(con
 		vars[name] = values[i]
 	}
 	return lookup, nil
+}
+
+// NewParameterReader returns a ParameterReader that uses the AWS SDK's
+// default credentials and calls each parameter's own region. The control
+// plane uses it to read its registry again.
+func NewParameterReader(ctx context.Context) (ParameterReader, error) {
+	return newSSMReader(ctx)
 }
 
 // newSSMReader reads parameters with the AWS SDK's default credentials, in

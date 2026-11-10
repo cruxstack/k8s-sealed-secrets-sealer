@@ -229,6 +229,15 @@ at most once every 30 seconds per issuer: anyone can send a token naming an
 unknown key. This mode is used locally and by anyone running outside AWS.
 [docs/deployment.md](deployment.md) shows the registry for both modes.
 
+**Registry changes.** A registry in a file or an SSM parameter is read
+again about once a minute, on a request rather than a timer (a Lambda
+instance is frozen between requests). A change takes effect for logins,
+sessions and the fleet at once, so removing an agent revokes it within
+about a minute, without a restart. A registry that cannot be read or is
+invalid is ignored: the one in force stays, and `registry.reload_failed` is
+logged. A registry given inline in an environment variable changes only
+with a restart.
+
 In both modes a successful login returns a short-lived agent session token
 (15 minutes), scoped to the agent API and bound to the agent ID. Every other
 agent call carries it.
@@ -1125,15 +1134,16 @@ exceed the agents' longest command poll (20 seconds), and API Gateway's 30
 seconds bound every request. The function keeps no state between requests:
 anything durable is in DynamoDB, and the remote JWKS of Kubernetes issuers
 are cached per instance. Secrets come from SSM Parameter Store: any setting
-may hold a parameter's ARN instead of its value, read once at start. The
-agent registry, which can outgrow Lambda's 4 KB of environment variables,
-can be given the same way (`APP_REGISTRY`, an advanced-tier parameter up to
-8 KB) or packaged as a file. The function's role needs `ssm:GetParameter`
-on those parameters (and `kms:Decrypt` for SecureStrings), the table's
-DynamoDB actions, and `kms:GenerateDataKey` on the transit key. Each agent
-holds a Lambda invocation most of the time, so past about 50 agents a
-container costs less; [docs/operations.md](operations.md) has the size
-limits and what each agent costs.
+may hold a parameter's ARN instead of its value, read at start. The agent
+registry, which can outgrow Lambda's 4 KB of environment variables, can be
+given the same way (`APP_REGISTRY`, an advanced-tier parameter up to 8 KB),
+and is then read again about once a minute (section 4), or packaged as a
+file. The function's role needs `ssm:GetParameter` on those parameters (and
+`kms:Decrypt` for SecureStrings), the table's DynamoDB actions, and
+`kms:GenerateDataKey` on the transit key. Each agent holds a Lambda
+invocation most of the time, so past about 50 agents a container costs
+less; [docs/operations.md](operations.md) has the size limits and what each
+agent costs.
 
 AWS infrastructure lives in a separate repository,
 `terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
@@ -1181,6 +1191,13 @@ whose registry must then know it; an agent that names no env is refused,
 and an env's agent sessions are signed with a key derived for it. Inside
 the process every env is its own server, with its own store, registry,
 transit key and agent sessions.
+
+Envs on one URL share the agent audience, so the control plane refuses an
+agent identity (an IAM role, or an issuer and service account) registered
+in two of them, at start and when a registry changes: one login would
+otherwise be accepted by both. It also refuses two envs naming the same
+transit key, since only separate keys let key policies keep envs apart.
+The admin token is shared unless an env sets its own (`adminToken`).
 
 The trade-off is isolation. A deployment per env keeps envs apart down to
 the IAM role: whoever can change the dev deployment cannot touch prod. A

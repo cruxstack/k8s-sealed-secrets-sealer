@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
@@ -45,10 +46,16 @@ type Options struct {
 	Version  string
 	Env      string
 	Registry *registry.Registry
-	// Logins verifies login requests, by login method.
-	Logins   map[string]LoginVerifier
-	Sessions *agentauth.Sessions
-	Store    store.Store
+	// Logins verifies login requests, by login method, against Registry.
+	Logins map[string]LoginVerifier
+	// ReloadRegistry, when set, reads the registry again and returns it
+	// with login verifiers built for it, or a nil registry when it has not
+	// changed. The server calls it about once a RegistryReloadInterval and
+	// serves what it returns from then on; when it fails, the server keeps
+	// what it has.
+	ReloadRegistry func(ctx context.Context) (*registry.Registry, map[string]LoginVerifier, error)
+	Sessions       *agentauth.Sessions
+	Store          store.Store
 	// AdminToken enables the admin API. Empty disables it.
 	AdminToken string
 	// Users admits people to the env's user API; nil disables it. Signing
@@ -80,14 +87,19 @@ const (
 	DefaultPollInterval   = 500 * time.Millisecond
 )
 
+// RegistryReloadInterval is how often a server with Options.ReloadRegistry
+// reads its registry again, and registryReloadTimeout bounds each read.
+const (
+	RegistryReloadInterval = time.Minute
+	registryReloadTimeout  = 10 * time.Second
+)
+
 // Server is the control plane's HTTP handler. The same handler runs behind
 // the HTTP server and the Lambda adapter.
 type Server struct {
 	logger     *slog.Logger
 	version    string
 	env        string
-	reg        *registry.Registry
-	logins     map[string]LoginVerifier
 	sessions   *agentauth.Sessions
 	store      store.Store
 	adminToken string
@@ -100,6 +112,14 @@ type Server struct {
 
 	keyRenewPeriod time.Duration
 	pollInterval   time.Duration
+
+	// agents is the registry in force and the login verifiers built for it,
+	// replaced together when the registry is read again
+	agents         atomic.Pointer[agentAccess]
+	reloadRegistry func(context.Context) (*registry.Registry, map[string]LoginVerifier, error)
+	reloadMu       sync.Mutex
+	// nextReload is when the registry is next read, in Unix nanoseconds
+	nextReload atomic.Int64
 
 	// knownKeys caches fingerprints already recorded, so repeated check-ins
 	// do not repeat conditional writes; knownEscrow caches fingerprints with
@@ -127,12 +147,10 @@ func New(opts Options) *Server {
 	if pollInterval <= 0 {
 		pollInterval = DefaultPollInterval
 	}
-	return &Server{
+	s := &Server{
 		logger:     logger,
 		version:    opts.Version,
 		env:        opts.Env,
-		reg:        opts.Registry,
-		logins:     opts.Logins,
 		sessions:   opts.Sessions,
 		store:      opts.Store,
 		adminToken: opts.AdminToken,
@@ -145,8 +163,64 @@ func New(opts Options) *Server {
 
 		keyRenewPeriod: keyRenewPeriod,
 		pollInterval:   pollInterval,
+		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
 		knownEscrow:    map[string]bool{},
+	}
+	s.agents.Store(&agentAccess{reg: opts.Registry, logins: opts.Logins})
+	s.nextReload.Store(now().Add(RegistryReloadInterval).UnixNano())
+	return s
+}
+
+// agentAccess is a registry and the login verifiers built for it.
+type agentAccess struct {
+	reg    *registry.Registry
+	logins map[string]LoginVerifier
+}
+
+// currentRegistry returns the registry in force. A handler reads it once
+// and uses that throughout.
+func (s *Server) currentRegistry() *registry.Registry { return s.agents.Load().reg }
+
+// readingRegistry reads the registry again, at most once a
+// RegistryReloadInterval, before passing a request on. It runs on requests
+// rather than a timer because a Lambda instance is frozen between them:
+// however long one slept, a removed agent is refused within about a minute.
+// Requests arriving while one reads it use the registry in force.
+func (s *Server) readingRegistry(next http.Handler) http.Handler {
+	if s.reloadRegistry == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.now().UnixNano() >= s.nextReload.Load() && s.reloadMu.TryLock() {
+			s.reloadRegistryNow(r.Context())
+			s.reloadMu.Unlock()
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// reloadRegistryNow reads the registry again unless another request just
+// did. It must hold reloadMu.
+func (s *Server) reloadRegistryNow(ctx context.Context) {
+	now := s.now()
+	if now.UnixNano() < s.nextReload.Load() {
+		return
+	}
+	// a failed read waits as long, so a broken source is not read on every
+	// request
+	s.nextReload.Store(now.Add(RegistryReloadInterval).UnixNano())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registryReloadTimeout)
+	defer cancel()
+	reg, logins, err := s.reloadRegistry(ctx)
+	switch {
+	case err != nil:
+		s.logger.ErrorContext(ctx, "failed to read the agent registry again; keeping the one in force",
+			"event", "registry.reload_failed", "env", s.env, "error", err)
+	case reg != nil:
+		s.agents.Store(&agentAccess{reg: reg, logins: logins})
+		s.logger.InfoContext(ctx, "agent registry changed",
+			"event", "registry.reloaded", "env", s.env, "agents", len(reg.Agents))
 	}
 }
 
@@ -194,7 +268,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", notFound)
 	mux.HandleFunc("/agent/", notFound)
 	mux.HandleFunc("/", notFound)
-	return httpserver.SecurityHeaders(s.hsts)(mux)
+	return httpserver.SecurityHeaders(s.hsts)(s.readingRegistry(mux))
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

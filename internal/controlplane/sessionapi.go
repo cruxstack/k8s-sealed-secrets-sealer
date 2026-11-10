@@ -141,7 +141,7 @@ func viewTargets(ts []store.Target) []targetView {
 // agentView names an agent from the registry; an agent since removed is
 // named by its ID alone.
 func (s *Server) agentView(id string) agentView {
-	if a, ok := s.reg.Agent(id); ok {
+	if a, ok := s.currentRegistry().Agent(id); ok {
 		return agentView{ID: a.ID, Cluster: a.Cluster, Region: a.Region}
 	}
 	return agentView{ID: id}

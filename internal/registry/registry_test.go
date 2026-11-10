@@ -62,10 +62,13 @@ issuers:
     jwksURL: https://x.example.com/keys
   - name: local
     url: https://ok.example.com
+  - name: again
+    url: https://ok.example.com
+    jwksURL: https://ok.example.com/keys
 agents:
   - id: Bad_ID
     cluster: blue
-    region: use1
+    region: USE1
     capabilities: [seal, seal, root]
     identity: {}
   - id: dup
@@ -95,6 +98,8 @@ agents:
 		"subject must be system:serviceaccount",
 		"duplicate id",
 		"cluster must be a DNS-1123 label",
+		"region must be a DNS-1123 label",
+		`issuers[2]: url is also issuer "local"'s`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)
@@ -196,5 +201,41 @@ agents:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)
 		}
+	}
+}
+
+func TestSharedIdentities(t *testing.T) {
+	dev, err := Parse([]byte(`
+issuers: [{name: blue, url: "https://oidc.example.com/blue", jwksFile: k.json}]
+agents:
+  - {id: dev-blue, cluster: blue, region: use1, identity: {k8s: {issuer: blue, subject: "system:serviceaccount:sealer:agent"}}}
+  - {id: dev-green, cluster: green, region: use1, identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/sealer/green"}}}
+  - {id: dev-red, cluster: red, region: use1, identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/red"}}}
+`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the same issuer under another name, the same role under another path
+	prod, err := Parse([]byte(`
+issuers: [{name: shared, url: "https://oidc.example.com/blue", jwksURL: "https://oidc.example.com/blue/keys"}]
+agents:
+  - {id: prod-blue, cluster: blue, region: use1, identity: {k8s: {issuer: shared, subject: "system:serviceaccount:sealer:agent"}}}
+  - {id: prod-green, cluster: green, region: use1, identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/other-path/green"}}}
+  - {id: prod-red, cluster: red, region: use1, identity: {aws: {roleArn: "arn:aws:iam::222222222222:role/red"}}}
+  - {id: prod-sa, cluster: sa, region: use1, identity: {k8s: {issuer: shared, subject: "system:serviceaccount:sealer:other"}}}
+`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := SharedIdentities(prod, dev)
+	want := []string{
+		`agent "prod-blue": service account system:serviceaccount:sealer:agent of issuer https://oidc.example.com/blue is also agent "dev-blue"'s`,
+		`agent "prod-green": IAM role green in account 111111111111 (aws) is also agent "dev-green"'s`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("SharedIdentities =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if got := SharedIdentities(dev, dev); len(got) != 3 {
+		t.Errorf("a registry shares %d identities with itself, want 3", len(got))
 	}
 }

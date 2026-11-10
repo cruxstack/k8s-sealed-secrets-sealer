@@ -23,7 +23,6 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
-	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
@@ -84,12 +83,13 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 	}
 
 	envs := make([]*controlplane.Server, len(cfgs))
+	registries := newEnvRegistries()
 	for i, cfg := range cfgs {
 		log := logger
 		if len(cfgs) > 1 {
 			log = logger.With("env", cfg.EnvName)
 		}
-		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, log); err != nil {
+		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, registries, log); err != nil {
 			return nil, fmt.Errorf("env %s: %w", cfg.EnvName, err)
 		}
 	}
@@ -104,12 +104,9 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 	}), nil
 }
 
-// newEnv returns one env's server.
-func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, logger *slog.Logger) (*controlplane.Server, error) {
-	reg, err := loadRegistry(cfg)
-	if err != nil {
-		return nil, err
-	}
+// newEnv returns one env's server. Its registry must not register an
+// identity that another env in registries does.
+func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, registries *envRegistries, logger *slog.Logger) (*controlplane.Server, error) {
 	sessions, err := agentauth.NewSessions(cfg.AgentSessionKey, cfg.PublicURL, cfg.EnvName, nil)
 	if err != nil {
 		return nil, err
@@ -118,18 +115,26 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 	if err != nil {
 		return nil, err
 	}
-	k8sLogins, err := agentauth.NewK8sVerifier(agentauth.K8sOptions{Registry: reg, Audience: cfg.AgentAudience})
+	agents := &envRegistry{
+		env: cfg.EnvName,
+		cfg: cfg,
+		logins: &envLogins{
+			audience: cfg.AgentAudience,
+			stsHosts: cfg.AWSSTSHosts,
+			replays:  st,
+			stsLimit: agentauth.NewSTSLimiter(),
+		},
+		all: registries,
+	}
+	reg, logins, err := agents.start(ctx)
 	if err != nil {
 		return nil, err
 	}
-	awsLogins, err := agentauth.NewAWSVerifier(agentauth.AWSOptions{
-		Registry:     reg,
-		Audience:     cfg.AgentAudience,
-		AllowedHosts: cfg.AWSSTSHosts,
-		Replays:      st,
-	})
-	if err != nil {
-		return nil, err
+	// a registry in a file or an SSM parameter is read again while the
+	// control plane runs, so removing an agent revokes it without a restart
+	var reload func(context.Context) (*registry.Registry, map[string]controlplane.LoginVerifier, error)
+	if agents.reloadable() {
+		reload = agents.reload
 	}
 	repoService, err := repos.New(repos.Options{
 		GitHub:      githubApp,
@@ -148,22 +153,20 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 
 	// the logger names the env
 	logger.InfoContext(ctx, "serving env",
-		"agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
+		"agents", len(reg.Agents), "registry_reload", reload != nil, "admin_api", cfg.AdminToken != "",
 		"github_teams", cfg.GitHubAllowedTeams, "github_admin_teams", cfg.GitHubAdminTeams)
 	return controlplane.New(controlplane.Options{
-		Logger:   logger,
-		Version:  version.Version,
-		Env:      cfg.EnvName,
-		Registry: reg,
-		Logins: map[string]controlplane.LoginVerifier{
-			protocol.MethodK8sOIDC: k8sLogins,
-			protocol.MethodAWSSTS:  awsLogins,
-		},
-		Sessions:   sessions,
-		Store:      st,
-		AdminToken: cfg.AdminToken,
-		Users:      users,
-		Repos:      repoService,
+		Logger:         logger,
+		Version:        version.Version,
+		Env:            cfg.EnvName,
+		Registry:       reg,
+		Logins:         logins,
+		ReloadRegistry: reload,
+		Sessions:       sessions,
+		Store:          st,
+		AdminToken:     cfg.AdminToken,
+		Users:          users,
+		Repos:          repoService,
 		// the control plane only ever generates data keys with it
 		Transit:      transit,
 		TransitKeyID: cfg.KMSTransitKeyID,
@@ -171,20 +174,6 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 
 		KeyRenewPeriod: cfg.KeyRenewPeriod,
 	}), nil
-}
-
-// loadRegistry reads the agent registry from its file or, when it is given
-// inline (as on Lambda, often from an SSM parameter), from the
-// configuration.
-func loadRegistry(cfg *config.ControlPlane) (*registry.Registry, error) {
-	if cfg.RegistryFile != "" {
-		return registry.Load(cfg.RegistryFile)
-	}
-	reg, err := registry.Parse(cfg.Registry, "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read APP_REGISTRY: %w", err)
-	}
-	return reg, nil
 }
 
 // newKMS returns the client for the transit key, as the one thing it may do

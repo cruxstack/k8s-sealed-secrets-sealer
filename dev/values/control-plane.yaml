@@ -14,7 +14,8 @@ envs:
     kmsTransitKeyId: alias/sealer-transit
   - name: prod
     dynamodbTable: sealer-prod
-    kmsTransitKeyId: alias/sealer-transit
+    # each env needs its own transit key
+    kmsTransitKeyId: alias/sealer-transit-prod
     allowedTeams: [sealer-admins]
 
 # Tilt sets publicURL and github.url to this stack's localhost ports, so the

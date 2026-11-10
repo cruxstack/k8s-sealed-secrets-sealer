@@ -120,6 +120,110 @@ envs:
 	}
 }
 
+func TestLoadControlPlanes_AdminTokenPerEnv(t *testing.T) {
+	const arn = "arn:aws:ssm:us-east-2:222222222222:parameter/sealer/prod/admin-token"
+	shared, devToken, prodToken := strings.Repeat("s", 32), strings.Repeat("d", 32), strings.Repeat("p", 32)
+	doc := `
+envs:
+  - {name: dev, dynamodbTable: a, kmsTransitKeyId: alias/dev, registryFile: r, adminToken: ` + devToken + `}
+  - {name: prod, dynamodbTable: b, kmsTransitKeyId: alias/prod, registryFile: r, adminToken: "` + arn + `"}
+  - {name: test, dynamodbTable: c, kmsTransitKeyId: alias/test, registryFile: r}
+`
+	cfgs, err := loadControlPlanes(env(sharedEnv(doc, map[string]string{"APP_ADMIN_TOKEN": shared})), func(got string) (string, error) {
+		if got != arn {
+			return "", errors.New("unexpected parameter " + got)
+		}
+		return prodToken, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// an env's own token replaces the shared one, which the rest keep
+	for i, want := range []string{devToken, prodToken, shared} {
+		if cfgs[i].AdminToken != want {
+			t.Errorf("%s's admin token is not its own", cfgs[i].EnvName)
+		}
+	}
+
+	_, err = loadControlPlanes(env(sharedEnv(`
+envs: [{name: dev, dynamodbTable: a, kmsTransitKeyId: k, registryFile: r, adminToken: short}]
+`, nil)), noSSM)
+	if err == nil || !strings.Contains(err.Error(), "APP_ENVS[dev]: APP_ADMIN_TOKEN must be at least 32 bytes") || strings.Contains(err.Error(), "short") {
+		t.Fatalf("a short admin token = %v", err)
+	}
+}
+
+func TestLoadControlPlanes_RegistryParameter(t *testing.T) {
+	const arn = "arn:aws:ssm:us-east-2:111111111111:parameter/sealer/dev/registry"
+	read := func(got string) (string, error) {
+		if got != arn {
+			return "", errors.New("unexpected parameter " + got)
+		}
+		return "agents: [{id: from-ssm}]", nil
+	}
+	// one env: APP_REGISTRY is read here, and its ARN kept to read again
+	vars := controlPlaneEnv(map[string]string{"APP_REGISTRY": arn})
+	delete(vars, "APP_REGISTRY_FILE")
+	cfgs, err := loadControlPlanes(env(vars), read)
+	if err != nil || string(cfgs[0].Registry) != "agents: [{id: from-ssm}]" || cfgs[0].RegistryParameter != arn {
+		t.Fatalf("one env's registry from ssm = %q from %q, %v", cfgs[0].Registry, cfgs[0].RegistryParameter, err)
+	}
+	if _, err := loadControlPlanes(env(vars), noSSM); err == nil || !strings.Contains(err.Error(), "APP_REGISTRY: failed to read SSM parameter "+arn) {
+		t.Fatalf("unreadable registry parameter = %v", err)
+	}
+
+	// several envs: only a registry read from SSM has a parameter
+	cfgs, err = loadControlPlanes(env(sharedEnv(`
+envs:
+  - {name: dev, dynamodbTable: a, kmsTransitKeyId: alias/dev, registry: "`+arn+`"}
+  - {name: prod, dynamodbTable: b, kmsTransitKeyId: alias/prod, registry: "agents: [{id: inline}]"}
+  - {name: test, dynamodbTable: c, kmsTransitKeyId: alias/test, registryFile: /etc/sealer/test.yaml}
+`, nil)), read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{arn, "", ""} {
+		if cfgs[i].RegistryParameter != want {
+			t.Errorf("%s's registry parameter = %q, want %q", cfgs[i].EnvName, cfgs[i].RegistryParameter, want)
+		}
+	}
+}
+
+func TestLoadControlPlanes_TransitKeyPerEnv(t *testing.T) {
+	envs := func(devKey, devRegion, prodKey, prodRegion string) string {
+		return `
+envs:
+  - {name: dev, dynamodbTable: a, registryFile: r, kmsTransitKeyId: "` + devKey + `", kmsRegion: "` + devRegion + `"}
+  - {name: prod, dynamodbTable: b, registryFile: r, kmsTransitKeyId: "` + prodKey + `", kmsRegion: "` + prodRegion + `"}
+`
+	}
+	const (
+		devARN  = "arn:aws:kms:us-east-2:111111111111:key/0123"
+		mrkUse1 = "arn:aws:kms:us-east-1:111111111111:key/mrk-0123"
+		mrkUse2 = "arn:aws:kms:us-east-2:111111111111:key/mrk-0123"
+	)
+	for name, tc := range map[string]struct {
+		doc    string
+		shared bool
+	}{
+		"the same key ARN":               {envs(devARN, "", devARN, ""), true},
+		"replicas of a multi-Region key": {envs(mrkUse1, "", mrkUse2, ""), true},
+		"a multi-Region key by its ID":   {envs("mrk-0123", "us-east-1", "mrk-0123", "us-east-2"), true},
+		"the same alias in one region":   {envs("alias/transit", "", "alias/transit", ""), true},
+		"the same alias in two regions":  {envs("alias/transit", "us-east-1", "alias/transit", "us-east-2"), false},
+		"keys in two accounts":           {envs(devARN, "", strings.Replace(devARN, "111111111111", "222222222222", 1), ""), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadControlPlanes(env(sharedEnv(tc.doc, nil)), noSSM)
+			refused := err != nil && strings.Contains(err.Error(), "APP_ENVS[prod]: transit key") &&
+				strings.Contains(err.Error(), "is also dev's; each env needs its own")
+			if refused != tc.shared || (!tc.shared && err != nil) {
+				t.Fatalf("loadControlPlanes = %v, want refused %v", err, tc.shared)
+			}
+		})
+	}
+}
+
 func TestLoadControlPlanes_Refuses(t *testing.T) {
 	cases := map[string]struct {
 		vars map[string]string

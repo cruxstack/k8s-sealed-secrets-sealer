@@ -278,7 +278,13 @@ agents:
 
 A role is matched by partition, account and name, so the same role name in
 another account is another agent. `roleId` can pin the role's unique ID as
-well.
+well. A role, or a service account of an issuer, can be in only one env's
+registry: envs on one URL would otherwise both accept its logins.
+
+The control plane reads a registry in an SSM parameter or a file again
+about once a minute, so adding or removing an agent needs no restart. If
+the new registry can't be read or is invalid, it keeps the old one and logs
+`registry.reload_failed`.
 
 A cluster that runs only at times, like `prod-use2-blue`, stays in the
 registry. While it is down, it keeps its last known keys: the env key, which

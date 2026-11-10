@@ -315,15 +315,16 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 
 // chooseSealer picks the agent for a seal and returns it with the env key.
 func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Time) (fleet.Agent, string, error) {
-	ids := make([]string, 0, len(s.reg.Agents))
-	for _, a := range s.reg.Agents {
+	reg := s.currentRegistry()
+	ids := make([]string, 0, len(reg.Agents))
+	for _, a := range reg.Agents {
 		ids = append(ids, a.ID)
 	}
 	states, err := s.store.GetAgentStates(ctx, ids)
 	if err != nil {
 		return fleet.Agent{}, "", err
 	}
-	f := fleet.Compute(s.env, s.reg, states, now)
+	f := fleet.Compute(s.env, reg, states, now)
 	// commands in flight, counted only for agents that might be chosen
 	inFlight := map[string]int{}
 	for _, a := range f.Agents {

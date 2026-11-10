@@ -3,9 +3,10 @@
 // that the AWS SDK reads its own standard variables (credentials, region).
 //
 // Any of the control plane's APP_ settings may instead hold the ARN of an
-// SSM Parameter Store parameter, whose value is read once at start. On
-// Lambda this keeps secrets out of environment variables, and lets the agent
-// registry be larger than environment variables allow.
+// SSM Parameter Store parameter, whose value is read at start. On Lambda
+// this keeps secrets out of environment variables, and lets the agent
+// registry be larger than environment variables allow. The registry's
+// parameter is read again while the control plane runs.
 package config
 
 import (
@@ -71,9 +72,14 @@ type ControlPlane struct {
 	// holds it inline instead; exactly one of the two is set.
 	RegistryFile string
 	Registry     []byte
+	// RegistryParameter is the ARN of the SSM parameter Registry was read
+	// from, if it was. The control plane reads a registry file or parameter
+	// again to pick up changes; an inline one only changes with a restart.
+	RegistryParameter string
 	// AgentSessionKey signs agent session tokens.
 	AgentSessionKey []byte
-	// AdminToken enables the admin API when set.
+	// AdminToken enables the admin API when set. With APP_ENVS, an env may
+	// have its own instead of the shared one.
 	AdminToken string
 
 	DynamoDBTable string

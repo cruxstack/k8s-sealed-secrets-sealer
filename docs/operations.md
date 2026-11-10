@@ -9,9 +9,10 @@ limits and cost, upgrades, backups and restore, and troubleshooting.
 
 The admin API gives automation, such as monitoring, an env's fleet without
 a GitHub sign-in. It exists only when `APP_ADMIN_TOKEN` is set (in the
-control plane chart, through `existingSecret`), and the token must be at
-least 32 bytes. One token reads every env the control plane serves. It only
-reads: nothing in the admin API changes anything.
+control plane chart, through `existingSecret`) or an env sets its own
+`adminToken`, and a token must be at least 32 bytes. `APP_ADMIN_TOKEN`
+reads every env that doesn't set its own; an env's `adminToken` reads only
+that env. It only reads: nothing in the admin API changes anything.
 
 | Route                                | Answers                                   |
 | ------------------------------------ | ----------------------------------------- |

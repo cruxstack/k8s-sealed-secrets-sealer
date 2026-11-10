@@ -35,7 +35,7 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxSessionBody, &req) {
 		return
 	}
-	verifier, ok := s.logins[req.Method]
+	verifier, ok := s.agents.Load().logins[req.Method]
 	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported login method")
 		return
@@ -76,8 +76,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *reg
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		// an agent removed from the registry loses access with its session
-		agent, ok := s.reg.Agent(id)
+		// an agent removed from the registry loses access with its session,
+		// or when the registry is next read (Options.ReloadRegistry)
+		agent, ok := s.currentRegistry().Agent(id)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
