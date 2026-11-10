@@ -24,6 +24,29 @@ func TestSealFits(t *testing.T) {
 	}
 }
 
+func TestNegotiate(t *testing.T) {
+	ours := []string{"v2", "v1"}
+	cases := map[string]struct {
+		in   CheckIn
+		want string
+	}{
+		"single field":               {CheckIn{Protocol: "v1"}, "v1"},
+		"list":                       {CheckIn{Protocols: []string{"v1", "v2"}}, "v2"},
+		"list with the single field": {CheckIn{Protocol: "v1", Protocols: []string{"v1", "v3"}}, "v1"},
+		"newer agent":                {CheckIn{Protocol: "v3", Protocols: []string{"v3", "v2"}}, "v2"},
+		"none in common":             {CheckIn{Protocol: "v9", Protocols: []string{"v8"}}, ""},
+		"none sent":                  {CheckIn{}, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, ok := Negotiate(tc.in, ours)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("Negotiate = %q, %v, want %q", got, ok, tc.want)
+			}
+		})
+	}
+}
+
 func TestFingerprintPath_RoundTrips(t *testing.T) {
 	fp := "SHA256:ab+c/d="
 	if seg := FingerprintPath(fp); seg != "SHA256:ab-c_d=" || ParseFingerprintPath(seg) != fp {

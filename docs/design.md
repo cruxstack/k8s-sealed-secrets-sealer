@@ -324,10 +324,19 @@ a creation time, an expiry and a typed payload. The rules:
   reached or answers with a server error, until the command expires.
 - **Long-poll within API Gateway limits.** The control plane holds a poll for
   up to 20 seconds, under the API Gateway integration timeout, checking
-  DynamoDB for new commands in the meantime. The cost is roughly one held
-  Lambda invocation per agent ([docs/operations.md](operations.md#cost-and-scale)
-  has the numbers). An API Gateway WebSocket API is a possible later
-  optimization; the protocol does not depend on the transport.
+  DynamoDB for new commands in the meantime. Each check reads only the
+  commands queued in the last 11 minutes (the longest a command lives, and a
+  minute for clocks), a range of command IDs, not every command kept. The
+  cost is roughly one held Lambda invocation per agent
+  ([docs/operations.md](operations.md#cost-and-scale) has the numbers). An
+  API Gateway WebSocket API is a possible later optimization; the protocol
+  does not depend on the transport.
+- **A leased command is sent.** A command leased into a response that is
+  never written is lost until it expires. A poll ends within 25 seconds,
+  store calls included, and leases a command only while 3 seconds are left to
+  respond. One poll leases at most 16 commands and 512 KiB, well within what
+  agents read (1 MiB) and Lambda returns; the rest wait for the next poll. If
+  a lease fails after others, the poll still sends those.
 - **Capabilities come from the agent's Helm values,** never from the control
   plane. Values decide which RBAC is installed and which handlers the agent
   enables. An agent refuses a command for a capability it does not have, and
@@ -347,6 +356,25 @@ when all are off): it still checks in, reporting its controller's active
 key.
 
 v1 has no command that deletes or disables anything.
+
+**Compatibility.** Messages change without breaking the other side:
+
+- The control plane ignores fields it does not know in what agents send
+  (logins, check-ins, results, escrow uploads), and agents ignore them in
+  responses. Either side can add a field.
+- Command payloads are strict: an agent refuses a payload with a field it
+  does not know. A changed payload is a new command type, such as `seal.v2`.
+  The control plane sends a type only to agents whose check-in lists it, so
+  agents not yet upgraded keep getting the old one.
+- A check-in may list the protocol versions the agent speaks in
+  `protocols`; `protocol`, the one version agents name today, is still
+  accepted beside it or alone. The control plane uses the newest version both
+  speak, and refuses a check-in with none.
+
+**Upgrades.** Upgrade the control plane first, then the agents, cluster by
+cluster. A control plane supports agents up to one minor version behind it.
+Agents newer than their control plane are not supported: they may rely on
+what it does not know yet.
 
 ## 6. Seal flow
 
@@ -771,7 +799,10 @@ default; `0` turns renewal off). Two postures are supported:
   renew period. If no in-scope cluster in the env is known to have renewal
   on, the control plane sends `renewal.enable.v1` to one healthy agent that
   has the `renewal` capability and can read its controller's flags, chosen
-  deterministically (the lowest agent ID). The agent patches its controller
+  deterministically (the lowest agent ID), at that agent's check-in but never
+  its first: agents that start together check in at once, each before the
+  others' states are stored, and each could take itself for the lowest. The
+  agent patches its controller
   Deployment's arguments to set the configured period (`keyRenewPeriod` in
   the control plane's chart, 30 days by default), which rolls the
   controller, and logs `renewal.enabled`. The flag it sets overrides any
@@ -890,9 +921,12 @@ shows creating one.
 | Key            | `KEY#<fp>`         | `META`              | none                  |
 | Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
 | Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
+| Session count  | `USER#<user id>`   | `SESSIONS`          | session's maximum age |
 | Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
 | Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | session's maximum age |
+| Change places  | `SESSION#<id>`     | `CHANGES`           | last place's end      |
 | Login replay   | `REPLAY#<hash>`    | `REPLAY`            | signature expiry      |
+| Rate window    | `RATE#<key>#<end>` | `RATE`              | window end            |
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
   controller settings, key set. Commands in flight are counted from the
@@ -903,7 +937,11 @@ shows creating one.
   milliseconds (`deadline`), so leasing and results are conditional writes
   that check it. A seal's encrypted value is kept in its own attribute and
   removed when the command is leased; a seal's result keeps only a summary,
-  since its ciphertexts go to the pending change.
+  since its ciphertexts go to the pending change. Polls, seals and pull
+  requests look for open commands only among those queued in the last 11
+  minutes, and key sync among those of the last 16, which covers commands
+  that finished recently: command IDs are ULIDs, so each is a range of sort
+  keys.
 - **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time).
   Which clusters hold a key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
@@ -913,14 +951,24 @@ shows creating one.
   idle expiry and maximum age. Using a session (sealing, removing a change)
   moves its idle expiry an hour on, but never past its maximum age of 8
   hours. Keying sessions by user makes ownership structural: a user can only
-  ever address their own. Live sessions per user are capped at 10 by
-  counting them with a query, and a session holds at most 50 pending
-  changes. While a pull request is opened from it, the session is locked
+  ever address their own. Live sessions per user are capped at 10, and a
+  session at 50 pending changes, even under concurrent requests (below).
+  While a pull request is opened from it, the session is locked
   (`submit_deadline`, epoch milliseconds, 2 minutes at most): sealing,
   removing a change and discarding are refused, and a seal queues its
   command before it marks the session used, so a seal is either in the pull
   request or refused. File content is not stored; it is fetched again at the
   base commit when the pull request is opened.
+- **Session count:** a version number. Opening a session counts the user's
+  live sessions with a query, then writes the session and the next version
+  in one transaction, on condition the version is still the one read before
+  the query. Of two sessions opened at once, one is written and the other
+  counts again.
+- **Change places:** a version, and the changes that seals still running
+  will make, each held until its seal's command expires and a minute more.
+  A seal counts the session's pending changes and these places, and adds its
+  own on condition the version has not moved, so seals still running count
+  toward the 50. A seal that fails keeps its place until it lapses.
 - **Seal:** the command carrying a requested seal and the agent it went to,
   with the file, key, regions, targets and requesting user, so the UI can
   follow its progress.
@@ -935,6 +983,9 @@ shows creating one.
   stored apart from the targets so listings leave them out; they are
   never returned to clients. Never plaintext. Discarding a session leaves
   its seals and changes to expire unreachable.
+
+- **Rate window:** how many requests of one kind a user (or session) made in
+  one fixed minute (section 12). A request over the limit is not counted.
 
 **Audit trail.** The table keeps no audit records: commands and sessions
 expire, and agent state is replaced on every check-in. The audit trail is
@@ -1036,9 +1087,23 @@ one. The pull requests are a second, lasting record: each commit's
   `/api/v1/envs/{env}/`; signing in, `/me` (the user and their envs) and
   signing out are under `/api/v1/auth/`. With a single env its API is also
   at `/api/v1/`.
-- **Rate limits** use API Gateway throttling and WAF rate-based rules.
-  In-memory limiters do not hold across Lambda instances, so limits that
-  matter (sessions per user) are enforced with DynamoDB.
+- **Rate limits** use API Gateway throttling and WAF rate-based rules per
+  client. In-memory limiters do not hold across Lambda instances, so limits
+  that matter (sessions per user, and the per-user limits below) are
+  enforced with DynamoDB. Each call that costs GitHub requests, KMS or agent
+  work has a fixed one-minute window per user, generous for a person using
+  the UI and tight for a script. A request over a limit gets 429 with
+  `Retry-After` and logs `request.rate_limited`; a request that fails still
+  counts. When the count cannot be written the request goes through: the
+  limits guard the service and must not stop it.
+
+  | Call                      | Requests a minute           |
+  | ------------------------- | --------------------------- |
+  | List repositories         | 10 per user                 |
+  | List a repository's files | 30 per user                 |
+  | Open a session            | 10 per user                 |
+  | Seal a value              | 20 per session, 30 per user |
+  | Open a pull request       | 5 per user                  |
 - **Secrets the control plane needs** (GitHub App private key, OAuth client
   secret, session keys, admin token) come from SSM Parameter Store, which
   suits Lambda: a setting may hold a parameter's ARN, read once at start.
@@ -1186,7 +1251,7 @@ SBOMs.
 **On Lambda** the control plane is the same HTTP handler as in a container,
 behind an API Gateway HTTP API (payload format 2.0, `$default` stage) or a
 function URL; CloudFront and WAF sit in front. The function's timeout must
-exceed the agents' longest command poll (20 seconds), and API Gateway's 30
+exceed the agents' longest command poll (25 seconds), and API Gateway's 30
 seconds bound every request. The function keeps no state between requests:
 anything durable is in DynamoDB, and the remote JWKS of Kubernetes issuers
 are cached per instance. Secrets come from SSM Parameter Store: any setting

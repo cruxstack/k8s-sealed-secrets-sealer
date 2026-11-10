@@ -64,11 +64,19 @@ type Store interface {
 	// request's signature) until expires, and reports whether this call
 	// recorded it. A false result means the key was already used.
 	PutReplayIfAbsent(ctx context.Context, key string, expires time.Time) (bool, error)
+	// CountRequest counts a request against key in the fixed window that
+	// ends at windowEnd, and reports whether it is within limit. A request
+	// over the limit is not counted.
+	CountRequest(ctx context.Context, key string, limit int, windowEnd time.Time) (bool, error)
 
 	// PutCommand queues a command.
 	PutCommand(ctx context.Context, c CommandRecord) error
 	// Commands returns an agent's commands, oldest first.
 	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
+	// CommandsSince returns an agent's commands whose IDs (ULIDs) were made
+	// at or after since, oldest first. It reads only those, not every
+	// command kept.
+	CommandsSince(ctx context.Context, agentID string, since time.Time) ([]CommandRecord, error)
 	// Command returns one of an agent's commands.
 	Command(ctx context.Context, agentID, id string) (CommandRecord, bool, error)
 	// LeaseCommand moves a queued, unexpired command to leased, and reports
@@ -90,7 +98,7 @@ type Store interface {
 	// CreateSession stores a session unless its user already has a live
 	// one for the repository, which it returns instead, reporting whether
 	// this call created one. It fails with ErrTooManySessions when the user
-	// already has max live sessions.
+	// already has max live sessions, even with concurrent calls.
 	CreateSession(ctx context.Context, s Session, max int, now time.Time) (Session, bool, error)
 	// Session returns a user's live session for a repository (RepoKey).
 	Session(ctx context.Context, userID int64, repoKey string, now time.Time) (Session, bool, error)
@@ -119,6 +127,13 @@ type Store interface {
 	PutSeal(ctx context.Context, s Seal) error
 	// Seal returns a seal requested in a session.
 	Seal(ctx context.Context, sessionID, commandID string) (Seal, bool, error)
+	// ReserveChange holds a place among a session's at most max pending
+	// changes for the change a seal is about to make, until until, by when
+	// the seal has made it or expired. existing lists the session's pending
+	// changes as just read. It fails with ErrTooManyChanges when they and
+	// the places other seals hold come to max without changeID, even with
+	// concurrent calls.
+	ReserveChange(ctx context.Context, sessionID, changeID string, existing []string, max int, until, now time.Time) error
 	// PutChange stores a pending change, replacing the one for the same
 	// file and key unless that came from a newer seal, and reports whether
 	// it did.

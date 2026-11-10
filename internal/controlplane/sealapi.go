@@ -31,6 +31,10 @@ import (
 const (
 	// sealCommandTTL is how long a seal waits to be leased and run.
 	sealCommandTTL = 2 * time.Minute
+	// sealChangeHold is how long a seal holds a place among its session's
+	// pending changes: until its command expires, and a minute for a
+	// result recorded as it does.
+	sealChangeHold = sealCommandTTL + time.Minute
 	// maxSealBody bounds a seal request: a value of MaxSealValueBytes,
 	// even with JSON escaping, and its path and key.
 	maxSealBody = 512 << 10
@@ -213,11 +217,22 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "failed to read pending changes", err)
 		return
 	}
-	if len(changes) >= maxChangesPerSession && !slices.ContainsFunc(changes, func(c store.Change) bool {
-		return c.ID == changeID(file.Path, in.Key, sealFor)
-	}) {
+	existing := make([]string, len(changes))
+	for i, c := range changes {
+		existing[i] = c.ID
+	}
+	// seals still running count toward the cap too: each holds its
+	// change's place until it is done
+	reservedAt := s.now().UTC()
+	err = s.store.ReserveChange(ctx, sess.ID, changeID(file.Path, in.Key, sealFor), existing,
+		maxChangesPerSession, reservedAt.Add(sealChangeHold), reservedAt)
+	switch {
+	case errors.Is(err, store.ErrTooManyChanges):
 		writeError(w, http.StatusConflict, fmt.Sprintf(
 			"this session holds %d pending changes, the most it can; open a pull request with them first", maxChangesPerSession))
+		return
+	case err != nil:
+		s.internalError(w, r, "failed to reserve a pending change", err)
 		return
 	}
 
@@ -331,15 +346,11 @@ func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Ti
 		if !a.Healthy {
 			continue
 		}
-		cmds, err := s.store.Commands(ctx, a.ID)
+		cmds, err := s.openCommands(ctx, a.ID, now)
 		if err != nil {
 			return fleet.Agent{}, "", err
 		}
-		for _, c := range cmds {
-			if c.Open(now) {
-				inFlight[a.ID]++
-			}
-		}
+		inFlight[a.ID] = len(cmds)
 	}
 	agent, err := fleet.ChooseSealer(f, regions, inFlight)
 	if err != nil {
@@ -550,9 +561,8 @@ func checkSealResult(cmd store.CommandRecord, raw json.RawMessage, res *protocol
 	if err := json.Unmarshal([]byte(cmd.Payload), &p); err != nil {
 		return fmt.Errorf("failed to decode the command's payload: %w", err)
 	}
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if len(raw) == 0 || dec.Decode(res) != nil {
+	// fields a newer agent adds are ignored, as in every agent message
+	if len(raw) == 0 || json.Unmarshal(raw, res) != nil {
 		return errors.New("not a seal result")
 	}
 	if res.Fingerprint != p.Fingerprint {

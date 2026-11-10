@@ -44,7 +44,7 @@ func (s *Server) agentPutEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		return
 	}
 	var in protocol.EscrowUpload
-	if !decodeJSON(w, r, maxEscrowBody, &in) {
+	if !decodeAgentJSON(w, r, maxEscrowBody, &in) {
 		return
 	}
 	if msg := validateEscrow(in, s.env, fp); msg != "" {

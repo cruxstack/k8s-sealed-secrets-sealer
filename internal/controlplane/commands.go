@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,6 +21,23 @@ const (
 	// maxPollWait is the longest a commands poll is held, under API
 	// Gateway's integration timeout.
 	maxPollWait = 20 * time.Second
+	// pollTimeout bounds a whole commands poll, its store calls included,
+	// so the response is written within API Gateway's 30 seconds.
+	pollTimeout = 25 * time.Second
+	// leaseMargin is the least time a poll must have left to lease another
+	// command: a command leased into a response that is never written is
+	// lost.
+	leaseMargin = 3 * time.Second
+	// maxPollCommands and maxPollBytes bound the commands one poll leases.
+	// Agents read at most 1 MiB of a response, and the Lambda adapter sends
+	// at most 4 MiB (cmd/lambda); the largest command, a seal of the
+	// largest value, is about 100 KiB.
+	maxPollCommands = 16
+	maxPollBytes    = 512 << 10
+	// commandLookback is how far back a read of open commands looks: the
+	// longest any command lives, and a minute for clocks that differ
+	// between instances. A command type that lives longer belongs here.
+	commandLookback = max(sealCommandTTL, keyCommandTTL) + time.Minute
 	// maxResultBody bounds a command result: a seal's ciphertexts, at most
 	// protocol.SealBudgetBytes in base64, with their names.
 	maxResultBody = 512 << 10
@@ -39,14 +57,18 @@ func (s *Server) agentCommands(w http.ResponseWriter, r *http.Request, agent *re
 		}
 		wait = min(time.Duration(n)*time.Second, maxPollWait)
 	}
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), pollTimeout)
+	defer cancel()
 	deadline := time.Now().Add(wait)
 	for {
 		leased, err := s.leaseCommands(ctx, agent)
 		if err != nil {
-			s.logger.ErrorContext(ctx, "failed to lease commands", "agent_id", agent.ID, "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+			s.logger.ErrorContext(ctx, "failed to lease commands", "agent_id", agent.ID, "leased", len(leased), "error", err)
+			if len(leased) == 0 {
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			// what was leased goes out; held back, it would be lost
 		}
 		if len(leased) > 0 || !time.Now().Add(s.pollInterval).Before(deadline) {
 			httpserver.WriteJSON(w, http.StatusOK, protocol.CommandsResponse{Commands: leased})
@@ -54,35 +76,56 @@ func (s *Server) agentCommands(w http.ResponseWriter, r *http.Request, agent *re
 		}
 		select {
 		case <-ctx.Done():
+			if r.Context().Err() == nil {
+				// the store was slow; the agent polls again
+				httpserver.WriteJSON(w, http.StatusOK, protocol.CommandsResponse{Commands: []protocol.Command{}})
+			}
 			return
 		case <-time.After(s.pollInterval):
 		}
 	}
 }
 
-// leaseCommands leases every queued, unexpired command the agent may run.
-// A command the agent is no longer registered for stays queued and expires.
+// leaseCommands leases the agent's queued, unexpired commands it may run,
+// oldest first, as many as one response carries. It stops early when ctx
+// leaves too little time to send the response, and returns what it leased
+// with any error, since those commands are leased whether or not they are
+// sent. A command the agent is no longer registered for stays queued and
+// expires.
 func (s *Server) leaseCommands(ctx context.Context, agent *registry.Agent) ([]protocol.Command, error) {
-	records, err := s.store.Commands(ctx, agent.ID)
+	now := s.now().UTC()
+	records, err := s.openCommands(ctx, agent.ID, now)
 	if err != nil {
 		return nil, err
 	}
-	now := s.now().UTC()
 	leased := []protocol.Command{}
+	size := 0
 	for _, c := range records {
-		if c.Status != store.CommandQueued || !c.Open(now) {
+		if c.Status != store.CommandQueued {
 			continue
 		}
 		if capability := protocol.CommandCapability[c.Type]; capability == "" || !agent.HasCapability(capability) {
 			continue
 		}
-		cmd, err := c.Protocol()
+		if len(leased) == maxPollCommands {
+			break
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < leaseMargin {
+			break
+		}
+		cmd, n, err := sendable(c)
 		if err != nil {
-			return nil, err
+			// a broken record stays queued and expires; it must not hold
+			// back the commands after it
+			s.logger.ErrorContext(ctx, "failed to prepare command", "agent_id", agent.ID, "command_id", c.ID, "error", err)
+			continue
+		}
+		if len(leased) > 0 && size+n > maxPollBytes {
+			break
 		}
 		ok, err := s.store.LeaseCommand(ctx, agent.ID, c.ID, now)
 		if err != nil {
-			return nil, err
+			return leased, err
 		}
 		if !ok {
 			// leased by a concurrent poll, or expired meanwhile
@@ -91,8 +134,41 @@ func (s *Server) leaseCommands(ctx context.Context, agent *registry.Agent) ([]pr
 		s.logger.InfoContext(ctx, "command leased",
 			"event", "command.leased", "env", s.env, "agent_id", agent.ID, "command_id", c.ID, "type", c.Type)
 		leased = append(leased, cmd)
+		size += n
 	}
 	return leased, nil
+}
+
+// sendable returns a command as an agent receives it, with its size in a
+// response.
+func sendable(c store.CommandRecord) (protocol.Command, int, error) {
+	cmd, err := c.Protocol()
+	if err != nil {
+		return protocol.Command{}, 0, err
+	}
+	b, err := json.Marshal(cmd)
+	if err != nil {
+		return protocol.Command{}, 0, fmt.Errorf("failed to encode command %s: %w", c.ID, err)
+	}
+	return cmd, len(b), nil
+}
+
+// openCommands returns an agent's open commands, oldest first. It reads only
+// those queued within commandLookback, not every command kept for the audit
+// trail. The lookback is measured on the wall clock, which stamps command
+// IDs (ULIDs) as they are made.
+func (s *Server) openCommands(ctx context.Context, agentID string, now time.Time) ([]store.CommandRecord, error) {
+	records, err := s.store.CommandsSince(ctx, agentID, time.Now().Add(-commandLookback))
+	if err != nil {
+		return nil, err
+	}
+	open := records[:0]
+	for _, c := range records {
+		if c.Open(now) {
+			open = append(open, c)
+		}
+	}
+	return open, nil
 }
 
 // agentCommandResult accepts the outcome of a command the agent leased.
@@ -103,7 +179,7 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 	var in protocol.CommandResult
-	if !decodeJSON(w, r, maxResultBody, &in) {
+	if !decodeAgentJSON(w, r, maxResultBody, &in) {
 		return
 	}
 	switch {

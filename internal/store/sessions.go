@@ -11,6 +11,9 @@ var (
 	// ErrTooManySessions is returned when a user already has the most live
 	// sessions allowed.
 	ErrTooManySessions = errors.New("too many open sessions")
+	// ErrTooManyChanges is returned when a session already holds, or is
+	// about to hold, the most pending changes allowed.
+	ErrTooManyChanges = errors.New("too many pending changes")
 	// ErrSessionBusy is returned when a session is locked while a pull
 	// request is opened from it.
 	ErrSessionBusy = errors.New("a pull request is being opened from this session")
@@ -39,6 +42,28 @@ type Session struct {
 	// opened from the session: until then, or until the lock is released,
 	// the session cannot be used.
 	SubmitDeadline int64 `dynamodbav:"submit_deadline,omitempty"`
+}
+
+// reserveChange decides a ReserveChange for both stores. reserved maps the
+// change IDs seals hold places for to when each place lapses (epoch
+// milliseconds). It returns the places to keep, changeID's among them.
+func reserveChange(reserved map[string]int64, changeID string, existing []string, limit int, until, now time.Time) (map[string]int64, error) {
+	held := map[string]bool{}
+	for _, id := range existing {
+		held[id] = true
+	}
+	kept := map[string]int64{}
+	for id, lapses := range reserved {
+		if lapses > now.UnixMilli() {
+			kept[id] = lapses
+			held[id] = true
+		}
+	}
+	if !held[changeID] && len(held) >= limit {
+		return nil, ErrTooManyChanges
+	}
+	kept[changeID] = max(kept[changeID], until.UnixMilli())
+	return kept, nil
 }
 
 // Live reports whether the session is still open at now.

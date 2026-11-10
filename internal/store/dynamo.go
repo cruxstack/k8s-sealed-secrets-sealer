@@ -24,9 +24,11 @@ const (
 	agentPrefix  = "AGENT#"
 	keyPrefix    = "KEY#"
 	replayPrefix = "REPLAY#"
+	ratePrefix   = "RATE#"
 	skState      = "STATE"
 	skMeta       = "META"
 	skReplay     = "REPLAY"
+	skRate       = "RATE"
 	skEscrow     = "ESCROW"
 	cmdPrefix    = "CMD#"
 
@@ -191,6 +193,31 @@ func (d *Dynamo) PutReplayIfAbsent(ctx context.Context, key string, expires time
 	return true, nil
 }
 
+func (d *Dynamo) CountRequest(ctx context.Context, key string, limit int, windowEnd time.Time) (bool, error) {
+	end := strconv.FormatInt(windowEnd.Unix(), 10)
+	// one item per window; "count" is a reserved word
+	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &d.table,
+		Key:                      itemKey(ratePrefix+key+"#"+end, skRate),
+		UpdateExpression:         aws.String("ADD #n :one SET " + attrExpiresAt + " = :ttl"),
+		ConditionExpression:      aws.String("attribute_not_exists(#n) OR #n < :limit"),
+		ExpressionAttributeNames: map[string]string{"#n": "requests"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":one":   &types.AttributeValueMemberN{Value: "1"},
+			":limit": &types.AttributeValueMemberN{Value: strconv.Itoa(limit)},
+			":ttl":   &types.AttributeValueMemberN{Value: end},
+		},
+	})
+	var over *types.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &over):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to count request for %s: %w", key, err)
+	}
+	return true, nil
+}
+
 type commandItem struct {
 	PK        string `dynamodbav:"pk"`
 	SK        string `dynamodbav:"sk"`
@@ -229,15 +256,27 @@ func (d *Dynamo) PutCommand(ctx context.Context, c CommandRecord) error {
 }
 
 func (d *Dynamo) Commands(ctx context.Context, agentID string) ([]CommandRecord, error) {
+	return d.commands(ctx, agentID, "begins_with(sk, :cmd)", map[string]types.AttributeValue{
+		":cmd": &types.AttributeValueMemberS{Value: cmdPrefix},
+	})
+}
+
+func (d *Dynamo) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]CommandRecord, error) {
+	return d.commands(ctx, agentID, "sk BETWEEN :from AND :to", map[string]types.AttributeValue{
+		":from": &types.AttributeValueMemberS{Value: cmdPrefix + commandIDFloor(since)},
+		":to":   &types.AttributeValueMemberS{Value: cmdPrefix + commandIDCeiling},
+	})
+}
+
+// commands reads an agent's commands whose sort keys meet skCondition.
+func (d *Dynamo) commands(ctx context.Context, agentID, skCondition string, values map[string]types.AttributeValue) ([]CommandRecord, error) {
 	var out []CommandRecord
+	values[":pk"] = &types.AttributeValueMemberS{Value: agentPrefix + agentID}
 	in := &dynamodb.QueryInput{
-		TableName:              &d.table,
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :cmd)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk":  &types.AttributeValueMemberS{Value: agentPrefix + agentID},
-			":cmd": &types.AttributeValueMemberS{Value: cmdPrefix},
-		},
-		ConsistentRead: aws.Bool(true),
+		TableName:                 &d.table,
+		KeyConditionExpression:    aws.String("pk = :pk AND " + skCondition),
+		ExpressionAttributeValues: values,
+		ConsistentRead:            aws.Bool(true),
 	}
 	for {
 		res, err := d.api.Query(ctx, in)

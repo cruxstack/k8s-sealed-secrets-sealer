@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
@@ -193,7 +195,12 @@ func TestKeySync_EscrowRestoreAndRenewal(t *testing.T) {
 		t.Fatalf("c escrow_needed = %v", got)
 	}
 
-	// a is the only agent able to renew, so it is asked to
+	// a is the only agent able to renew, so it is asked to, at its next
+	// check-in: never on a first one
+	if cmds := sh.poll("a"); len(cmds) != 0 {
+		t.Fatalf("a commands after its first check-in = %+v", cmds)
+	}
+	sh.checkIn("a", "0s", ka)
 	cmds := sh.poll("a")
 	if len(cmds) != 1 || cmds[0].Type != protocol.CommandRenewalEnable {
 		t.Fatalf("a commands = %+v", cmds)
@@ -358,6 +365,9 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		}
 	}
 
+	// commands are read by when their IDs (ULIDs) were made
+	first, expired, other := ulid.Make().String(), ulid.Make().String(), ulid.Make().String()
+
 	// a held poll returns as soon as a command is queued
 	done := make(chan []protocol.Command, 1)
 	go func() {
@@ -367,10 +377,10 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		done <- resp.Commands
 	}()
 	time.Sleep(50 * time.Millisecond)
-	put("a", "01J00000000000000000000001", protocol.CommandRenewalEnable, now.Add(time.Minute))
+	put("a", first, protocol.CommandRenewalEnable, now.Add(time.Minute))
 	select {
 	case cmds := <-done:
-		if len(cmds) != 1 || cmds[0].ID != "01J00000000000000000000001" {
+		if len(cmds) != 1 || cmds[0].ID != first {
 			t.Fatalf("held poll = %+v", cmds)
 		}
 	case <-time.After(3 * time.Second):
@@ -379,8 +389,8 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 
 	// expired commands, and commands the agent is not registered for, are
 	// never delivered
-	put("a", "01J00000000000000000000002", protocol.CommandKeysRestore, now.Add(-time.Second))
-	put("c", "01J00000000000000000000003", protocol.CommandKeysRestore, now.Add(time.Minute))
+	put("a", expired, protocol.CommandKeysRestore, now.Add(-time.Second))
+	put("c", other, protocol.CommandKeysRestore, now.Add(time.Minute))
 	if cmds := sh.poll("a"); len(cmds) != 0 {
 		t.Fatalf("a commands = %+v", cmds)
 	}
@@ -389,7 +399,7 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 	}
 
 	// results: only the leasing agent, valid status, before expiry
-	id := "01J00000000000000000000001"
+	id := first
 	cases := map[string]struct {
 		agent, id string
 		body      any
@@ -398,9 +408,9 @@ func TestCommands_LongPollAndResults(t *testing.T) {
 		"other agent":   {"b", id, protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusNotFound},
 		"bad status":    {"a", id, protocol.CommandResult{Status: "done"}, http.StatusBadRequest},
 		"bad id":        {"a", "not-a-ulid", protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusNotFound},
-		"unknown field": {"a", id, `{"status":"succeeded","extra":1}`, http.StatusBadRequest},
+		"unknown field": {"c", other, `{"status":"succeeded","extra":1}`, http.StatusConflict}, // read, then refused as unleased
 		"long error":    {"a", id, protocol.CommandResult{Status: protocol.CommandFailed, Error: strings.Repeat("e", maxResultError+1)}, http.StatusBadRequest},
-		"unleased":      {"c", "01J00000000000000000000003", protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusConflict},
+		"unleased":      {"c", other, protocol.CommandResult{Status: protocol.CommandSucceeded}, http.StatusConflict},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -440,12 +450,19 @@ agents:
 	}
 	plan := func(self string, states map[string]store.AgentState, cmds []store.CommandRecord) bool {
 		a, _ := reg.Agent(self)
-		return planKeySync(fleet.Compute("dev", reg, states, now), a, states[self], cmds, nil, now).EnableRenewal
+		return planKeySync(fleet.Compute("dev", reg, states, now), a, states[self], false, cmds, nil, now).EnableRenewal
 	}
 
 	off := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "0s", 0)}
 	if !plan("a", off, nil) || plan("b", off, nil) {
 		t.Error("renewal should be asked of a (lowest ID) only")
+	}
+	// never on an agent's first check-in: one that starts beside others
+	// checks in before their states are stored, and each could see itself
+	// as the lowest
+	a, _ := reg.Agent("a")
+	if planKeySync(fleet.Compute("dev", reg, off, now), a, off["a"], true, nil, nil, now).EnableRenewal {
+		t.Error("renewal was asked on a's first check-in")
 	}
 	on := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "720h0m0s", 0)}
 	if plan("a", on, nil) || plan("b", on, nil) {

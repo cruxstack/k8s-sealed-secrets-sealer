@@ -245,9 +245,11 @@ func (s *Server) Handler() http.Handler {
 		// the fleet is for admins; everyone sees whether sealing works
 		mux.HandleFunc("GET /api/v1/fleet", u.RequireUser(u.RequireAdmin(s.fleet)))
 		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
+		// calls that cost GitHub requests, KMS or agent work are rate
+		// limited per user, after sign-in and CSRF checks
 		if s.repos != nil {
-			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.listRepos))
-			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.listFiles))
+			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.limit(s.listRepos, limitRepos)))
+			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.limit(s.listFiles, limitFiles)))
 		}
 		if s.repos != nil && s.transit != nil {
 			// state-changing routes need the CSRF token
@@ -255,12 +257,12 @@ func (s *Server) Handler() http.Handler {
 			const session = "/api/v1/repos/{owner}/{repo}/session"
 			mux.HandleFunc("GET /api/v1/sessions", u.RequireUser(s.listSessions))
 			mux.HandleFunc("GET "+session, u.RequireUser(s.getSession))
-			mux.HandleFunc("POST "+session, write(s.createSession))
+			mux.HandleFunc("POST "+session, write(s.limit(s.createSession, limitSessions)))
 			mux.HandleFunc("DELETE "+session+"/{id}", write(s.deleteSession))
-			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.requestSeal))
+			mux.HandleFunc("POST "+session+"/{id}/seals", write(s.limit(s.requestSeal, limitSessionSeals, limitSeals)))
 			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
 			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
-			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.createPullRequest))
+			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.limit(s.createPullRequest, limitPulls)))
 		}
 	}
 
@@ -279,15 +281,28 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	httpserver.WriteJSON(w, status, protocol.Error{Error: msg})
 }
 
-// decodeJSON reads a JSON body of at most limit bytes with no unknown fields.
-// On failure it writes the error response and returns false.
+// decodeJSON reads a user API body: JSON of at most limit bytes with no
+// unknown fields. On failure it writes the error response and returns false.
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	return decodeBody(w, r, limit, v, true)
+}
+
+// decodeAgentJSON reads an agent API body: JSON of at most limit bytes. It
+// ignores fields it does not know, so an agent of a newer version can send
+// more than this control plane reads (docs/design.md, section 5).
+func decodeAgentJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	return decodeBody(w, r, limit, v, false)
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, limit int64, v any, strict bool) bool {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
 		return false
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {

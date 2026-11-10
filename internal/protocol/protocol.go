@@ -1,6 +1,11 @@
 // Package protocol defines the messages agents and the control plane
 // exchange over /agent/v1. Both sides import it, so a change here is a
 // protocol change; see docs/design.md, section 5.
+//
+// Messages change compatibly: the control plane ignores fields it does not
+// know in what agents send, so a field can be added without breaking agents
+// or control planes of the previous version. A command payload is strict
+// instead: changing one is a new command type, such as seal.v2.
 package protocol
 
 import (
@@ -12,6 +17,12 @@ import (
 
 // Version is the protocol version agents speak.
 const Version = "v1"
+
+// Versions lists the protocol versions this build speaks, newest first.
+var Versions = []string{Version}
+
+// MaxProtocols bounds the protocol versions one check-in may list.
+const MaxProtocols = 16
 
 // Capabilities an agent can have. They come from the agent's Helm values and
 // the agent registry; the control plane never grants them.
@@ -120,7 +131,11 @@ type SessionResponse struct {
 // CheckIn reports an agent's state. Agents send one every check-in
 // interval.
 type CheckIn struct {
-	Protocol     string     `json:"protocol"`
+	// Protocol is the one protocol version agents without Protocols send.
+	Protocol string `json:"protocol"`
+	// Protocols lists every protocol version the agent speaks; the control
+	// plane uses the newest it speaks too (Negotiate).
+	Protocols    []string   `json:"protocols,omitempty"`
 	AgentVersion string     `json:"agent_version"`
 	Capabilities []string   `json:"capabilities"`
 	Commands     []string   `json:"commands"`
@@ -130,6 +145,18 @@ type CheckIn struct {
 	// active certificate (it lacks the keys capability), so Keys may not be
 	// the controller's whole key set.
 	KeysComplete bool `json:"keys_complete"`
+}
+
+// Negotiate returns the newest of ours (newest first) that the agent speaks:
+// one in its Protocols or, from an agent that sends only the one, its
+// Protocol. It reports false when there is none.
+func Negotiate(in CheckIn, ours []string) (string, bool) {
+	for _, v := range ours {
+		if v == in.Protocol || slices.Contains(in.Protocols, v) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // Controller describes the sealed-secrets controller beside the agent.

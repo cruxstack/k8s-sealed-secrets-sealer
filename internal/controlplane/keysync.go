@@ -24,6 +24,11 @@ const (
 	settleAfterSuccess = 2 * time.Minute
 	// retryAfterFailure holds off re-issuing work a command failed to do.
 	retryAfterFailure = 5 * time.Minute
+	// keyCommandLookback is how far back key sync reads an agent's
+	// commands: a key command finishes within keyCommandTTL and holds off
+	// its work for up to retryAfterFailure after, and a minute covers
+	// clocks that differ between instances.
+	keyCommandLookback = keyCommandTTL + max(settleAfterSuccess, retryAfterFailure) + time.Minute
 )
 
 // keySyncPlan is what one agent's check-in leads to.
@@ -44,12 +49,12 @@ type keySyncPlan struct {
 // Every decision is about the checking-in agent only, and each agent checks
 // in serially, so concurrent check-ins from different agents cannot queue
 // the same command twice.
-func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, commands []store.CommandRecord, escrowed map[string]bool, now time.Time) keySyncPlan {
+func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, escrowed map[string]bool, now time.Time) keySyncPlan {
 	var plan keySyncPlan
 	if !canRun(self, state, protocol.CommandKeysRestore) {
 		// without the keys capability the agent can neither upload nor
 		// restore; it may not even see its whole key set
-		return planRenewal(plan, f, self, state, commands, now)
+		return planRenewal(plan, f, self, state, firstCheckIn, commands, now)
 	}
 	for _, k := range state.Keys {
 		if !escrowed[k.Fingerprint] {
@@ -74,14 +79,20 @@ func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, co
 			plan.Restore = plan.Restore[:protocol.MaxKeys]
 		}
 	}
-	return planRenewal(plan, f, self, state, commands, now)
+	return planRenewal(plan, f, self, state, firstCheckIn, commands, now)
 }
 
 // planRenewal turns renewal on in one cluster when no in-scope cluster has it
 // on. The cluster is chosen deterministically: the healthy, in-scope agent
 // with the lowest ID that can run renewal.enable.v1 and whose renewal period
-// it can read. Only that agent's own check-in queues the command.
-func planRenewal(plan keySyncPlan, f fleet.Fleet, self *registry.Agent, state store.AgentState, commands []store.CommandRecord, now time.Time) keySyncPlan {
+// it can read. Only that agent's own check-in queues the command, and never
+// its first: agents that start together check in at once, each before the
+// others' states are stored, so on a first check-in each could see itself as
+// the lowest. By their next check-in they see each other.
+func planRenewal(plan keySyncPlan, f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, now time.Time) keySyncPlan {
+	if firstCheckIn {
+		return plan
+	}
 	candidate := ""
 	for _, a := range f.Agents {
 		if !a.InScope {
@@ -164,19 +175,22 @@ func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]
 	return busy
 }
 
-// syncKeys runs the key sync plan for an agent that just checked in, queues
-// its commands, and returns the keys it should escrow.
-func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState) ([]string, error) {
+// agentStates reads every registered agent's latest state.
+func (s *Server) agentStates(ctx context.Context) (map[string]store.AgentState, error) {
 	reg := s.currentRegistry()
 	ids := make([]string, 0, len(reg.Agents))
 	for _, a := range reg.Agents {
 		ids = append(ids, a.ID)
 	}
-	states, err := s.store.GetAgentStates(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	// the store may lag this agent's own write; the check-in is newer
+	return s.store.GetAgentStates(ctx, ids)
+}
+
+// syncKeys runs the key sync plan for an agent that just checked in, queues
+// its commands, and returns the keys it should escrow.
+func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, states map[string]store.AgentState) ([]string, error) {
+	reg := s.currentRegistry()
+	// states were read before this check-in was stored
+	_, seen := states[self.ID]
 	states[self.ID] = state
 	now := s.now().UTC()
 	f := fleet.Compute(s.env, reg, states, now)
@@ -191,12 +205,14 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 	if err != nil {
 		return nil, err
 	}
-	commands, err := s.store.Commands(ctx, self.ID)
+	// only the commands recent enough to count; their IDs (ULIDs) are
+	// stamped with the wall clock
+	commands, err := s.store.CommandsSince(ctx, self.ID, time.Now().Add(-keyCommandLookback))
 	if err != nil {
 		return nil, err
 	}
 
-	plan := planKeySync(f, self, state, commands, escrowed, now)
+	plan := planKeySync(f, self, state, !seen, commands, escrowed, now)
 	if len(plan.Restore) > 0 {
 		if err := s.queue(ctx, self, protocol.CommandKeysRestore, protocol.KeysRestorePayload{Fingerprints: plan.Restore}, now); err != nil {
 			return nil, err

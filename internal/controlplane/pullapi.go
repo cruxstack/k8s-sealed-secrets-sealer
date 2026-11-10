@@ -159,12 +159,12 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 // sealed.
 func (s *Server) sealsRunning(ctx context.Context, sessionID string, now time.Time) (bool, error) {
 	for _, a := range s.currentRegistry().Agents {
-		cmds, err := s.store.Commands(ctx, a.ID)
+		cmds, err := s.openCommands(ctx, a.ID, now)
 		if err != nil {
 			return false, err
 		}
 		for _, c := range cmds {
-			if c.SessionID == sessionID && c.Open(now) {
+			if c.SessionID == sessionID {
 				return true, nil
 			}
 		}
