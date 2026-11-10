@@ -192,14 +192,21 @@ plane:
    anything else;
 2. accepts only the headers a signed STS call needs (`Authorization`,
    `X-Amz-Date`, `X-Amz-Security-Token`, `Content-Type` and the audience
-   header), requires the audience header to equal its own URL and to be
-   among the signed headers, and requires the signature date to be within
-   15 minutes of now;
-3. forwards the request to STS, never following a redirect, and maps the
-   returned assumed-role ARN to a registered agent;
-4. records a hash of the signature only after STS accepted it (so forged
-   requests can't fill the table) and rejects any later use of it; the
-   record outlives the signature's validity window.
+   header), each once: a name given twice, in any mix of case, is refused,
+   so the checks and STS can't read different copies. It requires the
+   audience header to equal its own URL and to be among the signed headers,
+   and the signature date to be within 15 minutes of now;
+3. forwards exactly the headers it checked to STS, never following a
+   redirect, and maps the returned assumed-role ARN to a registered agent;
+4. records a hash of the forwarded signature only after STS accepted it (so
+   forged requests can't fill the table) and rejects any later use of it;
+   the record outlives the signature's validity window.
+
+Anyone can send a request that passes the first two steps, so calls to STS
+are limited per env and process: a burst of 100, then one a second. That
+lets a whole fleet log in at once after a restart, while each agent logs in
+only every 14 minutes. Past the limit a login gets 429, logged as
+`agent.login_throttled`, and the agent tries again later.
 
 STS reports an assumed role without the role's path, so a role is matched by
 partition, account and name, which IAM keeps unique per account. A registry
@@ -216,9 +223,11 @@ OIDC issuer (signature via the issuer's JWKS, `iss`, `aud`, `exp`) and requires
 `sub` to equal the registered `system:serviceaccount:<namespace>:<name>`. An
 issuer is registered with its JWKS URL, and a CA bundle when that URL's
 certificate is not publicly trusted, or with a JWKS file holding its keys
-when the control plane cannot reach it. This mode is used locally and by
-anyone running outside AWS. [docs/deployment.md](deployment.md) shows the
-registry for both modes.
+when the control plane cannot reach it. A remote JWKS is fetched on first
+use and again when a token names a key it lacks, as issuers rotate keys, but
+at most once every 30 seconds per issuer: anyone can send a token naming an
+unknown key. This mode is used locally and by anyone running outside AWS.
+[docs/deployment.md](deployment.md) shows the registry for both modes.
 
 In both modes a successful login returns a short-lived agent session token
 (15 minutes), scoped to the agent API and bound to the agent ID. Every other
@@ -900,8 +909,10 @@ one. The pull requests are a second, lasting record: each commit's
 ## 12. User authentication and authorization
 
 - **Login** is GitHub OAuth (scope `read:org`). A random state goes in a
-  short-lived HttpOnly cookie scoped to the callback path and is compared
-  in constant time; `return_to` is honored only for same-origin paths. The
+  short-lived HttpOnly cookie and is compared in constant time; over https
+  it is a `__Host-` cookie like the session's, so a sibling subdomain
+  cannot plant its own state and finish its own sign-in in someone else's
+  browser. `return_to` is honored only for same-origin paths. The
   user must be a member of the configured org and, when teams are
   configured, an active member of at least one of them.
 - **Session.** An HttpOnly, SameSite=Lax cookie holding a JWT signed with
@@ -987,7 +998,8 @@ ignores every other document, so fleets can share a repository without
 touching each other's documents. The region annotation says which region a
 document is for: a seal can be limited to some regions' documents (section
 6, "Region-specific values"), the agent is preferably chosen in them, and
-the UI shows keys per region. Files that
+the UI shows keys per region. A region is a lowercase DNS label of at most
+63 characters, like the registry's (`use1`). Files that
 already use other annotation names keep working by configuring the keys to
 match them.
 
@@ -1031,13 +1043,13 @@ one that matches but cannot be parsed is listed with the reason.
 
 Each document's decryption label comes from its own metadata, the same place
 the controller reads it. A document cannot be sealed into when its scope is
-`cluster-wide`, it has no namespace or name, it uses the legacy `spec.data`
-format or another `apiVersion`, or its `encryptedData` is not a mapping; the
-UI shows why. A file with a duplicate key in any mapping is refused as a
-whole, because tools may resolve the duplicate differently (a second
-`namespace:` read first here and last by another parser would change the
-label). Documents are numbered as the YAML parser sees them: empty documents
-are not counted.
+`cluster-wide`, it has no namespace or name, its region is not a valid
+region, it uses the legacy `spec.data` format or another `apiVersion`, or
+its `encryptedData` is not a mapping; the UI shows why. A file with a
+duplicate key in any mapping is refused as a whole, because tools may
+resolve the duplicate differently (a second `namespace:` read first here and
+last by another parser would change the label). Documents are numbered as
+the YAML parser sees them: empty documents are not counted.
 
 ## 14. Local development
 

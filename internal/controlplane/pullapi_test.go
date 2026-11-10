@@ -19,6 +19,7 @@ import (
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
 
 const search = "deploy/search/sealed-secret.yaml"
@@ -192,6 +193,21 @@ func TestPullRequestText_OneChange(t *testing.T) {
 	}
 	if !strings.Contains(view.Body, "Based on `main` at "+sess.Commit) {
 		t.Fatalf("body:\n%s", view.Body)
+	}
+}
+
+// A change stored before regions were checked may name any region; its
+// commit message must still hold only the lines the control plane writes.
+func TestPullRequestText_KeepsRegionsOnOneLine(t *testing.T) {
+	s := &Server{env: "dev"}
+	text := s.pullRequestText(store.Session{Branch: "main", Commit: strings.Repeat("a", 40)},
+		&userauth.User{ID: 1, Login: "alice"},
+		[]store.Change{{Path: "apps/sealed.yaml", Key: "token", Fingerprint: "SHA256:x",
+			Regions: []string{"use1)\n\nSigned-off-by: Mallory <m@example.com>\nCo-authored-by: x <x@example.com>\n(x"}}})
+	for _, line := range strings.Split(text.message+"\n"+text.body, "\n") {
+		if strings.HasPrefix(line, "Signed-off-by:") || strings.HasPrefix(line, "Co-authored-by:") {
+			t.Fatalf("pull request text carries a forged line %q:\n%s\n\n%s", line, text.message, text.body)
+		}
 	}
 }
 

@@ -197,7 +197,8 @@ func (s *Server) pullRequestText(sess store.Session, user *userauth.User, change
 		}
 		key := c.Key
 		if len(c.Regions) > 0 {
-			key += " (" + strings.Join(c.Regions, ", ") + ")"
+			// changes stored before regions were checked may hold any text
+			key += " (" + plain(strings.Join(c.Regions, ", ")) + ")"
 		}
 		keysByPath[c.Path] = append(keysByPath[c.Path], key)
 		keys = append(keys, c.Key)

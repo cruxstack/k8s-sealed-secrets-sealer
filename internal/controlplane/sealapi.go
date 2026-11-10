@@ -38,9 +38,8 @@ const (
 	maxPathBytes = 1024
 	// maxCiphertextChars bounds one base64 ciphertext in a seal result.
 	maxCiphertextChars = (protocol.MaxSealValueBytes+protocol.SealOverheadBytes)*4/3 + 4
-	// maxRegions bounds the regions a seal names, and maxRegionBytes each.
-	maxRegions     = 64
-	maxRegionBytes = 253
+	// maxRegions bounds the regions a seal names.
+	maxRegions = 64
 )
 
 // Seal statuses, as users see them.
@@ -105,8 +104,8 @@ func sealRegions(named []string, docs []manifest.Document) ([]string, error) {
 	slices.Sort(regions)
 	regions = slices.Compact(regions)
 	for _, r := range regions {
-		if r == "" || len(r) > maxRegionBytes {
-			return nil, errors.New("regions must be non-empty names")
+		if !manifest.IsRegion(r) {
+			return nil, errors.New("regions must be region names: lowercase DNS labels of at most 63 characters")
 		}
 		if !have[r] {
 			return nil, fmt.Errorf("no document of this file for the env is in region %q", r)

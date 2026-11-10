@@ -5,10 +5,13 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,6 +159,95 @@ func TestK8sVerifier_RemoteJWKS(t *testing.T) {
 	}
 	if _, err := v.Verify(context.Background(), sign(t, key, "k1", goodSpec())); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// jwksServer serves a JWKS that a test can change, and counts fetches.
+type jwksServer struct {
+	srv     *httptest.Server
+	caPath  string
+	fetches atomic.Int32
+	mu      sync.Mutex
+	body    []byte
+}
+
+func newJWKSServer(t *testing.T, body []byte) *jwksServer {
+	t.Helper()
+	j := &jwksServer{body: body}
+	j.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		j.fetches.Add(1)
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(j.body)
+	}))
+	t.Cleanup(j.srv.Close)
+	j.caPath = filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(j.caPath, testcerts.PEM(j.srv.Certificate()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+func (j *jwksServer) serve(body []byte) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.body = body
+}
+
+func (j *jwksServer) verifier(t *testing.T, now func() time.Time, previous *K8sVerifier) *K8sVerifier {
+	t.Helper()
+	reg := registryWith(t, "issuers: [{name: local, url: \""+issuerURL+"\", jwksURL: \""+j.srv.URL+"/keys\", caFile: \""+j.caPath+"\"}]")
+	v, err := NewK8sVerifier(K8sOptions{Registry: reg, Audience: audience, Now: now, Previous: previous})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func TestK8sVerifier_RefetchesJWKSAtMostEvery30s(t *testing.T) {
+	key, rotated, forged := testRSA(t), testRSA(t), testRSA(t)
+	j := newJWKSServer(t, jwksJSON(t, key, "k1"))
+	now := time.Now()
+	clock := func() time.Time { return now }
+	v := j.verifier(t, clock, nil)
+	ctx := context.Background()
+
+	if _, err := v.Verify(ctx, sign(t, key, "k1", goodSpec())); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	// tokens naming keys the issuer never published, sent by anyone
+	for i := range 50 {
+		if _, err := v.Verify(ctx, sign(t, forged, fmt.Sprintf("forged-%d", i), goodSpec())); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("forged token = %v", err)
+		}
+	}
+	if n := j.fetches.Load(); n != 1 {
+		t.Fatalf("jwks fetched %d times within 30s, want once", n)
+	}
+
+	// the issuer rotates; its new key is fetched once the floor has passed
+	j.serve(jwksJSON(t, rotated, "k2"))
+	now = now.Add(31 * time.Second)
+	for range 5 {
+		if _, err := v.Verify(ctx, sign(t, rotated, "k2", goodSpec())); err != nil {
+			t.Fatalf("Verify with the rotated key: %v", err)
+		}
+	}
+	if n := j.fetches.Load(); n != 2 {
+		t.Fatalf("jwks fetched %d times, want 2", n)
+	}
+
+	// a verifier for a changed registry keeps the key set and its floor
+	next := j.verifier(t, clock, v)
+	if _, err := next.Verify(ctx, sign(t, rotated, "k2", goodSpec())); err != nil {
+		t.Fatalf("Verify after the registry changed: %v", err)
+	}
+	if _, err := next.Verify(ctx, sign(t, forged, "forged", goodSpec())); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("forged token = %v", err)
+	}
+	if n := j.fetches.Load(); n != 2 {
+		t.Fatalf("jwks fetched %d times after the registry changed, want still 2", n)
 	}
 }
 

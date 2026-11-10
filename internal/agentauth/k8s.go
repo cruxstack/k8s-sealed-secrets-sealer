@@ -37,13 +37,23 @@ type K8sVerifier struct {
 	reg       *registry.Registry
 	verifiers map[string]*oidc.IDTokenVerifier // by issuer URL
 	names     map[string]string                // issuer URL -> registry name
+	// remote holds the remote key sets, for the next verifier to reuse
+	remote map[jwksSource]*remoteKeySet
 }
+
+// jwksSource is where a remote key set comes from.
+type jwksSource struct{ url, caFile string }
 
 // K8sOptions configures a K8sVerifier.
 type K8sOptions struct {
 	Registry *registry.Registry
 	// Audience is the aud claim tokens must carry: this control plane's URL.
 	Audience string
+	// Previous is the verifier this one replaces, for a changed registry.
+	// Its remote key sets are kept for issuers whose JWKS URL and CA file
+	// are unchanged, so keys are not fetched again and the refetch floor
+	// holds across the change.
+	Previous *K8sVerifier
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -58,11 +68,31 @@ func NewK8sVerifier(opts K8sOptions) (*K8sVerifier, error) {
 		reg:       opts.Registry,
 		verifiers: map[string]*oidc.IDTokenVerifier{},
 		names:     map[string]string{},
+		remote:    map[jwksSource]*remoteKeySet{},
 	}
 	for _, is := range opts.Registry.Issuers {
-		keySet, err := keySetFor(is)
-		if err != nil {
-			return nil, err
+		var keySet oidc.KeySet
+		if is.JWKSFile != "" {
+			ks, err := fileKeySet(is)
+			if err != nil {
+				return nil, err
+			}
+			keySet = ks
+		} else {
+			src := jwksSource{url: is.JWKSURL, caFile: is.CAFile}
+			ks := v.remote[src]
+			if ks == nil && opts.Previous != nil {
+				ks = opts.Previous.remote[src]
+			}
+			if ks == nil {
+				client, err := jwksClient(is)
+				if err != nil {
+					return nil, err
+				}
+				ks = newRemoteKeySet(is.JWKSURL, client, opts.Now)
+			}
+			v.remote[src] = ks
+			keySet = ks
 		}
 		v.verifiers[is.URL] = oidc.NewVerifier(is.URL, keySet, &oidc.Config{
 			ClientID:             opts.Audience,
@@ -127,32 +157,34 @@ func unverifiedIssuer(token string) (string, error) {
 	return claims.Issuer, nil
 }
 
-func keySetFor(is registry.Issuer) (oidc.KeySet, error) {
-	if is.JWKSFile != "" {
-		data, err := os.ReadFile(is.JWKSFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read jwks for issuer %s: %w", is.Name, err)
-		}
-		var set jose.JSONWebKeySet
-		if err := json.Unmarshal(data, &set); err != nil {
-			return nil, fmt.Errorf("failed to parse jwks for issuer %s: %w", is.Name, err)
-		}
-		var pub []crypto.PublicKey
-		for _, k := range set.Keys {
-			if k.Use != "" && k.Use != "sig" {
-				continue
-			}
-			if !k.IsPublic() {
-				return nil, fmt.Errorf("failed to parse jwks for issuer %s: key %q is not a public key", is.Name, k.KeyID)
-			}
-			pub = append(pub, k.Key)
-		}
-		if len(pub) == 0 {
-			return nil, fmt.Errorf("failed to parse jwks for issuer %s: no signing keys", is.Name)
-		}
-		return &oidc.StaticKeySet{PublicKeys: pub}, nil
+// fileKeySet reads an issuer's JWKS file.
+func fileKeySet(is registry.Issuer) (oidc.KeySet, error) {
+	data, err := os.ReadFile(is.JWKSFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read jwks for issuer %s: %w", is.Name, err)
 	}
+	var set jose.JSONWebKeySet
+	if err := json.Unmarshal(data, &set); err != nil {
+		return nil, fmt.Errorf("failed to parse jwks for issuer %s: %w", is.Name, err)
+	}
+	var pub []crypto.PublicKey
+	for _, k := range set.Keys {
+		if k.Use != "" && k.Use != "sig" {
+			continue
+		}
+		if !k.IsPublic() {
+			return nil, fmt.Errorf("failed to parse jwks for issuer %s: key %q is not a public key", is.Name, k.KeyID)
+		}
+		pub = append(pub, k.Key)
+	}
+	if len(pub) == 0 {
+		return nil, fmt.Errorf("failed to parse jwks for issuer %s: no signing keys", is.Name)
+	}
+	return &oidc.StaticKeySet{PublicKeys: pub}, nil
+}
 
+// jwksClient returns the client that fetches an issuer's remote JWKS.
+func jwksClient(is registry.Issuer) (*http.Client, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	if is.CAFile != "" {
 		pem, err := os.ReadFile(is.CAFile)
@@ -165,7 +197,5 @@ func keySetFor(is registry.Issuer) (oidc.KeySet, error) {
 		}
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	}
-	// the key set keeps this context for every later fetch, so it must not
-	// be a request's context
-	return oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), is.JWKSURL), nil
+	return client, nil
 }

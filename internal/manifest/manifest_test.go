@@ -74,6 +74,12 @@ spec:
 		"list data":      {doc("a", "ns", "", "encryptedData: [x]"), ScopeStrict, "not a mapping"},
 		"null data":      {doc("a", "ns", "", "encryptedData:"), ScopeStrict, ""},
 		"other version":  {strings.Replace(doc("a", "ns", "", "encryptedData: {}"), "v1alpha1", "v2", 1), ScopeStrict, "apiVersion"},
+		"region":         {doc("a", "ns", `    k8s-sealed-secrets-sealer/region: use1-a`, "encryptedData: {}"), ScopeStrict, ""},
+		"region upper":   {doc("a", "ns", `    k8s-sealed-secrets-sealer/region: USE1`, "encryptedData: {}"), ScopeStrict, "region annotation is not a valid region"},
+		"region lines": {doc("a", "ns", `    k8s-sealed-secrets-sealer/region: "use1)\n\nCo-authored-by: x <x@example.com>"`, "encryptedData: {}"),
+			ScopeStrict, "region annotation is not a valid region"},
+		"region too long": {doc("a", "ns", `    k8s-sealed-secrets-sealer/region: `+strings.Repeat("a", 64), "encryptedData: {}"),
+			ScopeStrict, "region annotation is not a valid region"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -90,6 +96,39 @@ spec:
 	docs, _ := Find([]byte(cases["strict"].yaml), ann, "dev")
 	if !slices.Equal(docs[0].Keys, []string{"a", "b"}) {
 		t.Errorf("keys = %v, want sorted [a b]", docs[0].Keys)
+	}
+}
+
+func TestFind_BadRegionMarksOnlyItsDocument(t *testing.T) {
+	content := `
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: app
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/region: "use1\nSigned-off-by: x"
+spec:
+  encryptedData: {}
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: app
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/region: use2
+spec:
+  encryptedData: {}
+`
+	docs, err := Find([]byte(content), ann, "dev")
+	if err != nil || len(docs) != 2 {
+		t.Fatalf("docs = %+v, err = %v", docs, err)
+	}
+	if docs[0].Sealable() || !strings.Contains(docs[0].Problem, "region") || !docs[1].Sealable() {
+		t.Fatalf("documents = %+v, want only the first unsealable", docs)
 	}
 }
 
