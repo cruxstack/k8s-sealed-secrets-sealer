@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -356,8 +357,13 @@ func TestSealFlow(t *testing.T) {
 	if len(res) != 1 || res[0].Status != protocol.CommandSucceeded {
 		t.Fatalf("agent results = %+v", res)
 	}
-	if cmd, _, _ := sh.store.Command(context.Background(), seal.Agent.ID, seal.ID); cmd.Secret != "" || strings.Contains(cmd.Result, "Ag") {
-		t.Fatalf("finished command keeps the secret or the ciphertexts: %+v", cmd)
+	// the finished command keeps only a summary: the fingerprint and how
+	// many targets, never the ciphertexts
+	cmd, _, _ = sh.store.Command(context.Background(), seal.Agent.ID, seal.ID)
+	var summary map[string]json.RawMessage
+	if cmd.Secret != "" || json.Unmarshal([]byte(cmd.Result), &summary) != nil || len(summary) != 2 ||
+		string(summary["fingerprint"]) != strconv.Quote(sh.key.Fingerprint) || string(summary["targets"]) != "3" {
+		t.Fatalf("finished command keeps the secret or more than a summary: %+v", cmd)
 	}
 	done := sh.sealStatus(sess.ID, seal.ID)
 	if done.Status != sealSealed || done.ChangeID == "" {
