@@ -133,7 +133,11 @@ func (s *Service) render(ctx context.Context, r githubapp.Repository, snap snaps
 	}
 	docs, err := manifest.Find(content, s.ann, s.env)
 	if err != nil {
-		return githubapp.FileChange{}, &FileError{Path: filePath, Reason: userError(err)}
+		reason, ok := contentError(err)
+		if !ok {
+			reason = "file could not be parsed"
+		}
+		return githubapp.FileChange{}, &FileError{Path: filePath, Reason: reason}
 	}
 	type slot struct {
 		doc int

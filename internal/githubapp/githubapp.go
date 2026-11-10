@@ -5,6 +5,10 @@
 // so callers must check the signed-in user's own permission (Permission)
 // before acting for them. Each token is minted with only the permissions
 // its use needs.
+//
+// The client never retries: a request GitHub refuses for its rate limit
+// fails with a RateLimitError that says when to try again, and the client
+// warns (event github.rate_limit_low) once a budget runs low.
 package githubapp
 
 import (
@@ -17,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -32,6 +37,42 @@ import (
 // object does not exist, or the App cannot see it.
 var ErrNotFound = errors.New("not found on GitHub")
 
+// StatusError is a request GitHub refused, other than with 404 (ErrNotFound)
+// or for a rate limit (RateLimitError).
+type StatusError struct {
+	Status  int
+	Message string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("github returned %d: %s", e.Status, e.Message)
+}
+
+// RateLimitError is a request GitHub refused because the App used up a rate
+// limit: its hourly budget (primary) or a limit on bursts (secondary).
+type RateLimitError struct {
+	// Status is GitHub's answer, 403 or 429.
+	Status int
+	// RetryAt is when GitHub accepts requests again.
+	RetryAt time.Time
+	// Secondary is set for a secondary rate limit.
+	Secondary bool
+}
+
+func (e *RateLimitError) Error() string {
+	limit := "rate limit"
+	if e.Secondary {
+		limit = "secondary rate limit"
+	}
+	return fmt.Sprintf("github returned %d: %s exceeded until %s", e.Status, limit, e.RetryAt.UTC().Format(time.RFC3339))
+}
+
+// RetryAfter is how long after now to try again: at least a second, so a
+// clock behind GitHub's never says "now".
+func (e *RateLimitError) RetryAfter(now time.Time) time.Duration {
+	return max(e.RetryAt.Sub(now), time.Second)
+}
+
 // Limits on what is read from GitHub.
 const (
 	maxResponseBytes = 4 << 20
@@ -43,6 +84,12 @@ const (
 	// tokenRefreshBefore renews an installation token this long before it
 	// expires.
 	tokenRefreshBefore = 5 * time.Minute
+	// secondaryLimitWait is how long GitHub asks clients to wait after a
+	// secondary rate limit that names no time.
+	secondaryLimitWait = time.Minute
+	// lowRateLimitShare is the share of a budget left (one in ten) below
+	// which the client warns.
+	lowRateLimitShare = 10
 )
 
 var (
@@ -80,7 +127,9 @@ type Options struct {
 	InstallationID int64
 	// HTTPClient defaults to one with a 15-second timeout.
 	HTTPClient *http.Client
-	Now        func() time.Time
+	// Logger receives the warning that a rate limit runs low.
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 // Client is a GitHub App client for one installation.
@@ -90,11 +139,15 @@ type Client struct {
 	key    *rsa.PrivateKey
 	org    string
 	http   *http.Client
+	logger *slog.Logger
 	now    func() time.Time
 
 	mu             sync.Mutex
 	installationID int64
 	tokens         map[string]token
+	// lowWarned is, per rate limit resource, the reset time of the window
+	// already warned about, so each window is warned about once
+	lowWarned map[string]int64
 }
 
 type token struct {
@@ -125,15 +178,21 @@ func New(opts Options) (*Client, error) {
 	if now == nil {
 		now = time.Now
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Client{
 		apiURL:         strings.TrimSuffix(opts.APIURL, "/"),
 		appID:          opts.AppID,
 		key:            key,
 		org:            opts.Org,
 		http:           &noRedirects,
+		logger:         logger,
 		now:            now,
 		installationID: opts.InstallationID,
 		tokens:         map[string]token{},
+		lowWarned:      map[string]int64{},
 	}, nil
 }
 
@@ -272,7 +331,9 @@ func (r ghRepository) repository() Repository {
 	}
 }
 
-// Repositories lists the repositories the installation can reach.
+// Repositories lists the repositories the installation can reach, at most
+// maxRepoPages pages of them. When a page fails, it returns the repositories
+// listed before it with the error.
 func (c *Client) Repositories(ctx context.Context) ([]Repository, error) {
 	tok, err := c.Token(ctx, ReadOnly)
 	if err != nil {
@@ -286,7 +347,7 @@ func (c *Client) Repositories(ctx context.Context) ([]Repository, error) {
 		}
 		endpoint := fmt.Sprintf("%s/installation/repositories?per_page=100&page=%d", c.apiURL, page)
 		if err := c.do(ctx, http.MethodGet, endpoint, tok, nil, maxResponseBytes, &resp); err != nil {
-			return nil, fmt.Errorf("failed to list repositories: %w", err)
+			return out, fmt.Errorf("failed to list repositories: %w", err)
 		}
 		for _, r := range resp.Repositories {
 			out = append(out, r.repository())
@@ -361,6 +422,10 @@ func (c *Client) BranchHead(ctx context.Context, owner, repo, branch string) (st
 	if err != nil {
 		return "", err
 	}
+	return c.branchHead(ctx, tok, owner, repo, branch)
+}
+
+func (c *Client) branchHead(ctx context.Context, tok, owner, repo, branch string) (string, error) {
 	var out struct {
 		Object struct {
 			SHA  string `json:"sha"`
@@ -480,12 +545,10 @@ func (c *Client) do(ctx context.Context, method, endpoint, bearer string, in any
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.watchRateLimit(ctx, resp.Header)
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return err
-	}
-	if int64(len(data)) > limit {
-		return fmt.Errorf("response larger than %d bytes", limit)
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
@@ -495,7 +558,13 @@ func (c *Client) do(ctx context.Context, method, endpoint, bearer string, in any
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(data, &e)
-		return fmt.Errorf("github returned %d: %s", resp.StatusCode, truncate(e.Message, 200))
+		msg := truncate(e.Message, 200)
+		if limited := rateLimited(resp, msg, c.now()); limited != nil {
+			return limited
+		}
+		return &StatusError{Status: resp.StatusCode, Message: msg}
+	case int64(len(data)) > limit:
+		return fmt.Errorf("response larger than %d bytes", limit)
 	}
 	if out == nil {
 		return nil
@@ -504,6 +573,60 @@ func (c *Client) do(ctx context.Context, method, endpoint, bearer string, in any
 		return fmt.Errorf("failed to decode github response: %w", err)
 	}
 	return nil
+}
+
+// rateLimited reads a refusal as a rate limit the way GitHub documents it:
+// retry-after when it is set; else, with no requests remaining, the reset
+// time; else, for a secondary limit, a minute.
+func rateLimited(resp *http.Response, message string, now time.Time) *RateLimitError {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	h := resp.Header
+	exhausted := h.Get("X-RateLimit-Remaining") == "0"
+	if s, err := strconv.Atoi(h.Get("Retry-After")); err == nil && s >= 0 {
+		return &RateLimitError{Status: resp.StatusCode, RetryAt: now.Add(time.Duration(s) * time.Second), Secondary: !exhausted}
+	}
+	if exhausted {
+		retryAt := now.Add(secondaryLimitWait)
+		if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			retryAt = time.Unix(reset, 0)
+		}
+		return &RateLimitError{Status: resp.StatusCode, RetryAt: retryAt}
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || strings.Contains(strings.ToLower(message), "rate limit") {
+		return &RateLimitError{Status: resp.StatusCode, RetryAt: now.Add(secondaryLimitWait), Secondary: true}
+	}
+	return nil
+}
+
+// watchRateLimit warns, once per rate limit window, when a tenth or less of
+// the window's budget is left. One App's budget serves every env and user,
+// so running low is worth knowing before requests start failing.
+func (c *Client) watchRateLimit(ctx context.Context, h http.Header) {
+	remaining, err := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
+	if err != nil {
+		return
+	}
+	limit, err := strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	if err != nil || limit <= 0 || remaining*lowRateLimitShare > limit {
+		return
+	}
+	reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return
+	}
+	resource := h.Get("X-RateLimit-Resource")
+	c.mu.Lock()
+	warned := c.lowWarned[resource] == reset
+	c.lowWarned[resource] = reset
+	c.mu.Unlock()
+	if warned {
+		return
+	}
+	c.logger.WarnContext(ctx, "github rate limit running low",
+		"event", "github.rate_limit_low", "resource", resource, "remaining", remaining, "limit", limit,
+		"reset_at", time.Unix(reset, 0).UTC())
 }
 
 func truncate(s string, n int) string {

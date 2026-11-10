@@ -17,7 +17,7 @@ import (
 	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -256,27 +256,75 @@ func TestPullRequest_Refuses(t *testing.T) {
 	// a lock lapses
 	sh.advance(pullRequestLock + time.Second)
 
-	// the branch already exists: GitHub refuses, nothing is opened twice,
-	// and the session is unlocked again
-	head := sess.Commit
-	_, err := sh.app.CreatePullRequest(ctx, "example-org", "apps", githubapp.NewPullRequest{
-		Base: "main", Parent: head, Branch: pullRequestBranch("dev", "alice", sess.ID), Message: "m", Title: "t",
-		Files: []githubapp.FileChange{{Path: "x.yaml", Mode: "100644", Content: []byte("x\n")}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// GitHub fails: the session is unlocked again, to try once more
+	sh.github.FailNext(http.MethodPost, "/git/trees", mockgithub.LoseAnswer)
 	if code := sh.openPullRequest(sess.ID); code != http.StatusBadGateway {
-		t.Fatalf("existing branch = %d", code)
-	}
-	if _, ok := sh.github.PullRequest("example-org", "apps", 2); ok {
-		t.Fatal("a second pull request was opened")
+		t.Fatalf("github failing = %d", code)
 	}
 	if got, ok, _ := sh.store.Session(ctx, user.ID, key, sh.clock()); !ok || got.Locked(sh.clock()) {
 		t.Fatalf("session after a failed pull request = %+v, %v", got, ok)
 	}
 	if !strings.Contains(sh.logs.String(), "event=pr.failed") {
 		t.Error("pr.failed was not logged")
+	}
+}
+
+func TestPullRequest_RetriesWhereGitHubActedButTheAnswerWasLost(t *testing.T) {
+	for _, path := range []string{"/git/refs", "/pulls"} {
+		t.Run(path, func(t *testing.T) {
+			sh := newSealHarness(t)
+			sess := sh.openSession()
+			sh.sealNow(sess.ID, billing, "api-token", "v")
+			sh.github.FailNext(http.MethodPost, path, mockgithub.LoseAnswer)
+			if code := sh.openPullRequest(sess.ID); code != http.StatusBadGateway {
+				t.Fatalf("first attempt = %d", code)
+			}
+			rec := sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sess.ID+"/pull-request", nil, true)
+			if rec.Code != http.StatusCreated || decode[pullRequestResponse](t, rec).PullRequest.Number != 1 {
+				t.Fatalf("retry = %d %s", rec.Code, rec.Body)
+			}
+			view, ok := sh.github.PullRequest("example-org", "apps", 1)
+			if !ok || view.State != "open" || len(view.Files) != 1 || view.Files[0].Path != billing {
+				t.Fatalf("pull request = %+v", view)
+			}
+			if _, ok := sh.github.PullRequest("example-org", "apps", 2); ok {
+				t.Fatal("a second pull request was opened")
+			}
+			if _, ok, _ := sh.store.Session(context.Background(), testUsers["alice"].ID, store.RepoKey("example-org", "apps"), sh.clock()); ok {
+				t.Fatal("the session did not end")
+			}
+		})
+	}
+}
+
+func TestPullRequest_UpdatesThePullRequestAnEarlierAttemptOpened(t *testing.T) {
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	sh.sealNow(sess.ID, billing, "api-token", "v")
+	// an attempt opened a pull request, but its answer was lost; the user
+	// sealed another value before trying again
+	sh.github.FailNext(http.MethodPost, "/pulls", mockgithub.LoseAnswer)
+	if code := sh.openPullRequest(sess.ID); code != http.StatusBadGateway {
+		t.Fatalf("first attempt = %d", code)
+	}
+	sh.sealNow(sess.ID, search, "index-token", "w")
+	rec := sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sess.ID+"/pull-request", nil, true)
+	pr := decode[pullRequestResponse](t, rec).PullRequest
+	if rec.Code != http.StatusCreated || pr.Number != 1 || pr.Changes != 2 {
+		t.Fatalf("retry = %d %s", rec.Code, rec.Body)
+	}
+	view, _ := sh.github.PullRequest("example-org", "apps", 1)
+	if len(view.Files) != 2 || view.Title != "Seal 2 values in 2 files for dev" || !strings.Contains(view.Body, "index-token") {
+		t.Fatalf("pull request = %+v", view)
+	}
+}
+
+func TestPullRequest_FitsTheRequestTimeLimit(t *testing.T) {
+	// API Gateway, a Lambda function and the HTTP server all end a request
+	// at 30 seconds; the pull request is made, and the session ended or
+	// unlocked, well before
+	if budget := pullRequestTimeout + pullRequestFinish; budget > 25*time.Second {
+		t.Fatalf("a pull request may take %s", budget)
 	}
 }
 

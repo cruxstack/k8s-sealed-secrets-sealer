@@ -336,6 +336,14 @@ not a pending invitation. If they are in the team, check that the GitHub
 App has the organization permission Members (read). The control plane logs
 `user.login_rejected` with the user and the reason.
 
+**Pages answer "GitHub is limiting the sealer's requests for now; try
+again in …" (503), or the repository list says it is incomplete.** The GitHub App's installation
+has used its hourly request budget, which every env and user share, or a
+list ran out of time checking permissions. The control plane logs
+`github.rate_limited`, and `github.rate_limit_low` once the budget falls
+below a tenth. Nothing retries; requests work again when the budget resets.
+An incomplete list fills in on the next load, from what was checked.
+
 **A person is told they "may not use the prod env".** Their session does
 not grant it. Teams are checked at sign-in, so after joining a team they
 sign out and in again.

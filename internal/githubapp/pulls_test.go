@@ -2,8 +2,12 @@ package githubapp
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
 )
 
 func TestCreatePullRequest(t *testing.T) {
@@ -50,9 +54,111 @@ func TestCreatePullRequest(t *testing.T) {
 		t.Fatalf("main moved to %s", now)
 	}
 
-	// the same branch again: GitHub refuses to create it
-	if _, err := c.CreatePullRequest(ctx, "example-org", "apps", pr); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("second pull request on the same branch: %v", err)
+	// the same branch again, as a retry would: the same pull request,
+	// untouched
+	again, err := c.CreatePullRequest(ctx, "example-org", "apps", pr)
+	if err != nil || again != got {
+		t.Fatalf("second pull request on the same branch = %+v, %v; want %+v", again, err, got)
+	}
+	if _, ok := f.mock.PullRequest("example-org", "apps", 2); ok {
+		t.Fatal("a second pull request was opened")
+	}
+}
+
+// newPull is a pull request of one file on a session's branch.
+func newPull(t *testing.T, c *Client, branch, content string) NewPullRequest {
+	t.Helper()
+	head, err := c.BranchHead(context.Background(), "example-org", "apps", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewPullRequest{
+		Base: "main", Parent: head, Branch: branch, Message: "Seal\n", Title: "Seal " + content, Body: "body " + content,
+		Files: []FileChange{{Path: "deploy/billing/sealed-secret.yaml", Mode: "100644", Content: []byte(content + "\n")}},
+	}
+}
+
+func TestCreatePullRequest_RetriesWhereGitHubActedButTheAnswerWasLost(t *testing.T) {
+	cases := map[string]struct {
+		path  string
+		fault mockgithub.Fault
+	}{
+		"branch created, then the client timed out":      {"/git/refs", mockgithub.Stall},
+		"branch created, then the answer was lost":       {"/git/refs", mockgithub.LoseAnswer},
+		"pull request opened, then the client timed out": {"/pulls", mockgithub.Stall},
+		"pull request opened, then the answer was lost":  {"/pulls", mockgithub.LoseAnswer},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.client(t, nil)
+			pr := newPull(t, c, "sealer/dev/alice-01j", "sealed")
+			f.mock.FailNext(http.MethodPost, tc.path, tc.fault)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, err := c.CreatePullRequest(ctx, "example-org", "apps", pr); err == nil {
+				t.Fatal("the first attempt succeeded")
+			}
+			// the branch is kept: a pull request may be open from it
+			first, err := c.BranchHead(context.Background(), "example-org", "apps", pr.Branch)
+			if err != nil {
+				t.Fatalf("the branch was not kept: %v", err)
+			}
+
+			got, err := c.CreatePullRequest(context.Background(), "example-org", "apps", pr)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			// the earlier attempt's commit holds the same files, so it stays
+			if got.Number != 1 || got.Commit != first || got.Branch != pr.Branch {
+				t.Fatalf("retry = %+v, want #1 at %s", got, first)
+			}
+			view, ok := f.mock.PullRequest("example-org", "apps", 1)
+			if !ok || view.State != "open" || len(view.Files) != 1 || view.Files[0].After != "sealed\n" || view.Title != pr.Title {
+				t.Fatalf("pull request = %+v", view)
+			}
+			if _, ok := f.mock.PullRequest("example-org", "apps", 2); ok {
+				t.Fatal("a second pull request was opened")
+			}
+		})
+	}
+}
+
+func TestCreatePullRequest_MovesABranchThatHoldsOtherFiles(t *testing.T) {
+	f := newFixture(t)
+	c := f.client(t, nil)
+	ctx := context.Background()
+
+	// a pull request is open from the branch, and another value was sealed
+	// since: the branch moves, and the pull request says so
+	first, err := c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-01j", "one value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := newPull(t, c, "sealer/dev/alice-01j", "two values")
+	got, err := c.CreatePullRequest(ctx, "example-org", "apps", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != first.Number || got.Commit == first.Commit {
+		t.Fatalf("pull request = %+v, first = %+v", got, first)
+	}
+	view, _ := f.mock.PullRequest("example-org", "apps", 1)
+	if view.Files[0].After != "two values\n" || view.Title != pr.Title || view.Body != pr.Body || len(view.Commits) != 1 {
+		t.Fatalf("pull request = %+v", view)
+	}
+
+	// a branch left without a pull request moves, and gets one
+	f.mock.FailNext(http.MethodPost, "/git/refs", mockgithub.LoseAnswer)
+	if _, err := c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-02j", "stale")); err == nil {
+		t.Fatal("the answer was not lost")
+	}
+	got, err = c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-02j", "fresh"))
+	if err != nil || got.Number != 2 {
+		t.Fatalf("pull request = %+v, %v", got, err)
+	}
+	if view, _ := f.mock.PullRequest("example-org", "apps", 2); view.Files[0].After != "fresh\n" || view.State != "open" {
+		t.Fatalf("pull request = %+v", view)
 	}
 }
 

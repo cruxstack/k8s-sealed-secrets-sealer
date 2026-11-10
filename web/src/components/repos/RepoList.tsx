@@ -79,11 +79,25 @@ function Continue({
   );
 }
 
+/** Says that repositories the user can read may be missing from the list. */
+function IncompleteNotice() {
+  return (
+    <p
+      role="status"
+      className="rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground"
+    >
+      Some repositories may be missing: GitHub did not answer for all of them in
+      time. Reload the page to check the rest.
+    </p>
+  );
+}
+
 /** The repositories page: every repository the user can read. */
 export function RepoList() {
   const env = useEnv()?.name ?? "";
   const navigate = useNavigate();
-  const { data, error, isPending } = useQuery(reposQueryOptions);
+  const { data: list, error, isPending } = useQuery(reposQueryOptions);
+  const data = list?.repositories;
   // pending changes per repository; the list works without them
   const { data: sessions } = useQuery(sessionsQueryOptions);
   const pending = new Map(
@@ -151,12 +165,14 @@ export function RepoList() {
         <div aria-busy="true" aria-label="Loading repositories">
           <Skeleton className="h-48 w-full" />
         </div>
-      ) : error && !data ? (
+      ) : !data ? (
         <Card role="alert" className="border-destructive/50">
           <CardContent className="p-6 text-sm text-destructive">
             Could not load repositories: {extractApiError(error)}
           </CardContent>
         </Card>
+      ) : data.length === 0 && list?.incomplete ? (
+        <IncompleteNotice />
       ) : data.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-2 p-10 text-center">
@@ -175,6 +191,7 @@ export function RepoList() {
       ) : (
         <>
           {!needle && <Continue repos={data} pending={pending} />}
+          {list?.incomplete && <IncompleteNotice />}
           <section aria-labelledby="all-heading" className="space-y-2">
             <h2
               id="all-heading"
