@@ -195,7 +195,12 @@ func TestKeySync_EscrowRestoreAndRenewal(t *testing.T) {
 		t.Fatalf("c escrow_needed = %v", got)
 	}
 
-	// a is the only agent able to renew, so it is asked to
+	// a is the only agent able to renew, so it is asked to, at its next
+	// check-in: never on a first one
+	if cmds := sh.poll("a"); len(cmds) != 0 {
+		t.Fatalf("a commands after its first check-in = %+v", cmds)
+	}
+	sh.checkIn("a", "0s", ka)
 	cmds := sh.poll("a")
 	if len(cmds) != 1 || cmds[0].Type != protocol.CommandRenewalEnable {
 		t.Fatalf("a commands = %+v", cmds)
@@ -445,12 +450,19 @@ agents:
 	}
 	plan := func(self string, states map[string]store.AgentState, cmds []store.CommandRecord) bool {
 		a, _ := reg.Agent(self)
-		return planKeySync(fleet.Compute("dev", reg, states, now), a, states[self], cmds, nil, now).EnableRenewal
+		return planKeySync(fleet.Compute("dev", reg, states, now), a, states[self], false, cmds, nil, now).EnableRenewal
 	}
 
 	off := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "0s", 0)}
 	if !plan("a", off, nil) || plan("b", off, nil) {
 		t.Error("renewal should be asked of a (lowest ID) only")
+	}
+	// never on an agent's first check-in: one that starts beside others
+	// checks in before their states are stored, and each could see itself
+	// as the lowest
+	a, _ := reg.Agent("a")
+	if planKeySync(fleet.Compute("dev", reg, off, now), a, off["a"], true, nil, nil, now).EnableRenewal {
+		t.Error("renewal was asked on a's first check-in")
 	}
 	on := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "720h0m0s", 0)}
 	if plan("a", on, nil) || plan("b", on, nil) {

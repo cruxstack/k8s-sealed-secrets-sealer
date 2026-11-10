@@ -107,6 +107,9 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 			"event", "agent.capability_ignored", "env", s.env, "agent_id", agent.ID, "capabilities", ignored)
 	}
 	state.CheckInIntervalSeconds = checkInIntervalSeconds(r.Header.Get(protocol.CheckInIntervalHeader))
+	// the fleet as it was before this check-in, for key sync: it says
+	// whether this agent had checked in before
+	states, statesErr := s.agentStates(r.Context())
 	if err := s.store.PutAgentState(r.Context(), state); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to store agent check-in", "agent_id", agent.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -129,7 +132,11 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 				"fingerprint", rec.Fingerprint, "not_before", rec.NotBefore)
 		}
 	}
-	escrowNeeded, err := s.syncKeys(r.Context(), agent, state)
+	var escrowNeeded []string
+	err = statesErr
+	if err == nil {
+		escrowNeeded, err = s.syncKeys(r.Context(), agent, state, states)
+	}
 	if err != nil {
 		// key sync catches up on a later check-in; the check-in itself is
 		// stored

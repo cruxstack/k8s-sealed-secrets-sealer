@@ -799,7 +799,10 @@ default; `0` turns renewal off). Two postures are supported:
   renew period. If no in-scope cluster in the env is known to have renewal
   on, the control plane sends `renewal.enable.v1` to one healthy agent that
   has the `renewal` capability and can read its controller's flags, chosen
-  deterministically (the lowest agent ID). The agent patches its controller
+  deterministically (the lowest agent ID), at that agent's check-in but never
+  its first: agents that start together check in at once, each before the
+  others' states are stored, and each could take itself for the lowest. The
+  agent patches its controller
   Deployment's arguments to set the configured period (`keyRenewPeriod` in
   the control plane's chart, 30 days by default), which rolls the
   controller, and logs `renewal.enabled`. The flag it sets overrides any
