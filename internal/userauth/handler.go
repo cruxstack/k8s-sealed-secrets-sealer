@@ -278,10 +278,16 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, code string) {
 }
 
 // safeReturnTo keeps only same-origin paths, so a sign-in link cannot send
-// the user to another site afterwards.
+// the user to another site afterwards. Browsers treat "//host" and "/\host"
+// as other origins, so the second character may be neither slash.
 func safeReturnTo(p string) string {
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsAny(p, "\\\r\n") ||
-		strings.HasPrefix(p, "/api/") || len(p) > 512 {
+	if p == "" || len(p) > 512 || p[0] != '/' {
+		return ""
+	}
+	if len(p) > 1 && (p[1] == '/' || p[1] == '\\') {
+		return ""
+	}
+	if strings.ContainsAny(p, "\\\r\n\t") || strings.HasPrefix(p, "/api/") {
 		return ""
 	}
 	return p

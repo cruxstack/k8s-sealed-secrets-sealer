@@ -155,7 +155,19 @@ def agent_registry():
 setup_objects.append(agent_registry())
 setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
-add(decode_yaml_stream(read_file("dev/k3d/mock-github.yaml")))
+def mock_github():
+    # register this stack's callback URL with the mock, as an OAuth app would
+    objs = decode_yaml_stream(read_file("dev/k3d/mock-github.yaml"))
+    for obj in objs:
+        if obj["kind"] != "Deployment":
+            continue
+        for container in obj["spec"]["template"]["spec"]["containers"]:
+            for e in container.get("env", []):
+                if e["name"] == "MOCK_GITHUB_CALLBACK_URLS":
+                    e["value"] = PUBLIC_URL + "/api/v1/auth/callback"
+    return objs
+
+add(mock_github())
 add(decode_yaml_stream(helm(
     "deploy/helm/control-plane",
     name="sealer-control-plane",

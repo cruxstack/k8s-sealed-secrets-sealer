@@ -2,13 +2,14 @@ package httpserver
 
 import "net/http"
 
-// contentSecurityPolicy allows only same-origin scripts, styles, fonts and
-// connections; images may also come from GitHub avatars. Nothing inline: the
-// UI ships one script bundle and one stylesheet, and its components set
-// styles through the DOM, which CSP does not restrict.
+// contentSecurityPolicy allows only same-origin scripts, fonts and
+// connections; images may also come from GitHub avatars. Scripts are never
+// inline. Styles may be: Radix menus and dialogs add a small <style> element
+// while open (to lock page scrolling) whose content varies, so it cannot be
+// hashed, and injected CSS is a far smaller risk than injected script.
 const contentSecurityPolicy = "default-src 'none'; " +
 	"script-src 'self'; " +
-	"style-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data: https://avatars.githubusercontent.com; " +
 	"font-src 'self'; " +
 	"connect-src 'self'; " +

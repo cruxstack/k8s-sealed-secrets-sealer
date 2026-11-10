@@ -31,6 +31,7 @@ func newFlow(t *testing.T, publicURL string, teams ...string) *flow {
 	t.Helper()
 	gh := httptest.NewServer(mockgithub.New(mockgithub.Options{
 		ClientID: "cid", ClientSecret: "csecret", Org: "example-org", Users: mockgithub.DefaultUsers(),
+		CallbackURLs: []string{publicURL + "/api/v1/auth/callback"},
 	}).Handler())
 	t.Cleanup(gh.Close)
 

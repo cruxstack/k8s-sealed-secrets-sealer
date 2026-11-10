@@ -32,6 +32,9 @@ type User struct {
 type Options struct {
 	ClientID     string
 	ClientSecret string
+	// CallbackURLs are the OAuth app's registered callback URLs. Like
+	// GitHub, the mock redirects only to one of these.
+	CallbackURLs []string
 	Org          string
 	Users        []User
 }
@@ -86,9 +89,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return
 	}
-	redirect, err := url.Parse(q.Get("redirect_uri"))
-	if err != nil || redirect.Host == "" {
-		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+	callback, ok := s.callback(q.Get("redirect_uri"))
+	if !ok {
+		http.Error(w, "redirect_uri is not a registered callback URL", http.StatusBadRequest)
 		return
 	}
 	login := q.Get("login")
@@ -111,7 +114,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	back := redirect.Query()
+	back := url.Values{}
 	back.Set("state", q.Get("state"))
 	if login == "deny" {
 		back.Set("error", "access_denied")
@@ -126,8 +129,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		back.Set("code", code)
 	}
-	redirect.RawQuery = back.Encode()
-	http.Redirect(w, r, redirect.String(), http.StatusFound)
+	// the target is the registered URL, never the one in the request
+	http.Redirect(w, r, callback+"?"+back.Encode(), http.StatusFound)
+}
+
+// callback returns the registered callback URL equal to redirectURI.
+func (s *Server) callback(redirectURI string) (string, bool) {
+	for _, cb := range s.opts.CallbackURLs {
+		if cb == redirectURI {
+			return cb, true
+		}
+	}
+	return "", false
 }
 
 func (s *Server) accessToken(w http.ResponseWriter, r *http.Request) {

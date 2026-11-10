@@ -35,6 +35,9 @@ spec:
               value: local-only-client-secret
             - name: MOCK_GITHUB_ORG
               value: example-org
+            # the control plane's callback; Tilt sets it from the stack's port
+            - name: MOCK_GITHUB_CALLBACK_URLS
+              value: http://localhost:4100/api/v1/auth/callback
           ports:
             - name: http
               containerPort: 8080

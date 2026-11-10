@@ -678,8 +678,8 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   returns it; a page that cannot read `/me` (another origin) cannot learn
   it, and a token for one session is useless with another.
 - **Browser hardening.** Every response carries a strict Content Security
-  Policy (same-origin scripts and styles only, nothing inline, images also
-  from GitHub avatars), `X-Frame-Options: DENY`, `nosniff`, a same-origin
+  Policy (same-origin scripts only and never inline, inline styles allowed
+  for UI components, images also from GitHub avatars), `X-Frame-Options: DENY`, `nosniff`, a same-origin
   referrer and opener policy, and HSTS over https. The UI is built into
   the binary and needs no third-party origin at runtime.
 - **Repository access** goes through the GitHub App's installation token, but

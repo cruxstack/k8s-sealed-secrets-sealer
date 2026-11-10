@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
@@ -26,6 +27,7 @@ func run() error {
 	srv := mockgithub.New(mockgithub.Options{
 		ClientID:     env("MOCK_GITHUB_CLIENT_ID", "local-client-id"),
 		ClientSecret: env("MOCK_GITHUB_CLIENT_SECRET", "local-client-secret"),
+		CallbackURLs: strings.Split(env("MOCK_GITHUB_CALLBACK_URLS", "http://localhost:4100/api/v1/auth/callback"), ","),
 		Org:          env("MOCK_GITHUB_ORG", "example-org"),
 		Users:        mockgithub.DefaultUsers(),
 	})
