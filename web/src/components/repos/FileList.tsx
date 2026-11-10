@@ -104,7 +104,7 @@ export function FileList({
   return (
     <section
       aria-labelledby="files-heading"
-      className="flex flex-col overflow-hidden rounded-xl border bg-card"
+      className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card"
     >
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <h2
@@ -150,7 +150,11 @@ export function FileList({
           No file matches “{filter.trim()}”.
         </p>
       ) : (
-        <ul ref={listRef} className="space-y-0.5 p-1.5" aria-label="Files">
+        <ul
+          ref={listRef}
+          className="min-h-0 space-y-0.5 overflow-y-auto p-1.5"
+          aria-label="Files"
+        >
           {shown.map((f, i) => {
             const status = fileStatus(f);
             const isSelected = f.path === selected;
@@ -227,7 +231,7 @@ export function FileList({
           })}
         </ul>
       )}
-      <p className="mt-auto border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+      <p className="mt-auto shrink-0 border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
         Searched{" "}
         {globs.map((g, i) => (
           <span key={g}>

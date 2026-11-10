@@ -88,7 +88,7 @@ func TestRepoRoutes(t *testing.T) {
 
 	rec = get("/api/v1/repos/example-org/apps/files", alice)
 	var listing repos.Listing
-	if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&listing) != nil || len(listing.Files) != 3 {
+	if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&listing) != nil || len(listing.Files) != 4 {
 		t.Fatalf("files = %d %+v", rec.Code, listing)
 	}
 	for _, path := range []string{

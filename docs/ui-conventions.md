@@ -8,11 +8,18 @@ new screens look and behave the same.
 
 Every signed-in page sits in `AppShell`: the header with the env badge, the
 navigation, the search button, the theme toggle and the account menu, then
-the page content in a centered column. A page starts with what matters most
-(the fleet page opens with the env key banner) and then its main table or
-form. Sealing is what people come for, so the home page is Secrets
+the page content in a centered column. A page opens with its title (an `h1`)
+and one line of context, then what matters most (the fleet's env key banner)
+and its main table or form. A page under another one puts the way back in
+its title as a breadcrumb ("Secrets / example-org/apps") rather than on a
+line of its own. Sealing is what people come for, so the home page is Secrets
 (`/secrets`): their repositories, each opening its workspace at
 `/secrets/{owner}/{repo}`. The navigation holds what everyone uses.
+
+Pages work down to a phone's width (390px) without scrolling sideways. Grids
+collapse to one column with `grid-cols-1`, whose track lets items shrink
+(a bare `grid` sizes its column to the widest item), and only a wide table
+scrolls, inside its own box.
 
 The fleet (`/fleet`) is for admins. They reach it from the account menu, the
 palette and the env badge; nobody else is offered it, and someone who opens
@@ -23,17 +30,31 @@ from the dot on the env badge, with a summary in its tooltip.
 
 A screen where people pick one thing and work on it is a workspace: the
 things to pick on the left, in a filterable list, and the picked one on the
-right, with its form. The repository page is one: files on the left, the
-file's documents and seal form on the right, and the pending changes under
-them. The pick is in the URL (`?file=`), so a reload or a shared link opens
-the same thing, and the first usable item is picked when none is.
+right, with its form. What the work adds up to (the pending changes, with
+the button that opens the pull request) sits under the list, like a cart.
+The left column stays in view as the page scrolls, and its list scrolls on
+its own, so the cart is never far. The pick is in the URL (`?file=`), so a
+reload or a shared link opens the same thing, and the first usable item is
+picked when none is.
+
+The repository page is one. The picked file shows, in order:
+
+1. its path, description and docs link;
+2. its keys, one row each, saying where the key stands across the file's
+   documents: in all of them, in some (naming the others), expected but in
+   none, or waiting in the pending changes;
+3. the seal form;
+4. the documents a value is sealed for, with their regions and scopes.
+
+The keys come first because they are what people act on: picking a row fills
+the form's key and moves to the value. The documents come last because they
+rarely change and only need checking.
 
 Show hints where the decision is made. A file's description sits under its
-path in the list and above its documents, its docs are a link in its header,
-and expected keys it lacks are dashed amber, in the list as a count, in the
-documents by name and in the form as chips that fill the key. Hints warn and
-never block: a key the file does not expect gets an amber note, and the
-value can still be sealed.
+path in the list and in its header, its docs are a link in its header, and
+expected keys it lacks are dashed amber: in the list as a count and in the
+key rows. Hints warn and never block: a key the file does not expect gets an
+amber note, and the value can still be sealed.
 
 ## Keyboard
 
@@ -63,7 +84,9 @@ come back.
 - Headers are short, one or two words, in `text-xs` uppercase muted text.
 - Identifiers (agent IDs, fingerprints, namespaces) are monospace and never
   wrap (`whitespace-nowrap`); the table scrolls sideways inside its own
-  rounded, bordered box (`overflow-x-auto`) instead.
+  rounded, bordered box (`overflow-x-auto`) instead. A table of two or three
+  columns in a workspace may wrap its identifiers instead
+  (`[overflow-wrap:anywhere]`), so it fits a phone without scrolling.
 - Status is a `Badge`: green for healthy, amber for needs attention (out of
   sync, missing keys, stale check-in), red for failed or never checked in.
   Pair the color with a word; color alone carries no meaning.
@@ -105,9 +128,12 @@ pressable.
 
 ## Messages
 
-- Something that finished (a value sealed, a change removed) gets a toast
-  (`toast` from sonner) that names what happened. A toast never carries a
-  secret value, and never replaces an error that needs action.
+- Something that finished away from where people are looking (a change
+  removed, changes discarded) gets a toast (`toast` from sonner) that names
+  what happened. A result shown where people acted (a seal's status line
+  under the form, its change appearing in the cart) needs no toast as well.
+  A toast never carries a secret value, and never replaces an error that
+  needs action.
 - The end of a flow (a pull request opened) gets a dialog with the way
   forward ("View pull request") and the way back ("Keep sealing").
 - Errors from the API show the server's short message in an alert, never a

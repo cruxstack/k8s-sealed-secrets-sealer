@@ -140,7 +140,9 @@ export function Header() {
                 aria-hidden="true"
               />
             </span>
-            <span className="text-base font-bold tracking-tight">Sealer</span>
+            <span className="hidden text-base font-bold tracking-tight sm:inline">
+              Sealer
+            </span>
           </Link>
           {env &&
             (user ? (
@@ -149,7 +151,10 @@ export function Header() {
               <Badge variant="outline">{env}</Badge>
             ))}
           {user && (
-            <nav aria-label="Main" className="ml-4 flex items-center gap-1">
+            <nav
+              aria-label="Main"
+              className="ml-1 flex items-center gap-1 sm:ml-4"
+            >
               <NavLink to="/secrets">Secrets</NavLink>
             </nav>
           )}

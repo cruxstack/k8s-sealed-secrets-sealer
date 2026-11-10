@@ -77,24 +77,24 @@ function OpenedBanner({
 function WorkspaceSkeleton() {
   return (
     <div
-      className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]"
+      className="grid grid-cols-1 gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]"
       aria-busy="true"
       aria-label="Loading files"
     >
-      <Skeleton className="h-80 w-full" />
-      <div className="space-y-6">
-        <Skeleton className="h-64 w-full" />
-        <Skeleton className="h-32 w-full" />
+      <div className="space-y-4">
+        <Skeleton className="h-80 w-full" />
+        <Skeleton className="h-36 w-full" />
       </div>
+      <Skeleton className="h-[30rem] w-full" />
     </div>
   );
 }
 
 /**
- * A repository's sealing workspace: its SealedSecret files for the env on
- * the left, the chosen file and its seal form on the right, and the pending
- * changes waiting for a pull request below. With an open session the files
- * are shown at the session's base commit.
+ * A repository's sealing workspace: its SealedSecret files for the env and
+ * the pending changes waiting for a pull request on the left, and the
+ * chosen file with its seal form on the right. With an open session the
+ * files are shown at the session's base commit.
  */
 export function RepoWorkspace({
   owner,
@@ -142,57 +142,92 @@ export function RepoWorkspace({
 
   return (
     <div className="space-y-6">
-      <nav aria-label="Breadcrumb" className="text-sm text-muted-foreground">
-        <ol className="flex items-center gap-1.5">
-          <li>
-            <Link
-              to="/secrets"
-              className="hover:text-foreground hover:underline"
-            >
-              Secrets
-            </Link>
-          </li>
-          <li aria-hidden="true">/</li>
-          <li aria-current="page" className="font-mono text-foreground">
-            {owner}/{repo}
-          </li>
-        </ol>
-      </nav>
+      <header className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <nav aria-label="Breadcrumb" className="min-w-0">
+            <ol className="flex flex-wrap items-baseline gap-x-2 text-xl tracking-tight">
+              <li>
+                <Link
+                  to="/secrets"
+                  className="font-semibold text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  Secrets
+                </Link>
+              </li>
+              <li aria-hidden="true" className="text-muted-foreground/60">
+                /
+              </li>
+              <li aria-current="page" className="min-w-0">
+                <h1 className="font-mono font-semibold break-all">
+                  {data?.repository.full_name ?? `${owner}/${repo}`}
+                </h1>
+              </li>
+            </ol>
+          </nav>
+          {data && (
+            <span className="flex items-center gap-2">
+              <Badge variant="outline">
+                {data.repository.private ? "Private" : "Public"}
+              </Badge>
+              <AccessBadge access={data.repository.access} />
+            </span>
+          )}
+        </div>
+        {data && (
+          <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+            SealedSecrets for the{" "}
+            <span className="font-medium text-foreground">{env}</span> env on
+            <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+            <code className="font-mono text-xs">{data.branch}</code> at{" "}
+            <code className="font-mono text-xs" title={data.commit}>
+              {data.commit.slice(0, 7)}
+            </code>
+          </p>
+        )}
+      </header>
 
       {isPending ? (
         <WorkspaceSkeleton />
       ) : error && !data ? (
-        <Card role="alert" className="border-destructive/50">
-          <CardContent className="p-6 text-sm text-destructive">
-            Could not load this repository: {extractApiError(error)}
-          </CardContent>
-        </Card>
+        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
+          {/* pending changes stay reachable, so they can still be discarded
+              when the commit they are based on is gone */}
+          {session && (
+            <PendingChanges
+              owner={owner}
+              repo={repo}
+              session={session}
+              onSelectFile={pick}
+              onOpened={(pr) => {
+                setOpened(pr);
+                setCelebrate(true);
+              }}
+            />
+          )}
+          <Card
+            role="alert"
+            className="border-destructive/50 lg:col-start-2 lg:row-start-1"
+          >
+            <CardContent className="space-y-1 p-6 text-sm">
+              <p className="text-destructive">
+                Could not load this repository: {extractApiError(error)}
+              </p>
+              {session && (
+                <p className="text-muted-foreground">
+                  The files are read at the commit your pending changes are
+                  based on,{" "}
+                  <code className="font-mono text-xs">
+                    {session.commit.slice(0, 7)}
+                  </code>
+                  . If it is gone from {session.branch}, discard the changes to
+                  start again from its head.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       ) : (
         <>
-          <header className="flex flex-wrap items-end justify-between gap-3">
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="font-mono text-xl font-semibold tracking-tight">
-                  {data.repository.full_name}
-                </h1>
-                <Badge variant="outline">
-                  {data.repository.private ? "Private" : "Public"}
-                </Badge>
-                <AccessBadge access={data.repository.access} />
-              </div>
-              <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
-                SealedSecrets for the{" "}
-                <span className="font-medium text-foreground">{env}</span> env
-                on
-                <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
-                <code className="font-mono text-xs">{data.branch}</code> at{" "}
-                <code className="font-mono text-xs" title={data.commit}>
-                  {data.commit.slice(0, 7)}
-                </code>
-              </p>
-            </div>
-          </header>
-
           {opened && (
             <OpenedBanner pr={opened} onDismiss={() => setOpened(null)} />
           )}
@@ -235,8 +270,10 @@ export function RepoWorkspace({
               </CardContent>
             </Card>
           ) : (
-            <div className="grid items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
-              <aside className="lg:sticky lg:top-0 lg:max-h-[calc(100vh-7.5rem)] lg:overflow-y-auto">
+            <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
+              {/* the files and the pending changes stay in view while the
+                  page scrolls; the file list scrolls on its own */}
+              <aside className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-0 lg:max-h-[calc(100vh-7.5rem)]">
                 <FileList
                   files={files}
                   selected={current?.path}
@@ -244,6 +281,20 @@ export function RepoWorkspace({
                   globs={data.file_globs}
                   onSelect={pick}
                 />
+                {canWrite && (
+                  <PendingChanges
+                    owner={owner}
+                    repo={repo}
+                    session={session}
+                    sealing={sealBusy}
+                    onSelectFile={pick}
+                    onOpened={(pr) => {
+                      setOpened(pr);
+                      setCelebrate(true);
+                      setRound((r) => r + 1);
+                    }}
+                  />
+                )}
               </aside>
               <div className="min-w-0 space-y-6">
                 {selected && !chosen && (
@@ -273,20 +324,6 @@ export function RepoWorkspace({
                     onBusyChange={setSealBusy}
                     focusForm={picked}
                     round={round}
-                  />
-                )}
-                {canWrite && session && (
-                  <PendingChanges
-                    owner={owner}
-                    repo={repo}
-                    session={session}
-                    sealing={sealBusy}
-                    onSelectFile={pick}
-                    onOpened={(pr) => {
-                      setOpened(pr);
-                      setCelebrate(true);
-                      setRound((r) => r + 1);
-                    }}
                   />
                 )}
               </div>
