@@ -106,7 +106,7 @@ flowchart TB
   user(["Browser"])
   github["GitHub App<br/>read files, open PRs"]
 
-  subgraph cp_env["Control plane: one per env"]
+  subgraph cp_env["Control plane: one env, or several on one URL"]
     edge["CloudFront + WAF<br/>sealer.dev.example.com"]
     apigw["API Gateway (HTTP API)"]
     cp["Control plane<br/>Lambda or container"]
@@ -1032,6 +1032,9 @@ CloudFront and WAF, the DynamoDB table (PITR, TTL, CMK), the transit and
 escrow KMS keys with their policies, the AWS Backup plan and the agent IAM
 roles. An env is one instance of that module, in whichever region suits,
 or one entry of a deployment that serves several.
+
+[docs/deployment.md](deployment.md) walks through a deployment across envs,
+accounts and regions, with each piece's configuration.
 
 **Accounts and regions.** Nothing ties an env to an AWS account or region.
 A registry entry names an agent's role by its full ARN, account included,

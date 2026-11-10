@@ -17,7 +17,9 @@ controller:
   deploymentName: ""
 
 # The env this agent's cluster belongs to (required), e.g. "dev". The agent
-# refuses a control plane serving another env, and binds escrowed keys to it.
+# names it on every request, so a control plane serving several envs sends
+# it to this one; it refuses a control plane that answers for another env,
+# and binds the keys it escrows to this one.
 env: ""
 
 # Capabilities decide which RBAC is installed and which commands the agent
@@ -68,7 +70,9 @@ kms:
   transitKeyId: ""
   # key ID, ARN or alias (required with capabilities.keys)
   escrowKeyId: ""
-  # region of the KMS endpoint; empty uses the AWS SDK's region (AWS_REGION)
+  # region of the KMS endpoint for keys not named by ARN; a key named by its
+  # ARN (as a key in another account must be) is called in the ARN's region.
+  # Empty uses the AWS SDK's region (AWS_REGION).
   region: ""
   # overrides the KMS endpoint, for local emulators only
   endpoint: ""
