@@ -17,7 +17,9 @@ const (
 )
 
 // commandRetention keeps finished and expired commands this long past their
-// expiry, for the audit trail, before DynamoDB's TTL removes them.
+// expiry, before DynamoDB's TTL removes them: a seal's outcome stays
+// readable, and key sync sees work a command just did. The audit trail is
+// the structured logs, not the table (docs/design.md, section 11).
 const commandRetention = time.Hour
 
 // CommandRecord is a command queued for one agent.

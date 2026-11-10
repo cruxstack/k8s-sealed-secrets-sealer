@@ -127,8 +127,9 @@ type ControlPlane struct {
 	// under on their way to an agent. The control plane only generates data
 	// keys with it; agents decrypt.
 	KMSTransitKeyID string
-	// KMSRegion is the region of the KMS endpoint; empty uses the AWS SDK's
-	// region.
+	// KMSRegion is the region of the KMS endpoint for a transit key not
+	// named by ARN. A key named by its ARN (as a key in another account must
+	// be) is called in the ARN's region. Empty uses the AWS SDK's region.
 	KMSRegion string
 	// KMSEndpoint overrides the KMS endpoint, for local emulators.
 	KMSEndpoint string
@@ -177,8 +178,10 @@ type Agent struct {
 	// KMSTransitKeyID is the KMS key values to seal arrive encrypted under.
 	// Required with the seal capability.
 	KMSTransitKeyID string
-	// KMSRegion is the region of the KMS endpoint; empty uses the AWS SDK's
-	// region. With a multi-Region escrow key, use the replica in this region.
+	// KMSRegion is the region of the KMS endpoint for keys not named by ARN.
+	// A key named by its ARN (as a key in another account must be) is
+	// called in the ARN's region, so the transit and escrow keys may be in
+	// different regions. Empty uses the AWS SDK's region.
 	KMSRegion string
 	// KMSEndpoint overrides the KMS endpoint, for local emulators.
 	KMSEndpoint string

@@ -1,7 +1,7 @@
 # Agent Guidelines
 
 ## Architecture Overview
-- **What it is**: one web app per environment for sealing Kubernetes secrets with [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets), backed by an agent in every cluster. Users never pick a cluster or region. The full design is in `docs/design.md`; read it before changing behavior.
+- **What it is**: one web app, for one environment or several on one URL, for sealing Kubernetes secrets with [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets), backed by an agent in every cluster. Users never pick a cluster or region. The full design is in `docs/design.md`; read it before changing behavior.
 - **Control plane**: serves the UI and API, talks to GitHub, queues commands for agents, stores state in DynamoDB. Runs on AWS Lambda behind API Gateway (preferred) or as a container. It has no Kubernetes client and must never get one.
 - **Agent**: runs beside a sealed-secrets controller, makes only outbound calls, reports the controller's keys, seals values and syncs keys. What it may do is set by its Helm values (capabilities), never by the control plane.
 - **Entry points**:
@@ -34,9 +34,9 @@
 
 ## Build & Test
 Atmos is the task runner; every command installs its pinned tools into `.tools/` on first use. Run `atmos list commands` to see them all.
-- **Unit tests**: `atmos test unit` (race detector; no network, cluster or Docker)
-- **Integration tests**: `atmos test integration` (DynamoDB store against DynamoDB Local in Docker)
-- **Single package or test**: `atmos test unit -- -run TestParseCert ./internal/agent`
+- **Unit tests**: `atmos test unit` (race detector, plus the release and dev status scripts' tests; no network, cluster or Docker)
+- **Integration tests**: `atmos test integration` (the DynamoDB store against DynamoDB Local, and envelope encryption against local KMS, both in Docker)
+- **Single package or test**: `atmos test unit -- -run TestParseCert ./internal/keys`
 - **Static checks**: `atmos check all` (tidy, fmt, lint, govulncheck, Helm charts); `atmos check fmt --write` formats
 - **End-to-end**: `atmos test e2e` (throwaway k3d cluster `sealer-e2e`; `--keep` leaves it up)
 - **Everything CI runs**: `atmos verify pr` (`--fast` skips e2e)
@@ -76,7 +76,7 @@ provide the authenticated, short-lived download token for private images.
 - **Naming**: `PascalCase` exports, `camelCase` private
 - **Constructors**: `New(Options)`; constructors make no network calls
 - **Comments**: lowercase inline comments; doc comments are full sentences; explain why, not what
-- **Logging**: `log/slog` with key-value pairs and snake_case keys, `*Context` methods where a context exists. Operational events carry an `event` key (e.g. `controller.key_active`) so they can be alerted on; see `docs/design.md` for the list.
+- **Logging**: `log/slog` with key-value pairs and snake_case keys, `*Context` methods where a context exists. Operational events carry an `event` key (e.g. `controller.key_active`) so they can be alerted on; `docs/design.md` lists the key sync alerts (section 8) and the events that make up the audit trail (section 11). A new event that records who did what belongs in that list.
 
 ## Configuration
 - All variables are read in `internal/config`; nothing else reads the environment (dev-only tools such as `cmd/mock-github` excepted)

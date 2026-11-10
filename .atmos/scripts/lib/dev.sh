@@ -117,6 +117,12 @@ stack_clusters() {
   sed -n 's/^  - name: *//p' dev/stack.yaml
 }
 
+# Prints the envs the local control plane serves, from dev/stack.yaml, one
+# per line: the simulated env first, then the others (otherEnvs).
+stack_envs() {
+  sed -n -e 's/^env: *//p' -e 's/^  - env: *//p' dev/stack.yaml
+}
+
 # Prints a deployment's log events of one kind as JSON lines.
 log_events() {
   local namespace="$1" deployment="$2" event="$3"
