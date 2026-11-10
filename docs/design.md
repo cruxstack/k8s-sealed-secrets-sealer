@@ -663,6 +663,15 @@ controller's newest. Agents report the setting; the control plane flags any
 cluster not using `CertNotBefore` and excludes it from key comparison until
 fixed.
 
+**Controller settings.** The agent reads the controller's settings from its
+Deployment the way the controller does. A flag on the command line wins, and
+of several occurrences the last one. Otherwise its `SEALED_SECRETS_`
+variable applies (`SEALED_SECRETS_KEY_ORDER_PRIORITY` for
+`--key-order-priority`). `--rotate-period` is the old name of
+`--key-renew-period`. When a setting comes from somewhere the agent cannot
+read, such as a ConfigMap through `envFrom`, the agent reports it as unknown
+and refuses to restore keys, since it cannot tell the key order.
+
 **Authenticity.** Only agent roles can encrypt under the escrow key, and
 AES-GCM with a bound encryption context detects tampering. The control plane
 can't read keys or forge escrow records. The worst it can do is withhold or
@@ -710,8 +719,10 @@ default; `0` turns renewal off). Two postures are supported:
   deterministically (the lowest agent ID). The agent patches its controller
   Deployment's arguments to set the configured period (`keyRenewPeriod` in
   the control plane's chart, 30 days by default), which rolls the
-  controller, and logs `renewal.enabled`. If renewal is already on, it
-  changes nothing. If the chosen agent goes down, the next one is asked.
+  controller, and logs `renewal.enabled`. The flag it sets overrides any
+  variable and earlier occurrence. If renewal is already on, or the agent
+  cannot read the period, it changes nothing. If the chosen agent goes down,
+  the next one is asked.
 
 **Recommended: renewal in one cluster per env.** Run every controller with
 `--key-renew-period=0` (the sealed-secrets chart's `keyrenewperiod: "0"`;

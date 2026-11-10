@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -70,23 +69,28 @@ func (r *Renewal) Enable(ctx context.Context, cmd protocol.Command) (any, error)
 		return nil, err
 	}
 	c := d.Spec.Template.Spec.Containers[i]
-	if current, ok := flagValue(append(slices.Clone(c.Command), c.Args...), "key-renew-period"); ok {
-		if cur, err := time.ParseDuration(current); err == nil && cur > 0 {
-			return renewalResult{Period: cur.String(), AlreadyEnabled: true}, nil
-		}
-	} else {
-		// the controller's default renews every 30 days
-		return renewalResult{Period: defaultKeyRenewPeriod.String(), AlreadyEnabled: true}, nil
+	current := renewPeriodOf(lookupSetting(c, renewPeriodFlags...))
+	if current == "" {
+		// a flag would override it, but it may be on with another period
+		return nil, fmt.Errorf("refusing to change key renewal on %s/%s: its renew period is set where the agent cannot read it", r.namespace, r.deployment)
+	}
+	if cur, err := time.ParseDuration(current); err == nil && cur > 0 {
+		return renewalResult{Period: cur.String(), AlreadyEnabled: true}, nil
 	}
 
-	// a flag in the arguments overrides one in the command: the last wins
-	args := setFlag(c.Args, "key-renew-period", period.String())
-	path := fmt.Sprintf("/spec/template/spec/containers/%d/args", i)
-	patch, err := json.Marshal([]map[string]any{
-		// fail if the arguments changed since they were read
-		{"op": "test", "path": path, "value": c.Args},
-		{"op": "replace", "path": path, "value": args},
-	})
+	args := setRenewPeriod(c.Args, period.String())
+	if v, _ := lastFlag(append(slices.Clone(c.Command), args...), renewPeriodFlags); v != period.String() {
+		return nil, fmt.Errorf("failed to set key renew period on %s/%s: the controller's arguments cannot be changed safely", r.namespace, r.deployment)
+	}
+	path := fmt.Sprintf("/spec/template/spec/containers/%d", i)
+	// fail if the container changed since it was read
+	ops := []map[string]any{{"op": "test", "path": path + "/name", "value": c.Name}}
+	if len(c.Args) > 0 {
+		ops = append(ops, map[string]any{"op": "test", "path": path + "/args", "value": c.Args})
+	}
+	// add replaces the arguments, or adds them to a container that has none
+	ops = append(ops, map[string]any{"op": "add", "path": path + "/args", "value": args})
+	patch, err := json.Marshal(ops)
 	if err != nil {
 		return nil, err
 	}
@@ -115,25 +119,26 @@ func controllerContainerIndex(d *appsv1.Deployment) (int, error) {
 	return 0, fmt.Errorf("failed to find the controller container in %s: expected one named %q", d.Name, controllerContainer)
 }
 
-// setFlag returns args with --name set to value, keeping the flag's form
-// (--name=value or --name value) when it is present in args, and appending
-// it otherwise.
-func setFlag(args []string, name, value string) []string {
+// setRenewPeriod returns args with the key renew period set to value. It
+// changes the last --key-renew-period or --rotate-period in args, keeping
+// its form (--name=value or --name value), since the last occurrence wins;
+// otherwise it adds the flag, before a "--" that ends the flags. A flag in
+// args overrides one in the command, which comes before them, and any
+// environment variable.
+func setRenewPeriod(args []string, value string) []string {
 	out := slices.Clone(args)
-	for i, a := range out {
-		trimmed := strings.TrimLeft(a, "-")
-		if len(trimmed) == len(a) {
+	flags, end := parseFlags(out)
+	for i := len(flags) - 1; i >= 0; i-- {
+		f := flags[i]
+		if !slices.Contains(renewPeriodFlags, f.name) {
 			continue
 		}
-		dashes := a[:len(a)-len(trimmed)]
-		if strings.HasPrefix(trimmed, name+"=") {
-			out[i] = dashes + name + "=" + value
-			return out
+		if f.inline {
+			out[f.at] = "--key-renew-period=" + value
+		} else {
+			out[f.at], out[f.at+1] = "--key-renew-period", value
 		}
-		if trimmed == name && i+1 < len(out) {
-			out[i+1] = value
-			return out
-		}
+		return out
 	}
-	return append(out, "--"+name+"="+value)
+	return slices.Insert(out, end, "--key-renew-period="+value)
 }

@@ -257,3 +257,24 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 		t.Fatalf("missing escrow: err = %v, result = %+v", err, res)
 	}
 }
+
+// A restored old key would become the controller's newest unless it orders
+// keys by NotBefore, so restore refuses unless it can tell that it does.
+func TestKeySync_RestoreNeedsKnownKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	kms := envelope.NewFakeKMS("escrow")
+	cases := map[string][]corev1.EnvVar{
+		"newest-first by variable": {{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", Value: "SecretCreationTimestamp"}},
+		"order from a ConfigMap":   {{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Key: "order"}}}},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := controllerDeployment()
+			d.Spec.Template.Spec.Containers[0].Env = env
+			c := newCluster(t, kms, &memEscrow{records: map[string]protocol.EscrowRecord{}}, "dev", d)
+			if _, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload("SHA256:k")}); err == nil || !strings.Contains(err.Error(), "refusing to restore") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}

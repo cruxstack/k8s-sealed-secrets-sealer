@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,12 +16,6 @@ import (
 
 // keyLabelSelector selects the key Secrets the controller loads.
 const keyLabelSelector = "sealedsecrets.bitnami.com/sealed-secrets-key=active"
-
-// Controller defaults, used when its Deployment does not set the flags.
-const (
-	defaultKeyRenewPeriod   = 30 * 24 * time.Hour
-	defaultKeyOrderPriority = "CertNotBefore"
-)
 
 // Report is what the agent knows about its controller.
 type Report struct {
@@ -140,8 +132,9 @@ func (inv *Inventory) keySet(ctx context.Context) ([]protocol.Key, error) {
 }
 
 // controllerFlags returns the controller's key renew period and key order,
-// with the controller's defaults for flags it does not set. Both are empty
-// when the Deployment cannot be read.
+// with the controller's defaults for settings it does not set. Both are
+// empty when the Deployment cannot be read, and each when the agent cannot
+// tell its value.
 func (inv *Inventory) controllerFlags(ctx context.Context) (string, string) {
 	d, err := inv.kube.AppsV1().Deployments(inv.namespace).Get(ctx, inv.deployment, metav1.GetOptions{})
 	if err != nil {
@@ -153,38 +146,8 @@ func (inv *Inventory) controllerFlags(ctx context.Context) (string, string) {
 			"deployment", inv.namespace+"/"+inv.deployment, "error", err)
 		return "", ""
 	}
-	renew, order := defaultKeyRenewPeriod.String(), defaultKeyOrderPriority
-	for _, c := range d.Spec.Template.Spec.Containers {
-		args := append(append([]string{}, c.Command...), c.Args...)
-		if v, ok := flagValue(args, "key-renew-period"); ok {
-			if p, err := time.ParseDuration(v); err == nil {
-				renew = p.String()
-			} else if v == "0" {
-				renew = time.Duration(0).String()
-			}
-		}
-		if v, ok := flagValue(args, "key-order-priority"); ok {
-			order = v
-		}
-	}
-	return renew, order
-}
-
-// flagValue finds --name=value or --name value (or a single dash) in args.
-func flagValue(args []string, name string) (string, bool) {
-	for i, a := range args {
-		trimmed := strings.TrimLeft(a, "-")
-		if len(trimmed) == len(a) {
-			continue
-		}
-		if v, ok := strings.CutPrefix(trimmed, name+"="); ok {
-			return v, true
-		}
-		if trimmed == name && i+1 < len(args) {
-			return args[i+1], true
-		}
-	}
-	return "", false
+	s := readSettings(d)
+	return s.keyRenewPeriod, s.keyOrderPriority
 }
 
 func toProtocolKey(pem []byte) (protocol.Key, error) {

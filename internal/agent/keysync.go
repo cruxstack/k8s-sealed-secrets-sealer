@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,10 +31,8 @@ const (
 	annotationRestartedAt  = "kubectl.kubernetes.io/restartedAt"
 )
 
-// Controller flag values the agent works with.
+// The controller's key label and the value it loads keys with.
 const (
-	defaultKeyPrefix          = "sealed-secrets-key"
-	orderSecretCreationTime   = "SecretCreationTimestamp"
 	keyLabel                  = "sealedsecrets.bitnami.com/sealed-secrets-key"
 	keyLabelActive            = "active"
 	escrowedRestoredFromValue = "escrow"
@@ -206,15 +203,16 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to get controller deployment %s/%s: %w", k.namespace, k.deployment, err)
 	}
-	args := controllerArgs(d)
-	if order, _ := flagValue(args, "key-order-priority"); order == orderSecretCreationTime {
+	settings := readSettings(d)
+	switch settings.keyOrderPriority {
+	case orderCertNotBefore:
+	case orderSecretCreationTime:
 		// a restored old key would become this controller's newest
 		return nil, fmt.Errorf("refusing to restore keys: controller orders keys by %s", orderSecretCreationTime)
+	default:
+		return nil, errors.New("refusing to restore keys: cannot tell how the controller orders keys (its key order is set where the agent cannot read it)")
 	}
-	prefix := defaultKeyPrefix
-	if v, ok := flagValue(args, "key-prefix"); ok && v != "" {
-		prefix = v
-	}
+	prefix := settings.keyPrefix
 
 	present, err := k.keySecrets(ctx)
 	if err != nil {
@@ -347,16 +345,6 @@ func (k *KeySync) restartController(ctx context.Context) error {
 		return fmt.Errorf("failed to restart controller %s/%s: %w", k.namespace, k.deployment, err)
 	}
 	return nil
-}
-
-// controllerArgs returns the command and arguments of the controller's
-// containers.
-func controllerArgs(d *appsv1.Deployment) []string {
-	var args []string
-	for _, c := range d.Spec.Template.Spec.Containers {
-		args = append(append(args, c.Command...), c.Args...)
-	}
-	return args
 }
 
 // strictDecode decodes a command payload, refusing unknown fields.

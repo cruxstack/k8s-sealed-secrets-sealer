@@ -105,6 +105,23 @@ func TestInventory_ActiveOnlyWithoutKeysCapability(t *testing.T) {
 	}
 }
 
+// The controller also takes its settings from SEALED_SECRETS_ variables.
+func TestInventory_SettingsFromVariables(t *testing.T) {
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now())
+	d := controllerDeployment("--update-status")
+	d.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "SEALED_SECRETS_KEY_ORDER_PRIORITY", Value: "SecretCreationTimestamp"},
+		{Name: "SEALED_SECRETS_ROTATE_PERIOD", Value: "0"},
+	}
+	r, err := inventory(staticCerts{pem: active}, false, d).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Controller.KeyRenewPeriod != "0s" || r.Controller.KeyOrderPriority != "SecretCreationTimestamp" {
+		t.Errorf("flags = %q / %q", r.Controller.KeyRenewPeriod, r.Controller.KeyOrderPriority)
+	}
+}
+
 func TestInventory_UnknownFlagsWhenDeploymentForbidden(t *testing.T) {
 	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now())
 	inv := inventory(staticCerts{pem: active}, false)
@@ -137,21 +154,5 @@ func TestInventory_FailsWithoutActiveCert(t *testing.T) {
 	inv := inventory(staticCerts{err: errors.New("proxy down")}, true)
 	if _, err := inv.Collect(context.Background()); err == nil {
 		t.Fatal("expected an error")
-	}
-}
-
-func TestFlagValue(t *testing.T) {
-	args := []string{"controller", "--update-status", "--key-renew-period", "24h", "-key-order-priority=CertNotBefore", "--key-prefix"}
-	if v, ok := flagValue(args, "key-renew-period"); !ok || v != "24h" {
-		t.Errorf("key-renew-period = %q %v", v, ok)
-	}
-	if v, ok := flagValue(args, "key-order-priority"); !ok || v != "CertNotBefore" {
-		t.Errorf("key-order-priority = %q %v", v, ok)
-	}
-	if _, ok := flagValue(args, "key-prefix"); ok {
-		t.Error("a trailing flag without a value was found")
-	}
-	if _, ok := flagValue(args, "missing"); ok {
-		t.Error("missing flag found")
 	}
 }
