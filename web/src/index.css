@@ -52,6 +52,14 @@
 }
 
 @layer base {
+  /* native controls (scrollbars, suggestion lists) follow the theme */
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+
   :root {
     /* light: cool slate surfaces with a cobalt accent */
     --background: 210 40% 98%;

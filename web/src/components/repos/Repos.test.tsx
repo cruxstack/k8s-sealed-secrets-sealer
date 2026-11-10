@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -86,29 +92,56 @@ describe("repositories", () => {
       fakeApi({ me: ME, files: { "example-org/apps": listing() } }),
     );
 
-    const billing = await screen.findByRole("region", {
+    // every file, with whether values fit in it
+    const files = await screen.findByRole("list", { name: "Files" });
+    const buttons = within(files).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual([
+      "deploy/billing/sealed-secret.yaml2 documents · use1, use2",
+      "deploy/legacy/sealed-secret.yaml1 document · Can't seal",
+      "deploy/broken/sealed-secret.yamlUnreadable",
+    ]);
+
+    // the first file values fit in is open
+    const billing = screen.getByRole("region", {
       name: "deploy/billing/sealed-secret.yaml",
     });
-    expect(within(billing).getByText("2 documents")).toBeInTheDocument();
     expect(
       within(billing).getByRole("rowheader", {
         name: "dev-use1-blue-apps/billing",
       }),
     ).toBeInTheDocument();
     expect(within(billing).getByText("api-key")).toBeInTheDocument();
-    expect(within(billing).getAllByText("Ready")).toHaveLength(2);
-
-    const legacy = screen.getByRole("region", {
-      name: "deploy/legacy/sealed-secret.yaml",
-    });
-    expect(within(legacy).getByText("Can't seal")).toBeInTheDocument();
-    expect(within(legacy).getByText(/cluster-wide scope/)).toBeInTheDocument();
-
     expect(
-      screen.getByText(/could not read this file: file is not valid yaml/i),
+      within(billing).getAllByRole("button", { name: /^Strict scope/ }),
+    ).toHaveLength(2);
+
+    fireEvent.click(buttons[2] as HTMLElement);
+    expect(
+      await screen.findByText(
+        /could not read this file: file is not valid yaml/i,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("0123456")).toBeInTheDocument();
     expect(screen.queryByText(/not write to it/)).not.toBeInTheDocument();
+  });
+
+  it("filters repositories and opens the first match with Enter", async () => {
+    const router = renderAt(
+      "/repos",
+      fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
+    );
+    const filter = await screen.findByRole("searchbox", {
+      name: "Filter repositories",
+    });
+    fireEvent.change(filter, { target: { value: "plat" } });
+    expect(screen.getAllByRole("rowheader")).toHaveLength(1);
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    fireEvent.keyDown(filter, { key: "Enter" });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repos/example-org/platform",
+      ),
+    );
   });
 
   it("says when the user can only read, and when nothing was found", async () => {

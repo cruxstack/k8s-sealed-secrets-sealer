@@ -99,7 +99,7 @@ describe("auth routing", () => {
     expect(link).toHaveAttribute("href", "/api/v1/auth/login");
   });
 
-  it("sends a signed-in user from /login to the fleet", async () => {
+  it("sends a signed-in user from /login to their repositories", async () => {
     const api = fakeApi({ me: ME });
     apiClient.defaults.adapter = api.adapter;
     const { router, navigations } = renderApp("/login");
@@ -108,8 +108,8 @@ describe("auth routing", () => {
       await screen.findByRole("button", { name: /account menu for octocat/i }),
     ).toBeInTheDocument();
     await waitFor(() => expect(router.state.status).toBe("idle"));
-    expect(router.state.location.pathname).toBe("/");
-    expect(navigations()).toBeLessThanOrEqual(3);
+    expect(router.state.location.pathname).toBe("/repos");
+    expect(navigations()).toBeLessThanOrEqual(4);
     expect(
       screen.queryByRole("link", { name: /sign in with github/i }),
     ).not.toBeInTheDocument();
