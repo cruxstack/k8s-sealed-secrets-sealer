@@ -13,18 +13,33 @@ and one line of context, then what matters most (the fleet's env key banner)
 and its main table or form. A page under another one puts the way back in
 its title as a breadcrumb ("Secrets / example-org/apps") rather than on a
 line of its own. Sealing is what people come for, so the home page is Secrets
-(`/secrets`): their repositories, each opening its workspace at
-`/secrets/{owner}/{repo}`. The navigation holds what everyone uses.
+(`/{env}/secrets`): their repositories, each opening its workspace at
+`/{env}/secrets/{owner}/{repo}`. The navigation holds what everyone uses.
+
+Every page but signing in is about one env, named first in its path, so a
+link keeps its env. Components read the env from `useEnv()`, never from the
+session, and API calls go to it on their own (`/api/v1/envs/{env}/...`). `/`
+opens the first env the user may use, and paths from before envs were in
+them (`/secrets/...`, `/fleet`) open the same page there. An env the user may
+not use says so and links to those they may. Moving to another env starts
+its pages afresh, so nothing loaded for one env shows in another.
 
 Pages work down to a phone's width (390px) without scrolling sideways. Grids
 collapse to one column with `grid-cols-1`, whose track lets items shrink
 (a bare `grid` sizes its column to the widest item), and only a wide table
 scrolls, inside its own box.
 
-The fleet (`/fleet`) is for admins. They reach it from the account menu, the
-palette and the env badge; nobody else is offered it, and someone who opens
-the URL anyway is told it is for admins. Everyone sees whether sealing works
-from the dot on the env badge, with a summary in its tooltip.
+The fleet (`/{env}/fleet`) is for the env's admins. They reach it from the
+account menu, the palette and the env badge; nobody else is offered it, and
+someone who opens the URL anyway is told it is for admins. Everyone sees
+whether sealing works from the dot on the env badge, with a summary in its
+tooltip; when it doesn't, the workspace says so above the files, since seals
+would fail.
+
+Someone who may use several envs gets a switcher in place of the badge: the
+same dot and name, opening a menu of their envs (the current one checked,
+those they administer marked), the env's sealing summary, and its fleet for
+admins. The palette offers the other envs too.
 
 ## Workspaces
 

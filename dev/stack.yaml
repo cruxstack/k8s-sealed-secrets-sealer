@@ -11,3 +11,12 @@ clusters:
     region: use1
   - name: dev-use2-blue
     region: use2
+
+# A second env the same control plane serves, whose clusters do not run
+# here: it lists prod's SealedSecrets, says sealing is unavailable without
+# its agents, and is for the sealer-admins team only.
+otherEnvs:
+  - env: prod
+    clusters:
+      - name: prod-use1-blue
+        region: use1

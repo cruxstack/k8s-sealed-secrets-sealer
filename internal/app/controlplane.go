@@ -32,17 +32,83 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/webui"
 )
 
-// NewControlPlane returns the control plane's HTTP handler. It makes no
-// network calls, except to create the DynamoDB table when the configuration
-// asks for it (local emulators only).
-func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog.Logger) (http.Handler, error) {
-	reg, err := loadRegistry(cfg)
-	if err != nil {
-		return nil, err
+// NewControlPlane returns the control plane's HTTP handler for the envs it
+// serves on one URL (config.LoadControlPlanes): one sign-in and web UI for
+// all of them, and for each its own registry, store, transit key and
+// agents. It makes no network calls, except to create DynamoDB tables when
+// the configuration asks for it (local emulators only).
+func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *slog.Logger) (http.Handler, error) {
+	if len(cfgs) == 0 {
+		return nil, errors.New("no env to serve")
 	}
+	// settings every env shares come from the first
+	shared := cfgs[0]
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
+	}
+
+	userSessions, err := userauth.NewSessions(shared.UserSessionKey, shared.PublicURL, shared.UserSessionTTL, nil)
+	if err != nil {
+		return nil, err
+	}
+	policies := make([]userauth.EnvPolicy, len(cfgs))
+	for i, cfg := range cfgs {
+		policies[i] = userauth.EnvPolicy{Name: cfg.EnvName, Teams: cfg.GitHubAllowedTeams, AdminTeams: cfg.GitHubAdminTeams}
+	}
+	users := userauth.NewHandler(userauth.HandlerOptions{
+		Sessions: userSessions,
+		GitHub: userauth.NewGitHub(userauth.GitHubOptions{
+			ClientID:     shared.GitHubOAuthClientID,
+			ClientSecret: shared.GitHubOAuthClientSecret,
+			TokenURL:     shared.GitHubOAuthTokenURL,
+			APIURL:       shared.GitHubAPIURL,
+		}),
+		PublicURL:    shared.PublicURL,
+		AuthorizeURL: shared.GitHubURL + "/login/oauth/authorize",
+		ClientID:     shared.GitHubOAuthClientID,
+		Org:          shared.GitHubOrg,
+		Envs:         policies,
+		Logger:       logger,
+	})
+	// one GitHub App reads and writes for every env
+	githubApp, err := githubapp.New(githubapp.Options{
+		APIURL:         shared.GitHubAPIURL,
+		AppID:          shared.GitHubAppID,
+		PrivateKey:     shared.GitHubAppPrivateKey,
+		Org:            shared.GitHubOrg,
+		InstallationID: shared.GitHubAppInstallationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	envs := make([]*controlplane.Server, len(cfgs))
+	for i, cfg := range cfgs {
+		log := logger
+		if len(cfgs) > 1 {
+			log = logger.With("env", cfg.EnvName)
+		}
+		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, log); err != nil {
+			return nil, fmt.Errorf("env %s: %w", cfg.EnvName, err)
+		}
+	}
+	logger.InfoContext(ctx, "starting control plane",
+		"version", version.Version, "envs", len(cfgs), "github_org", shared.GitHubOrg)
+	return controlplane.NewHost(controlplane.HostOptions{
+		Version: version.Version,
+		Users:   users,
+		Envs:    envs,
+		WebUI:   webui.Handler(),
+		HSTS:    strings.HasPrefix(shared.PublicURL, "https://"),
+	}), nil
+}
+
+// newEnv returns one env's server.
+func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, logger *slog.Logger) (*controlplane.Server, error) {
+	reg, err := loadRegistry(cfg)
+	if err != nil {
+		return nil, err
 	}
 	sessions, err := agentauth.NewSessions(cfg.AgentSessionKey, cfg.PublicURL, cfg.EnvName, nil)
 	if err != nil {
@@ -65,39 +131,6 @@ func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog
 	if err != nil {
 		return nil, err
 	}
-
-	userSessions, err := userauth.NewSessions(cfg.UserSessionKey, cfg.PublicURL, cfg.EnvName, cfg.UserSessionTTL, nil)
-	if err != nil {
-		return nil, err
-	}
-	users := userauth.NewHandler(userauth.HandlerOptions{
-		Sessions: userSessions,
-		GitHub: userauth.NewGitHub(userauth.GitHubOptions{
-			ClientID:     cfg.GitHubOAuthClientID,
-			ClientSecret: cfg.GitHubOAuthClientSecret,
-			TokenURL:     cfg.GitHubOAuthTokenURL,
-			APIURL:       cfg.GitHubAPIURL,
-		}),
-		PublicURL:    cfg.PublicURL,
-		AuthorizeURL: cfg.GitHubURL + "/login/oauth/authorize",
-		ClientID:     cfg.GitHubOAuthClientID,
-		Env:          cfg.EnvName,
-		Org:          cfg.GitHubOrg,
-		Teams:        cfg.GitHubAllowedTeams,
-		AdminTeams:   cfg.GitHubAdminTeams,
-		Logger:       logger,
-	})
-
-	githubApp, err := githubapp.New(githubapp.Options{
-		APIURL:         cfg.GitHubAPIURL,
-		AppID:          cfg.GitHubAppID,
-		PrivateKey:     cfg.GitHubAppPrivateKey,
-		Org:            cfg.GitHubOrg,
-		InstallationID: cfg.GitHubAppInstallationID,
-	})
-	if err != nil {
-		return nil, err
-	}
 	repoService, err := repos.New(repos.Options{
 		GitHub:      githubApp,
 		Env:         cfg.EnvName,
@@ -108,16 +141,16 @@ func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog
 	if err != nil {
 		return nil, err
 	}
-
 	transit, err := newKMS(awsCfg, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	logger.InfoContext(ctx, "starting control plane",
-		"version", version.Version, "agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
-		"github_org", cfg.GitHubOrg, "github_teams", cfg.GitHubAllowedTeams, "github_admin_teams", cfg.GitHubAdminTeams)
-	srv := controlplane.New(controlplane.Options{
+	// the logger names the env
+	logger.InfoContext(ctx, "serving env",
+		"agents", len(reg.Agents), "admin_api", cfg.AdminToken != "",
+		"github_teams", cfg.GitHubAllowedTeams, "github_admin_teams", cfg.GitHubAdminTeams)
+	return controlplane.New(controlplane.Options{
 		Logger:   logger,
 		Version:  version.Version,
 		Env:      cfg.EnvName,
@@ -134,12 +167,10 @@ func NewControlPlane(ctx context.Context, cfg *config.ControlPlane, logger *slog
 		// the control plane only ever generates data keys with it
 		Transit:      transit,
 		TransitKeyID: cfg.KMSTransitKeyID,
-		WebUI:        webui.Handler(),
 		HSTS:         strings.HasPrefix(cfg.PublicURL, "https://"),
 
 		KeyRenewPeriod: cfg.KeyRenewPeriod,
-	})
-	return srv.Handler(), nil
+	}), nil
 }
 
 // loadRegistry reads the agent registry from its file or, when it is given
@@ -157,14 +188,19 @@ func loadRegistry(cfg *config.ControlPlane) (*registry.Registry, error) {
 }
 
 // newKMS returns the client for the transit key, as the one thing it may do
-// with it: generate data keys. Credentials come from the SDK's default chain.
+// with it: generate data keys. It calls the key's region: the one in its
+// ARN, which a key in another account is named by, or else the configured
+// region. Credentials come from the SDK's default chain.
 func newKMS(awsCfg aws.Config, cfg *config.ControlPlane) (envelope.DataKeyGenerator, error) {
-	region := cfg.KMSRegion
+	region := config.KMSKeyRegion(cfg.KMSTransitKeyID)
+	if region == "" {
+		region = cfg.KMSRegion
+	}
 	if region == "" {
 		region = awsCfg.Region
 	}
 	if region == "" {
-		return nil, errors.New("sealing needs a KMS region: set APP_KMS_REGION or AWS_REGION")
+		return nil, errors.New("sealing needs a KMS region: name the transit key by its ARN, or set APP_KMS_REGION or AWS_REGION")
 	}
 	return kms.NewFromConfig(awsCfg, func(o *kms.Options) {
 		o.Region = region

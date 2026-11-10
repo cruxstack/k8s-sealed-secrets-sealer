@@ -7,17 +7,24 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import apiClient, { navigation } from "@/api/client";
+import apiClient, { navigation, setApiEnv } from "@/api/client";
 import type { MeResponse, SealingStatus } from "@/api/types";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/lib/auth";
+import { EnvProvider } from "@/lib/env";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { Header } from "./Header";
-import { ADMIN, ME, fakeApi } from "@/test/fake-api";
+import { ADMIN, ME, TWO_ENVS, fakeApi } from "@/test/fake-api";
 
-function renderHeader(me: MeResponse, status?: SealingStatus) {
+/** The header of a page in env (the user's first, by default). */
+function renderHeader(
+  me: MeResponse,
+  status?: SealingStatus,
+  env = me.envs[0]!,
+) {
   const api = fakeApi({ me, status });
   apiClient.defaults.adapter = api.adapter;
+  setApiEnv(env.name);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -27,7 +34,9 @@ function renderHeader(me: MeResponse, status?: SealingStatus) {
       component: () => (
         <TooltipProvider>
           <AuthProvider>
-            <Header />
+            <EnvProvider env={env}>
+              <Header />
+            </EnvProvider>
           </AuthProvider>
         </TooltipProvider>
       ),
@@ -76,7 +85,7 @@ describe("Header", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
       "href",
-      "/secrets",
+      "/dev/secrets",
     );
 
     fireEvent.keyDown(trigger, { key: "Enter" });
@@ -88,9 +97,11 @@ describe("Header", () => {
 
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
     const logout = api.calls.find((c) => c.url === "/auth/logout");
+    // signing out is for every env at once
     expect(logout).toEqual({
       method: "POST",
       url: "/auth/logout",
+      env: undefined,
       csrf: ME.csrf_token,
     });
   });
@@ -102,7 +113,7 @@ describe("Header", () => {
       await screen.findByRole("link", {
         name: "Environment dev: sealing works. Open the fleet",
       }),
-    ).toHaveAttribute("href", "/fleet");
+    ).toHaveAttribute("href", "/dev/fleet");
 
     fireEvent.keyDown(
       screen.getByRole("button", { name: /account menu for octocat/i }),
@@ -110,6 +121,28 @@ describe("Header", () => {
     );
     expect(
       await screen.findByRole("menuitem", { name: /fleet/i }),
-    ).toHaveAttribute("href", "/fleet");
+    ).toHaveAttribute("href", "/dev/fleet");
+  });
+
+  it("switches between the envs a user may use, and leads to the fleets they administer", async () => {
+    renderHeader(TWO_ENVS, undefined, TWO_ENVS.envs[1]);
+
+    const switcher = await screen.findByRole("button", {
+      name: "Environment prod: sealing works. Switch environment",
+    });
+    fireEvent.keyDown(switcher, { key: "Enter" });
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((i) => i.textContent)).toEqual([
+      "dev",
+      "prodadmin",
+      "Open the prod fleet",
+    ]);
+    expect(screen.getByRole("menuitem", { name: /^prod/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(
+      screen.getByRole("menuitem", { name: "Open the prod fleet" }),
+    ).toHaveAttribute("href", "/prod/fleet");
   });
 });

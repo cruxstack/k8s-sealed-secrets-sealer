@@ -352,19 +352,22 @@ agents:
 		t.Fatal(err)
 	}
 	agentSessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "http://localhost:4100", "dev", nil)
-	userSessions, err := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "http://localhost:4100", "dev", time.Hour, nil)
+	userSessions, err := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "http://localhost:4100", time.Hour, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	users := userauth.NewHandler(userauth.HandlerOptions{
-		Sessions: userSessions, PublicURL: "http://localhost:4100", Env: "dev", Org: "example-org",
-		Logger: slog.New(slog.DiscardHandler),
+		Sessions: userSessions, PublicURL: "http://localhost:4100", Org: "example-org",
+		Envs: []userauth.EnvPolicy{{Name: "dev"}}, Logger: slog.New(slog.DiscardHandler),
 	})
 	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("<html>ui</html>")) })
-	h := New(Options{
-		Env: "dev", Registry: reg, Sessions: agentSessions, Store: store.NewMemory(),
-		Users: users, WebUI: ui, HSTS: true, Logger: slog.New(slog.DiscardHandler),
-	}).Handler()
+	h := NewHost(HostOptions{
+		Users: users, WebUI: ui, HSTS: true,
+		Envs: []*Server{New(Options{
+			Env: "dev", Registry: reg, Sessions: agentSessions, Store: store.NewMemory(),
+			Users: users.Env("dev"), HSTS: true, Logger: slog.New(slog.DiscardHandler),
+		})},
+	})
 
 	get := func(path, session string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -384,14 +387,18 @@ agents:
 		t.Fatalf("fleet with an agent session as cookie = %d", rec.Code)
 	}
 	// the fleet is for admins
-	session, _, _ := userSessions.Issue(userauth.User{ID: 1004, Login: "dave"})
+	session, _, _ := userSessions.Issue(userauth.User{ID: 1004, Login: "dave"}, userauth.Grants{"dev": false})
 	if rec := get("/api/v1/fleet", session); rec.Code != http.StatusForbidden {
 		t.Fatalf("fleet for a user who is not an admin = %d", rec.Code)
 	}
-	admin, _, _ := userSessions.Issue(userauth.User{ID: 1001, Login: "alice", Admin: true})
+	admin, _, _ := userSessions.Issue(userauth.User{ID: 1001, Login: "alice"}, userauth.Grants{"dev": true})
 	rec := get("/api/v1/fleet", admin)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"use1-blue"`) {
 		t.Fatalf("fleet = %d %s", rec.Code, rec.Body)
+	}
+	// the env's own path serves the same
+	if rec := get("/api/v1/envs/dev/fleet", admin); rec.Code != http.StatusOK {
+		t.Fatalf("fleet under the env's path = %d", rec.Code)
 	}
 	// everyone sees whether sealing works, without agent names
 	rec = get("/api/v1/status", session)

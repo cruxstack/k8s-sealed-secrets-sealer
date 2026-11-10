@@ -122,34 +122,41 @@ for image, binary in [
 # ----------------------------------------------------------- control plane ---
 
 def agent_registry():
-    # The registry lists one agent per simulated cluster, logging in with its
-    # service account. All of them share the k3d cluster's token issuer, whose
-    # signing keys are read once here so the control plane needs no access to
-    # the Kubernetes API.
+    # A registry per env lists one agent per simulated cluster, logging in
+    # with its service account. All of them share the k3d cluster's token
+    # issuer, whose signing keys are read once here so the control plane
+    # needs no access to the Kubernetes API. The other envs' clusters never
+    # run, so their agents never check in.
     context = k8s_context()
     discovery = decode_json(str(local("kubectl --context %s get --raw /.well-known/openid-configuration" % shlex.quote(context), quiet=True)))
     jwks = str(local("kubectl --context %s get --raw /openid/v1/jwks" % shlex.quote(context), quiet=True))
-    registry = {
-        "issuers": [{"name": "local", "url": discovery["issuer"], "jwksFile": "local-jwks.json"}],
-        "agents": [
-            {
-                "id": c["name"],
-                "cluster": c["name"],
-                "region": c["region"],
-                "capabilities": ["seal", "keys", "renewal"],
-                "identity": {"k8s": {
-                    "issuer": "local",
-                    "subject": "system:serviceaccount:%s-sealer:sealer-agent" % c["name"],
-                }},
-            }
-            for c in STACK["clusters"]
-        ],
-    }
+
+    def registry(clusters):
+        return str(encode_yaml({
+            "issuers": [{"name": "local", "url": discovery["issuer"], "jwksFile": "local-jwks.json"}],
+            "agents": [
+                {
+                    "id": c["name"],
+                    "cluster": c["name"],
+                    "region": c["region"],
+                    "capabilities": ["seal", "keys", "renewal"],
+                    "identity": {"k8s": {
+                        "issuer": "local",
+                        "subject": "system:serviceaccount:%s-sealer:sealer-agent" % c["name"],
+                    }},
+                }
+                for c in clusters
+            ],
+        }))
+
+    data = {"registry-%s.yaml" % STACK["env"]: registry(STACK["clusters"]), "local-jwks.json": jwks}
+    for other in STACK.get("otherEnvs", []):
+        data["registry-%s.yaml" % other["env"]] = registry(other["clusters"])
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {"name": "sealer-registry", "namespace": SYSTEM_NAMESPACE},
-        "data": {"registry.yaml": str(encode_yaml(registry)), "local-jwks.json": jwks},
+        "data": data,
     }
 
 setup_objects.append(agent_registry())

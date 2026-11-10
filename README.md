@@ -15,6 +15,8 @@ region or a certificate.
 > is for, which keys it should hold and where its docs are. Admins see the fleet
 > (every agent, its controller's keys and the env's key state); everyone else
 > sees whether sealing works. Agents keep every cluster holding the same keys.
+> One deployment can also serve several envs, such as dev and prod, on one
+> URL, with one sign-in and per-env teams.
 > Releases publish the control plane for Lambda, container images and Helm
 > charts; the Terraform module for AWS is next. See
 > [the design](docs/design.md) for where it is going.
@@ -52,7 +54,8 @@ flowchart TB
 Agents always open the connection; nothing calls into a cluster, and the
 controllers never talk to the control plane.
 
-- **Control plane:** serves the UI and API for one environment. Runs on AWS
+- **Control plane:** serves the UI and API for one environment, or several on
+  one URL. Its clusters may be in any AWS account and region. Runs on AWS
   Lambda behind API Gateway, or as a container. It has no Kubernetes client
   and knows nothing about the cluster it runs in.
 - **Agents:** one per cluster, beside the sealed-secrets controller. They only

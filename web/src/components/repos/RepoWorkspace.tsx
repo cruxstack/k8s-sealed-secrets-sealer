@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
+  CircleSlash,
   ExternalLink,
   FileSearch,
   FileWarning,
@@ -12,12 +13,13 @@ import {
 import { extractApiError } from "@/api/client";
 import { repoFilesQueryOptions } from "@/api/queries/repos";
 import { sessionQueryOptions } from "@/api/queries/sessions";
+import { statusQueryOptions } from "@/api/queries/status";
 import type { PullRequest, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAuth } from "@/lib/auth";
+import { useEnv } from "@/lib/env";
 import { safeHttpUrl } from "@/lib/utils";
 import { FileList, fileStatus } from "./FileList";
 import { FilePanel } from "./FilePanel";
@@ -108,7 +110,8 @@ export function RepoWorkspace({
   selected: string | undefined;
   onSelect: (path: string) => void;
 }) {
-  const { env } = useAuth();
+  const env = useEnv()?.name ?? "";
+  const { data: status } = useQuery(statusQueryOptions);
   const sessionQuery = useQuery(sessionQueryOptions(owner, repo));
   const session = sessionQuery.data ?? null;
   const { data, error, isPending } = useQuery({
@@ -142,7 +145,8 @@ export function RepoWorkspace({
             <ol className="flex flex-wrap items-baseline gap-x-2 text-xl tracking-tight">
               <li>
                 <Link
-                  to="/secrets"
+                  to="/$env/secrets"
+                  params={{ env }}
                   className="font-semibold text-muted-foreground hover:text-foreground hover:underline"
                 >
                   Secrets
@@ -232,6 +236,24 @@ export function RepoWorkspace({
               write access on GitHub.
             </p>
           )}
+          {canWrite && status?.sealing === "unavailable" && (
+            <p
+              role="status"
+              className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm"
+            >
+              <CircleSlash
+                className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+                aria-hidden="true"
+              />
+              <span>
+                Sealing is unavailable in {env} right now: {status.message}{" "}
+                <span className="text-muted-foreground">
+                  You can look around, but seals fail until its clusters are
+                  back.
+                </span>
+              </span>
+            </p>
+          )}
           {data.truncated && (
             <p
               role="status"
@@ -310,7 +332,7 @@ export function RepoWorkspace({
                   <FilePanel
                     owner={owner}
                     repo={repo}
-                    env={env ?? ""}
+                    env={env}
                     file={current}
                     commit={data.commit}
                     session={session}

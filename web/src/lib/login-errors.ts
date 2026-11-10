@@ -4,7 +4,7 @@ const LOGIN_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   not_member:
     "Access denied. You must be a member of the GitHub organization to use this app.",
   not_in_team:
-    "Access denied. You must be a member of a GitHub team allowed to use this environment.",
+    "Access denied. You must be a member of a GitHub team allowed to use one of its envs.",
   state_mismatch:
     "Sign-in could not be verified (state mismatch). Please try again.",
   github_error: "GitHub returned an error. Please try again.",

@@ -41,16 +41,23 @@ type HandlerOptions struct {
 	// https://github.com/login/oauth/authorize.
 	AuthorizeURL string
 	ClientID     string
-	Env          string
 	// Org is the GitHub organization users must belong to.
 	Org string
-	// Teams, when set, also require membership in at least one of these
-	// teams of Org.
+	// Envs are the envs this deployment serves, in the order people see
+	// them, with who may use and administer each.
+	Envs   []EnvPolicy
+	Logger *slog.Logger
+}
+
+// EnvPolicy says who may use an env and who administers it.
+type EnvPolicy struct {
+	Name string
+	// Teams, when set, limit the env to members of at least one of these
+	// teams of Org; otherwise every member of Org may use it.
 	Teams []string
-	// AdminTeams are teams of Org whose members are admins: they may see
-	// the fleet. Membership is checked at sign-in.
+	// AdminTeams are teams of Org whose members administer the env: they
+	// may see its fleet.
 	AdminTeams []string
-	Logger     *slog.Logger
 }
 
 // Handler serves sign-in, sign-out and /me, and authenticates requests.
@@ -146,10 +153,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, ErrCodeGitHub)
 		return
 	}
-	code, err := h.authorize(r, token, user.Login)
-	if err == nil && code == "" {
-		user.Admin, err = h.anyTeam(r, token, user.Login, h.opts.AdminTeams)
-	}
+	grants, code, err := h.authorize(r, token, user.Login)
 	if err != nil || code != "" {
 		if err != nil {
 			log.WarnContext(ctx, "sign-in failed", "event", "user.login_failed", "user", user.Login, "error", err)
@@ -161,7 +165,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, exp, err := h.opts.Sessions.Issue(*user)
+	session, exp, err := h.opts.Sessions.Issue(*user, grants)
 	if err != nil {
 		log.ErrorContext(ctx, "failed to issue user session", "user", user.Login, "error", err)
 		h.fail(w, r, ErrCodeGitHub)
@@ -176,60 +180,87 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	log.InfoContext(ctx, "user signed in", "event", "user.login", "user", user.Login, "github_id", user.ID, "admin", user.Admin)
+	log.InfoContext(ctx, "user signed in", "event", "user.login", "user", user.Login, "github_id", user.ID, "envs", grants)
 	if returnTo == "" {
 		returnTo = "/"
 	}
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
-// authorize returns a failure code when the user may not sign in.
-func (h *Handler) authorize(r *http.Request, token, login string) (string, error) {
+// authorize returns the envs the user may use, each with whether they
+// administer it, or a failure code when they may use none.
+func (h *Handler) authorize(r *http.Request, token, login string) (Grants, string, error) {
 	member, err := h.opts.GitHub.OrgMember(r.Context(), token, h.opts.Org, login)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if !member {
-		return ErrCodeNotMember, nil
+		return nil, ErrCodeNotMember, nil
 	}
-	if len(h.opts.Teams) == 0 {
-		return "", nil
+	// envs often share teams: each is looked up once
+	teams := map[string]bool{}
+	anyTeam := func(names []string) (bool, error) {
+		for _, team := range names {
+			ok, seen := teams[team]
+			if !seen {
+				if ok, err = h.opts.GitHub.TeamMember(r.Context(), token, h.opts.Org, team, login); err != nil {
+					return false, err
+				}
+				teams[team] = ok
+			}
+			if ok {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
-	ok, err := h.anyTeam(r, token, login, h.opts.Teams)
-	switch {
-	case err != nil:
-		return "", err
-	case !ok:
-		return ErrCodeNotInTeam, nil
-	}
-	return "", nil
-}
-
-// anyTeam reports whether login is an active member of any of teams.
-func (h *Handler) anyTeam(r *http.Request, token, login string, teams []string) (bool, error) {
-	for _, team := range teams {
-		ok, err := h.opts.GitHub.TeamMember(r.Context(), token, h.opts.Org, team, login)
+	grants := Grants{}
+	for _, env := range h.opts.Envs {
+		allowed := len(env.Teams) == 0
+		if !allowed {
+			if allowed, err = anyTeam(env.Teams); err != nil {
+				return nil, "", err
+			}
+		}
+		if !allowed {
+			continue
+		}
+		admin, err := anyTeam(env.AdminTeams)
 		if err != nil {
-			return false, err
+			return nil, "", err
 		}
-		if ok {
-			return true, nil
-		}
+		grants[env.Name] = admin
 	}
-	return false, nil
+	if len(grants) == 0 {
+		return nil, ErrCodeNotInTeam, nil
+	}
+	return grants, "", nil
 }
 
-// Me returns the signed-in user and the CSRF token for their session.
+// EnvAccess is an env a user may use, as /me lists it.
+type EnvAccess struct {
+	Name  string `json:"name"`
+	Admin bool   `json:"admin"`
+}
+
+// Me returns the signed-in user, the envs they may use (in the order the
+// deployment lists them) and the CSRF token for their session.
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
-	token, user := h.session(r)
+	token, user, grants := h.session(r)
 	if user == nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	envs := []EnvAccess{}
+	for _, env := range h.opts.Envs {
+		if admin, ok := grants[env.Name]; ok {
+			envs = append(envs, EnvAccess{Name: env.Name, Admin: admin})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":       user,
+		"envs":       envs,
 		"csrf_token": h.opts.Sessions.CSRFToken(token),
-		"env":        h.opts.Env,
 	})
 }
 
@@ -244,16 +275,58 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // RequireUser rejects requests without a valid session and puts the user in
-// the request context.
+// the request context, as no env in particular sees them.
 func (h *Handler) RequireUser(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, user := h.session(r)
+		_, user, _ := h.session(r)
 		if user == nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 		next(w, r.WithContext(WithUser(r.Context(), user)))
 	}
+}
+
+// Env returns the guard for one env's routes.
+func (h *Handler) Env(name string) *EnvGuard {
+	return &EnvGuard{h: h, env: name}
+}
+
+// EnvGuard admits people to one env: those whose session grants it.
+type EnvGuard struct {
+	h   *Handler
+	env string
+}
+
+// RequireUser rejects requests without a valid session, and with one that
+// does not grant the env, and puts the user, as the env sees them, in the
+// request context.
+func (g *EnvGuard) RequireUser(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, user, grants := g.h.session(r)
+		if user == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		admin, ok := grants[g.env]
+		if !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you may not use the " + g.env + " env"})
+			return
+		}
+		user.Admin = admin
+		next(w, r.WithContext(WithUser(r.Context(), user)))
+	}
+}
+
+// RequireCSRF is Handler.RequireCSRF.
+func (g *EnvGuard) RequireCSRF(next http.HandlerFunc) http.HandlerFunc {
+	return g.h.RequireCSRF(next)
+}
+
+// RequireAdmin is Handler.RequireAdmin: the user must administer the env.
+// It must run behind RequireUser.
+func (g *EnvGuard) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return g.h.RequireAdmin(next)
 }
 
 // RequireAdmin rejects users who are not admins. It must run behind
@@ -277,7 +350,7 @@ func (h *Handler) RequireCSRF(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		token, user := h.session(r)
+		token, user, _ := h.session(r)
 		header := r.Header.Get(CSRFHeader)
 		if user == nil || header == "" ||
 			subtle.ConstantTimeCompare([]byte(header), []byte(h.opts.Sessions.CSRFToken(token))) != 1 {
@@ -288,16 +361,16 @@ func (h *Handler) RequireCSRF(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (h *Handler) session(r *http.Request) (string, *User) {
+func (h *Handler) session(r *http.Request) (string, *User, Grants) {
 	c, err := r.Cookie(h.sessionCookie)
 	if err != nil || c.Value == "" {
-		return "", nil
+		return "", nil, nil
 	}
-	user, err := h.opts.Sessions.Verify(c.Value)
+	user, grants, err := h.opts.Sessions.Verify(c.Value)
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
-	return c.Value, user
+	return c.Value, user, grants
 }
 
 func (h *Handler) callbackURL() string {

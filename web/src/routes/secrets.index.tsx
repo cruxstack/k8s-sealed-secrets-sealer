@@ -1,16 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { RepoList } from "@/components/repos/RepoList";
-import { requireSignedIn, SignedInPage } from "@/lib/require-auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { homeEnv } from "@/lib/require-auth";
 
+// pages are under their env now; links from before go to the first env
 export const Route = createFileRoute("/secrets/")({
-  beforeLoad: requireSignedIn,
-  component: ReposPage,
+  beforeLoad: async (opts) => {
+    const env = await homeEnv(opts);
+    throw redirect({ to: "/$env/secrets", params: { env }, replace: true });
+  },
 });
-
-function ReposPage() {
-  return (
-    <SignedInPage>
-      <RepoList />
-    </SignedInPage>
-  );
-}

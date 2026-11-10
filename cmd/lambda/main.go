@@ -27,13 +27,17 @@ func main() {
 
 // setup runs once per Lambda instance, in its init phase.
 func setup(ctx context.Context) (*handler, error) {
-	cfg, err := config.LoadControlPlane(ctx)
+	cfgs, err := config.LoadControlPlanes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	logger := cfg.Logging.Logger(os.Stdout).With("component", "control-plane", "env", cfg.EnvName, "runtime", "lambda")
+	cfg := cfgs[0]
+	logger := cfg.Logging.Logger(os.Stdout).With("component", "control-plane", "runtime", "lambda")
+	if len(cfgs) == 1 {
+		logger = logger.With("env", cfg.EnvName)
+	}
 	slog.SetDefault(logger)
-	next, err := app.NewControlPlane(ctx, cfg, logger)
+	next, err := app.NewControlPlane(ctx, cfgs, logger)
 	if err != nil {
 		return nil, err
 	}

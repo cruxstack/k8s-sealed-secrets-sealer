@@ -64,7 +64,7 @@ describe("repositories", () => {
     expect(within(appsRow).getByText("Private")).toBeInTheDocument();
     expect(
       within(apps).getByRole("link", { name: "example-org/apps" }),
-    ).toHaveAttribute("href", "/secrets/example-org/apps");
+    ).toHaveAttribute("href", "/dev/secrets/example-org/apps");
 
     const platform = screen
       .getByRole("rowheader", { name: "example-org/platform" })
@@ -143,7 +143,7 @@ describe("repositories", () => {
     fireEvent.keyDown(filter, { key: "Enter" });
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
-        "/secrets/example-org/platform",
+        "/dev/secrets/example-org/platform",
       ),
     );
   });

@@ -18,12 +18,24 @@ export const ME: MeResponse = {
     name: "The Octocat",
     avatar_url: "https://avatars.githubusercontent.com/u/1",
   },
+  envs: [{ name: "dev", admin: false }],
   csrf_token: "csrf-token-1",
-  env: "dev",
 };
 
-/** ME, as an admin: a member of an admin team, who sees the fleet. */
-export const ADMIN: MeResponse = { ...ME, user: { ...ME.user, admin: true } };
+/** ME, as an admin of dev: a member of its admin team, who sees its fleet. */
+export const ADMIN: MeResponse = {
+  ...ME,
+  envs: [{ name: "dev", admin: true }],
+};
+
+/** ME, with dev and prod, administering only prod. */
+export const TWO_ENVS: MeResponse = {
+  ...ME,
+  envs: [
+    { name: "dev", admin: false },
+    { name: "prod", admin: true },
+  ],
+};
 
 export const STATUS: SealingStatus = {
   env: "dev",
@@ -34,7 +46,10 @@ export const STATUS: SealingStatus = {
 
 export interface Recorded {
   method: string;
+  /** The path under /api/v1, without the env's /envs/{env} prefix. */
   url: string;
+  /** The env the call was about; none for signing in. */
+  env?: string;
   csrf: string | undefined;
   params?: Record<string, string>;
   /** The JSON body, parsed. */
@@ -79,13 +94,17 @@ export function fakeApi(opts: {
   );
   let polls = 0;
   const adapter: AxiosAdapter = async (config) => {
-    const url = config.url ?? "";
+    // calls about an env come under /envs/{env}
+    const scoped = /^\/envs\/([^/]+)(\/.*)$/.exec(config.url ?? "");
+    const env = scoped ? decodeURIComponent(scoped[1]!) : undefined;
+    const url = scoped ? scoped[2]! : (config.url ?? "");
     const method = (config.method ?? "get").toUpperCase();
     const body: unknown =
       typeof config.data === "string" ? JSON.parse(config.data) : undefined;
     calls.push({
       method,
       url,
+      env,
       csrf: config.headers.get("X-CSRF-Token")?.toString(),
       params: config.params as Record<string, string> | undefined,
       body,
@@ -108,7 +127,7 @@ export function fakeApi(opts: {
     }
     if (url === "/fleet") {
       if (!opts.me) return reply(401, { error: "unauthorized" });
-      if (!opts.me.user.admin) {
+      if (!opts.me.envs.find((e) => e.name === env)?.admin) {
         return reply(403, { error: "only admins can see this" });
       }
       if (opts.fleetStatus)

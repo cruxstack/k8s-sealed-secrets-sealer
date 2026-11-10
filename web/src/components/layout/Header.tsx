@@ -1,6 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { FileLock, LogOut, Search, Server } from "lucide-react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import {
+  Check,
+  ChevronsUpDown,
+  FileLock,
+  LogOut,
+  Search,
+  Server,
+} from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { useCommandPalette } from "./CommandPalette";
 import {
@@ -19,16 +26,19 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import type { EnvAccess } from "@/api/types";
 import { useAuth } from "@/lib/auth";
+import { useEnv } from "@/lib/env";
 import { modKey } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import { useLogout } from "@/api/queries/auth";
 import { statusQueryOptions } from "@/api/queries/status";
 
-function NavLink({ to, children }: { to: "/secrets"; children: string }) {
+function NavLink({ env, children }: { env: string; children: string }) {
   return (
     <Link
-      to={to}
+      to="/$env/secrets"
+      params={{ env }}
       className="rounded-md px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground"
       inactiveProps={{ className: "text-muted-foreground" }}
       activeProps={{
@@ -72,6 +82,19 @@ const SEALING = {
   unavailable: { dot: "bg-destructive", label: "sealing is unavailable" },
 } as const;
 
+/** The env's name with a dot that says whether sealing works. */
+function EnvDot({ dot }: { dot: string | undefined }) {
+  return (
+    <span
+      className={cn(
+        "h-1.5 w-1.5 rounded-full",
+        dot ?? "bg-muted-foreground/40",
+      )}
+      aria-hidden="true"
+    />
+  );
+}
+
 /**
  * The env badge, with a dot that says whether sealing works. Admins can open
  * the fleet from it; everyone else gets the summary in its tooltip.
@@ -82,13 +105,7 @@ function EnvBadge({ env, admin }: { env: string; admin: boolean }) {
   const label = `Environment ${env}${state ? `: ${state.label}` : ""}`;
   const badge = (
     <Badge variant="outline" className="gap-1.5">
-      <span
-        className={cn(
-          "h-1.5 w-1.5 rounded-full",
-          state?.dot ?? "bg-muted-foreground/40",
-        )}
-        aria-hidden="true"
-      />
+      <EnvDot dot={state?.dot} />
       {env}
     </Badge>
   );
@@ -97,7 +114,8 @@ function EnvBadge({ env, admin }: { env: string; admin: boolean }) {
       <TooltipTrigger asChild>
         {admin ? (
           <Link
-            to="/fleet"
+            to="/$env/fleet"
+            params={{ env }}
             aria-label={`${label}. Open the fleet`}
             className="rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           >
@@ -121,8 +139,77 @@ function EnvBadge({ env, admin }: { env: string; admin: boolean }) {
   );
 }
 
+/**
+ * The env badge of someone who may use several envs: it switches between
+ * them, and says whether sealing works in this one.
+ */
+function EnvSwitcher({ env, envs }: { env: EnvAccess; envs: EnvAccess[] }) {
+  const { data } = useQuery(statusQueryOptions);
+  const navigate = useNavigate();
+  const state = data ? SEALING[data.sealing] : null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Environment ${env.name}${state ? `: ${state.label}` : ""}. Switch environment`}
+          className="rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          <Badge
+            variant="outline"
+            className="gap-1.5 hover:bg-muted data-[state=open]:bg-muted"
+          >
+            <EnvDot dot={state?.dot} />
+            {env.name}
+            <ChevronsUpDown className="h-3 w-3 opacity-60" aria-hidden="true" />
+          </Badge>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Environments
+        </DropdownMenuLabel>
+        {envs.map((e) => (
+          <DropdownMenuItem
+            key={e.name}
+            onSelect={() =>
+              void navigate({ to: "/$env/secrets", params: { env: e.name } })
+            }
+            aria-current={e.name === env.name ? "true" : undefined}
+          >
+            {e.name === env.name ? (
+              <Check className="mr-2 h-4 w-4" aria-hidden="true" />
+            ) : (
+              <span className="mr-2 h-4 w-4" aria-hidden="true" />
+            )}
+            <span className="font-mono">{e.name}</span>
+            {e.admin && (
+              <span className="ml-auto text-xs text-muted-foreground">
+                admin
+              </span>
+            )}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <p className="px-2 py-1.5 text-xs text-muted-foreground">
+          {data?.message ?? "Checking whether sealing works…"}
+        </p>
+        {env.admin && (
+          <DropdownMenuItem asChild>
+            <Link to="/$env/fleet" params={{ env: env.name }}>
+              <Server className="mr-2 h-4 w-4" aria-hidden="true" />
+              Open the {env.name} fleet
+            </Link>
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function Header() {
-  const { user, env } = useAuth();
+  const { user, envs } = useAuth();
+  const env = useEnv();
   const logout = useLogout();
 
   return (
@@ -130,7 +217,7 @@ export function Header() {
       <div className="flex h-full items-center justify-between px-4 md:px-8">
         <div className="flex items-center gap-3">
           <Link
-            to="/secrets"
+            to="/"
             className="flex items-center gap-3 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             aria-label="Sealer home"
           >
@@ -145,17 +232,18 @@ export function Header() {
             </span>
           </Link>
           {env &&
-            (user ? (
-              <EnvBadge env={env} admin={user.admin === true} />
+            user &&
+            (envs.length > 1 ? (
+              <EnvSwitcher env={env} envs={envs} />
             ) : (
-              <Badge variant="outline">{env}</Badge>
+              <EnvBadge env={env.name} admin={env.admin} />
             ))}
-          {user && (
+          {user && env && (
             <nav
               aria-label="Main"
               className="ml-1 flex items-center gap-1 sm:ml-4"
             >
-              <NavLink to="/secrets">Secrets</NavLink>
+              <NavLink env={env.name}>Secrets</NavLink>
             </nav>
           )}
         </div>
@@ -192,10 +280,10 @@ export function Header() {
                   )}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {user.admin && (
+                {env?.admin && (
                   <>
                     <DropdownMenuItem asChild>
-                      <Link to="/fleet">
+                      <Link to="/$env/fleet" params={{ env: env.name }}>
                         <Server className="mr-2 h-4 w-4" aria-hidden="true" />
                         Fleet
                         <span className="ml-auto text-xs text-muted-foreground">

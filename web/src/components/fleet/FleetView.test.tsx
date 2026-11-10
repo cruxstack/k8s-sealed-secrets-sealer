@@ -1,12 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import apiClient from "@/api/client";
+import apiClient, { setApiEnv } from "@/api/client";
 import type { Fleet } from "@/api/types";
 import { FleetView } from "./FleetView";
 import { ADMIN, KEY_A, KEY_B, agent, fakeApi } from "@/test/fake-api";
 
 function renderFleet(fleet: Fleet | null, fleetStatus?: number) {
+  setApiEnv("dev");
   apiClient.defaults.adapter = fakeApi({
     me: ADMIN,
     fleet,

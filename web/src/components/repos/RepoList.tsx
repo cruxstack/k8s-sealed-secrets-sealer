@@ -11,7 +11,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAuth } from "@/lib/auth";
+import { useEnv } from "@/lib/env";
 import { useShortcut } from "@/lib/shortcuts";
 
 /** The user's own permission on a repository, as a badge. */
@@ -35,6 +35,7 @@ function Continue({
   repos: Repository[];
   pending: Map<string, number>;
 }) {
+  const env = useEnv()?.name ?? "";
   const open = repos.filter(
     (r) => (pending.get(r.full_name.toLowerCase()) ?? 0) > 0,
   );
@@ -53,8 +54,8 @@ function Continue({
           return (
             <li key={r.full_name}>
               <Link
-                to="/secrets/$owner/$repo"
-                params={{ owner: r.owner, repo: r.name }}
+                to="/$env/secrets/$owner/$repo"
+                params={{ env, owner: r.owner, repo: r.name }}
                 className="group flex items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 transition-colors hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none dark:bg-primary/10"
               >
                 <span className="min-w-0">
@@ -80,7 +81,7 @@ function Continue({
 
 /** The repositories page: every repository the user can read. */
 export function RepoList() {
-  const { env } = useAuth();
+  const env = useEnv()?.name ?? "";
   const navigate = useNavigate();
   const { data, error, isPending } = useQuery(reposQueryOptions);
   // pending changes per repository; the list works without them
@@ -101,8 +102,8 @@ export function RepoList() {
   );
   const open = (r: Repository) =>
     void navigate({
-      to: "/secrets/$owner/$repo",
-      params: { owner: r.owner, repo: r.name },
+      to: "/$env/secrets/$owner/$repo",
+      params: { env, owner: r.owner, repo: r.name },
     });
 
   return (
@@ -239,8 +240,8 @@ export function RepoList() {
                             className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
                           >
                             <Link
-                              to="/secrets/$owner/$repo"
-                              params={{ owner: r.owner, repo: r.name }}
+                              to="/$env/secrets/$owner/$repo"
+                              params={{ env, owner: r.owner, repo: r.name }}
                               className="hover:underline focus-visible:underline"
                               onClick={(e) => e.stopPropagation()}
                             >

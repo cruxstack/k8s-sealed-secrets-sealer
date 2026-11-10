@@ -12,6 +12,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   FolderGit2,
   KeyRound,
+  Layers,
   LogOut,
   Moon,
   Server,
@@ -31,6 +32,7 @@ import {
 } from "@/components/ui/command";
 import { Kbd } from "@/components/ui/kbd";
 import { useAuth } from "@/lib/auth";
+import { useEnv } from "@/lib/env";
 import { useShortcut } from "@/lib/shortcuts";
 import { useTheme } from "@/lib/theme-provider";
 
@@ -106,11 +108,13 @@ function Item({
 
 function Palette({ onDone }: { onDone: () => void }) {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { envs } = useAuth();
+  const env = useEnv();
   const { theme, setTheme } = useTheme();
   const logout = useLogout();
-  const repos = useQuery(reposQueryOptions);
-  const sessions = useQuery(sessionsQueryOptions);
+  // repositories are listed for the env the page is in
+  const repos = useQuery({ ...reposQueryOptions, enabled: env !== null });
+  const sessions = useQuery({ ...sessionsQueryOptions, enabled: env !== null });
   const pending = new Map(
     (sessions.data ?? []).map((s) => [
       s.repository.toLowerCase(),
@@ -163,8 +167,12 @@ function Palette({ onDone }: { onDone: () => void }) {
                     run(
                       () =>
                         void navigate({
-                          to: "/secrets/$owner/$repo",
-                          params: { owner: r.owner, repo: r.name },
+                          to: "/$env/secrets/$owner/$repo",
+                          params: {
+                            env: env?.name ?? "",
+                            owner: r.owner,
+                            repo: r.name,
+                          },
                         }),
                     )
                   }
@@ -173,25 +181,67 @@ function Palette({ onDone }: { onDone: () => void }) {
             })}
           </CommandGroup>
         )}
-        <CommandGroup heading="Go to">
-          <Item
-            icon={KeyRound}
-            label="Secrets"
-            value="page:secrets"
-            keywords={["secrets", "repositories", "repos", "home"]}
-            onSelect={() => run(() => void navigate({ to: "/secrets" }))}
-          />
-          {user?.admin && (
+        {env && (
+          <CommandGroup heading="Go to">
             <Item
-              icon={Server}
-              label="Fleet"
-              hint="admin"
-              value="page:fleet"
-              keywords={["fleet", "agents", "clusters", "keys", "admin"]}
-              onSelect={() => run(() => void navigate({ to: "/fleet" }))}
+              icon={KeyRound}
+              label="Secrets"
+              value="page:secrets"
+              keywords={["secrets", "repositories", "repos", "home"]}
+              onSelect={() =>
+                run(
+                  () =>
+                    void navigate({
+                      to: "/$env/secrets",
+                      params: { env: env.name },
+                    }),
+                )
+              }
             />
-          )}
-        </CommandGroup>
+            {env.admin && (
+              <Item
+                icon={Server}
+                label="Fleet"
+                hint="admin"
+                value="page:fleet"
+                keywords={["fleet", "agents", "clusters", "keys", "admin"]}
+                onSelect={() =>
+                  run(
+                    () =>
+                      void navigate({
+                        to: "/$env/fleet",
+                        params: { env: env.name },
+                      }),
+                  )
+                }
+              />
+            )}
+          </CommandGroup>
+        )}
+        {envs.length > 1 && (
+          <CommandGroup heading="Environments">
+            {envs
+              .filter((e) => e.name !== env?.name)
+              .map((e) => (
+                <Item
+                  key={e.name}
+                  icon={Layers}
+                  label={`Switch to ${e.name}`}
+                  value={`env:${e.name}`}
+                  keywords={["env", "environment", "switch", e.name]}
+                  onSelect={() =>
+                    run(
+                      () =>
+                        void navigate({
+                          to: "/$env/secrets",
+                          params: { env: e.name },
+                        }),
+                    )
+                  }
+                />
+              ))}
+          </CommandGroup>
+        )}
         <CommandGroup heading="Preferences">
           <Item
             icon={dark ? Sun : Moon}

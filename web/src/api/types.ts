@@ -6,16 +6,22 @@ export interface AuthUser {
   login: string;
   name?: string;
   avatar_url?: string;
-  /** Admins (members of an admin team) may see the fleet. */
-  admin?: boolean;
+}
+
+/** An env the user may use. */
+export interface EnvAccess {
+  name: string;
+  /** Admins (members of one of the env's admin teams) see its fleet. */
+  admin: boolean;
 }
 
 /** GET /api/v1/auth/me */
 export interface MeResponse {
   user: AuthUser;
+  /** The envs the user may use, in the order the deployment lists them. */
+  envs: EnvAccess[];
   /** Sent back as X-CSRF-Token on every state-changing request. */
   csrf_token: string;
-  env: string;
 }
 
 /** A sealing key, identified by the controller's fingerprint. */

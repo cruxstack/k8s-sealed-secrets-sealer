@@ -52,20 +52,20 @@ func TestRepoRoutes(t *testing.T) {
 
 	reg, _ := registry.Parse([]byte("issuers: []\nagents: []\n"), "")
 	agentSessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "http://localhost:4100", "dev", nil)
-	userSessions, _ := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "http://localhost:4100", "dev", time.Hour, nil)
+	userSessions, _ := userauth.NewSessions([]byte("fedcba9876543210fedcba9876543210"), "http://localhost:4100", time.Hour, nil)
 	users := userauth.NewHandler(userauth.HandlerOptions{
-		Sessions: userSessions, PublicURL: "http://localhost:4100", Env: "dev", Org: "example-org",
-		Logger: slog.New(slog.DiscardHandler),
+		Sessions: userSessions, PublicURL: "http://localhost:4100", Org: "example-org",
+		Envs: []userauth.EnvPolicy{{Name: "dev"}}, Logger: slog.New(slog.DiscardHandler),
 	})
 	h := New(Options{
 		Env: "dev", Registry: reg, Sessions: agentSessions, Store: store.NewMemory(),
-		Users: users, Repos: rs, Logger: slog.New(slog.DiscardHandler),
+		Users: users.Env("dev"), Repos: rs, Logger: slog.New(slog.DiscardHandler),
 	}).Handler()
 
 	get := func(path string, u *userauth.User) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		if u != nil {
-			token, _, _ := userSessions.Issue(*u)
+			token, _, _ := userSessions.Issue(*u, userauth.Grants{"dev": false})
 			req.AddCookie(&http.Cookie{Name: "sealer_session", Value: token})
 		}
 		rec := httptest.NewRecorder()
