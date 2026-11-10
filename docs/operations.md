@@ -11,15 +11,17 @@ The admin API gives automation, such as monitoring, an env's fleet without
 a GitHub sign-in. It exists only when `APP_ADMIN_TOKEN` is set (in the
 control plane chart, through `existingSecret`) or an env sets its own
 `adminToken`, and a token must be at least 32 bytes. `APP_ADMIN_TOKEN`
-reads every env that doesn't set its own; an env's `adminToken` reads only
-that env. It only reads: nothing in the admin API changes anything.
+reaches every env that doesn't set its own; an env's `adminToken` reaches
+only that env. Besides reading the fleet, a token can revoke and reinstate
+keys; nothing else in the admin API changes anything.
 
-| Route                                | Answers                                   |
-| ------------------------------------ | ----------------------------------------- |
-| `GET /api/v1/envs/{env}/admin/fleet` | The env's fleet                           |
-| `GET /api/v1/admin/fleet`            | The same, when the control plane serves a |
-|                                      | single env                                |
-| `GET /healthz`, `GET /readyz`        | `200` while the process runs; no token    |
+| Route                                                        | Answers                                              |
+| ------------------------------------------------------------ | ---------------------------------------------------- |
+| `GET /api/v1/envs/{env}/admin/fleet`                         | The env's fleet                                      |
+| `GET /api/v1/admin/fleet`                                    | The same, when the control plane serves a single env |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key")              |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key                             |
+| `GET /healthz`, `GET /readyz`                                | `200` while the process runs; no token               |
 
 ```sh
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -273,6 +275,22 @@ env's. Its agent gets them from escrow:
    turn, restarting each of their controllers once.
 
 Values sealed before the rebuild decrypt there once the restore is done.
+For its first 30 minutes the cluster is joining: the env keeps sealing with
+the key the other clusters share, and the fleet view shows it joining. If it
+hasn't caught up by then, or its agent can't restore, it counts again and
+the fleet view says it holds back the env key (design §7).
+
+### A compromised key
+
+Revoke it, from the fleet page's Keys table or with the admin API
+(`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A revoked key
+is never the env key and is never restored into a cluster again; clusters
+that hold it keep it, so values sealed with it still decrypt. Revoking
+doesn't make those values secret again: rotate them, and seal the new
+values. If the revoked key was the newest, the env falls back to the newest
+key every cluster still shares; to get a fresh one, let a controller renew
+or restart one with its key Secrets relabelled, as the sealed-secrets docs
+describe. Reinstate a key revoked by mistake the same way.
 
 ## Troubleshooting
 
