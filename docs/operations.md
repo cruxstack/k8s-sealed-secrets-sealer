@@ -172,15 +172,17 @@ polls can then crowd out people's requests, or other functions'.
 ## Upgrades
 
 The control plane and the agents are released together, from one commit,
-and tested together. No promise is made yet that an agent of one version
-works with a control plane of another, so plan for agents to be refused
-until both match. While they are, sealing and key sync stop in their
-clusters; decryption does not, since controllers never need the control
-plane.
+and tested together. A control plane supports agents up to one minor
+version behind it: it accepts agent messages with fields it doesn't know,
+and agents name the protocol versions they speak at check-in (design §5).
+An agent newer than its control plane isn't supported, so upgrade the
+control plane first. An agent that is refused stops sealing and key sync
+in its cluster until it is upgraded; decryption does not stop, since
+controllers never need the control plane.
 
 - Read the release notes of every version you cross; breaking changes have
   a section of their own.
-- Upgrade the control plane, then the agents, close together.
+- Upgrade the control plane, then the agents, within one minor version.
 - Keep each env's table across upgrades: it holds the env's escrowed keys.
 
 ### To several envs on one URL (v0.6.0)
