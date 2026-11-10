@@ -26,6 +26,7 @@ spec:
     spec:
       serviceAccountName: {{ include "agent.serviceAccountName" . }}
       automountServiceAccountToken: true
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

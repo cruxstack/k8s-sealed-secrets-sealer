@@ -71,10 +71,12 @@ func run() error {
 		Identity: identity,
 		Env:      cfg.EnvName,
 		Version:  version.Version,
+		Logger:   logger,
 	})
 
-	// a handler is registered only for capabilities this agent has
-	commands := agent.NewCommands(client, logger, nil)
+	// a handler is registered only for capabilities this agent has; commands
+	// expire in the control plane's time
+	commands := agent.NewCommands(client, logger, client.Now)
 	if cfg.HasCapability(protocol.CapabilitySeal) {
 		kmsClient, err := newKMS(cfg, cfg.KMSTransitKeyID)
 		if err != nil {
@@ -125,6 +127,8 @@ func run() error {
 		Version:      version.Version,
 	})
 
+	// on SIGTERM the check-in loop stops at once; the command runner finishes
+	// the command in flight within agent.ShutdownGrace
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

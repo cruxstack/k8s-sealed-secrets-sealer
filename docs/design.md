@@ -289,10 +289,17 @@ a creation time, an expiry and a typed payload. The rules:
   `leased`. A command is delivered at most once. If the agent dies before
   reporting, the command expires and the user retries. Key commands are
   idempotent and the control plane re-issues them when it sees the gap again.
+  On shutdown the agent starts no new poll, but the poll in flight and the
+  commands it leased still run and are reported, within 45 seconds; the
+  chart's `terminationGracePeriodSeconds` (60) leaves room for that.
 - **Expiry is enforced in code.** DynamoDB TTL deletion is eventual, so the
   control plane and agent both refuse expired commands; TTL only cleans up.
+  The agent measures expiry in the control plane's time, from the `Date`
+  header of its responses, so a clock that is off does not expire commands.
+  It reports a command that expired before it ran as failed.
 - **Results are accepted once,** only from the leasing agent and only before
-  expiry.
+  expiry. The agent retries a result while the control plane cannot be
+  reached or answers with a server error, until the command expires.
 - **Long-poll within API Gateway limits.** The control plane holds a poll for
   up to 20 seconds, under the API Gateway integration timeout, checking
   DynamoDB for new commands in the meantime. The cost is roughly one held
