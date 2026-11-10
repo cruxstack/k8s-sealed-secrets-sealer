@@ -198,11 +198,14 @@ the run for inspection. Besides bringing the stack up, it checks that:
   documents, the session lists the pending change without its ciphertexts,
   and the value appears in no log; sealing into a cluster-wide document, or
   into a repository she cannot write, is refused;
-- alice opens a pull request with the change, which ends her session: its
+- she seals `db-password` twice more, with one value for `use1` and another
+  for `use2`: each seal goes only into its region's documents, by an agent
+  in that region;
+- alice opens a pull request with the changes, which ends her session: its
   file differs from the original only in the dev documents' `encryptedData`
   lines, its description and commit message hold nothing secret, and with
   its dev documents applied, every simulated cluster's controller unseals
-  the value.
+  the value, and each its own region's `db-password`.
 
 ## Local agent identity
 

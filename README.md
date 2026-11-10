@@ -10,8 +10,9 @@ region or a certificate.
 > SealedSecrets for their env in the repositories they can read, seal values
 > into them as pending changes, and open a pull request with those changes;
 > an agent seals each value with the env key, and only `spec.encryptedData`
-> changes in the files. Optional annotations tell them what a secret is for,
-> which keys it should hold and where its docs are. Admins see the fleet
+> changes in the files. A value that differs by region can be sealed for
+> some regions' documents only. Optional annotations tell them what a secret
+> is for, which keys it should hold and where its docs are. Admins see the fleet
 > (every agent, its controller's keys and the env's key state); everyone else
 > sees whether sealing works. Agents keep every cluster holding the same keys.
 > Releases publish the control plane for Lambda, container images and Helm

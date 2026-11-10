@@ -117,3 +117,55 @@ func TestOpenPullRequest_Refuses(t *testing.T) {
 		t.Errorf("alice: %v", err)
 	}
 }
+
+func TestOpenPullRequest_Regions(t *testing.T) {
+	s, gh, _ := newService(t, nil)
+	ctx := context.Background()
+	_, head, err := s.Head(ctx, alice, "example-org", "apps", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := gh.mock.File("example-org", "apps", "main", "deploy/billing/sealed-secret.yaml")
+	const path = "deploy/billing/sealed-secret.yaml"
+
+	_, err = s.OpenPullRequest(ctx, alice, "example-org", "apps", NewPullRequest{
+		Commit: head, Branch: "sealer/dev/alice-2", Title: "Seal", Message: "Seal\n",
+		Values: []Value{
+			// every document, then use1 again: use1 gets the later value
+			{Path: path, Key: "api-token", Targets: billingTargets, Ciphertexts: []string{"AgA1", "AgA2", "AgA3"}},
+			{Path: path, Key: "api-token", Regions: []string{"use1"}, Targets: billingTargets[:2], Ciphertexts: []string{"AgB1", "AgB2"}},
+			// only use2
+			{Path: path, Key: "db-password", Regions: []string{"use2"}, Targets: billingTargets[2:], Ciphertexts: []string{"AgC3"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, _ := gh.mock.PullRequest("example-org", "apps", 1)
+	want := before
+	for _, data := range []string{
+		"    api-token: AgB1\n",
+		"    api-token: AgB2\n",
+		"    api-token: AgA3\n    db-password: AgC3\n",
+	} {
+		want = strings.Replace(want, "  encryptedData: {}\n", "  encryptedData:\n"+data, 1)
+	}
+	if view.Files[0].After != want {
+		t.Fatalf("file:\n%s\nwant:\n%s", view.Files[0].After, want)
+	}
+
+	// a value's targets must be exactly its regions' documents
+	for name, v := range map[string]Value{
+		"more than the region": {Path: path, Key: "k", Regions: []string{"use1"}, Targets: billingTargets, Ciphertexts: []string{"AgA", "AgA", "AgA"}},
+		"another region":       {Path: path, Key: "k", Regions: []string{"use2"}, Targets: billingTargets[:2], Ciphertexts: []string{"AgA", "AgA"}},
+		"no such region":       {Path: path, Key: "k", Regions: []string{"use9"}, Targets: billingTargets[:1], Ciphertexts: []string{"AgA"}},
+	} {
+		_, err := s.OpenPullRequest(ctx, alice, "example-org", "apps", NewPullRequest{
+			Commit: head, Branch: "sealer/dev/x", Title: "t", Message: "m", Values: []Value{v},
+		})
+		var fe *FileError
+		if !errors.As(err, &fe) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

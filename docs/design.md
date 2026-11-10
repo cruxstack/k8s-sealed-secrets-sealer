@@ -308,8 +308,10 @@ v1 has no command that deletes or disables anything.
    through the GitHub App at the session's base commit, and finds every
    SealedSecret document in it whose env annotation equals this env. One seal
    updates all of them, so a file with documents for `use1` and `use2` is
-   sealed once. Each document contributes a target: namespace, name, scope
-   and region.
+   sealed once. A seal may name regions instead, for a value that differs by
+   region: it then updates only the documents whose region annotation names
+   one of them (see "Region-specific values" below). Each document sealed
+   for contributes a target: namespace, name, scope and region.
 3. Scope comes from each document's own sealed-secrets scope annotations, the
    same place the controller reads it. `strict` and `namespace-wide` are
    allowed. `cluster-wide` is refused, because such ciphertext can be decrypted
@@ -338,17 +340,20 @@ v1 has no command that deletes or disables anything.
 8. The control plane checks the result (one ciphertext per target, in order,
    with the requested key) and records the ciphertexts as a pending change in
    the session before it marks the command done, so a sealed value always has
-   its change. There is one pending change per file and key: sealing the same
-   key into the same file again replaces it, and a seal that finishes late
-   never replaces a newer one. The UI shows which agent and key sealed it.
-   Users never see ciphertext.
+   its change. There is one pending change per file, key and regions:
+   sealing the same key into the same file for the same regions again
+   replaces it, and a seal that finishes late never replaces a newer one.
+   Changes of one key for different regions can overlap; the newest wins for
+   each document, and a change a newer one covers entirely is removed. The UI
+   shows which agent and key sealed it. Users never see ciphertext.
 9. When the user opens a pull request, the control plane locks the session,
    so nothing is sealed into it or removed from it meanwhile and it opens one
    pull request at most. It refuses while one of the session's seals is still
    running, and re-checks the user's write access.
 10. It reads each file again at the session's base commit, checks that the
-    file's documents for the env are still exactly the targets each value
-    was sealed for, and writes the values in, editing only
+    file's documents for the env (in its regions, for a regional value) are
+    still exactly the targets each value was sealed for, and writes the
+    values in, in the order they were sealed, editing only
     `spec.encryptedData.<key>` in each targeted document. Values are replaced
     where they are written and new keys get a line of their own, so names,
     namespaces, annotations, comments, formatting and other documents stay
@@ -424,6 +429,31 @@ one DynamoDB item (400 KB). A 64 KiB value can go to three documents; a value
 of a few KiB, to dozens. Larger values would need S3 and are out of scope for
 v1.
 
+**Region-specific values.** Some values differ by region: a regional
+endpoint's credentials, a certificate per region. A seal can name the
+regions it is for, and goes only into the file's documents whose region
+annotation names one of them, so one file can hold a different value for
+each region:
+
+- Each region named must be the region of a document in the file; naming
+  every region is sealing for every document. Documents without a region
+  annotation are sealed for only when no region is named.
+- The agent is chosen for the regions named (section 7).
+- A key's pending changes may overlap, such as one for every document
+  followed by one for `use1`. For each document, the newest seal wins:
+  `use1` gets the second value and the rest keep the first. Removing the
+  `use1` change brings the first value back there. A change a newer one
+  covers entirely is removed.
+- The pull request names each change's regions and the documents it ends up
+  setting.
+
+The UI shows, for a file whose documents are in more than one region, where
+each key stands per region, and lets a seal be limited to some regions or
+started from a region of a key. A key a region does not need is not marked
+missing there when that region's documents have the keys hint (section 13)
+and it leaves the key out: list a region-only key in only that region's
+documents' hint.
+
 **Routes.** Every route needs a signed-in user, and every write the CSRF
 token (section 12). `.../session` is `/api/v1/repos/{owner}/{repo}/session`.
 
@@ -438,7 +468,9 @@ token (section 12). `.../session` is `/api/v1/repos/{owner}/{repo}/session`.
 |                                        | head the user saw.                  |
 | `DELETE .../session/{id}`              | Discard the session.                |
 | `POST .../session/{id}/seals`          | Seal `value` as `key` into the file |
-|                                        | at `path`; answers `202`.           |
+|                                        | at `path`, or only into its         |
+|                                        | documents in `regions`; answers     |
+|                                        | `202`.                              |
 | `GET .../session/{id}/seals/{seal}`    | A seal's progress.                  |
 | `DELETE .../session/{id}/changes/{id}` | Remove one pending change.          |
 | `POST .../session/{id}/pull-request`   | Open a pull request with the        |
@@ -764,13 +796,15 @@ with point-in-time recovery and a TTL attribute `expires_at` (epoch seconds).
   request or refused. File content is not stored; it is fetched again at the
   base commit when the pull request is opened.
 - **Seal:** the command carrying a requested seal and the agent it went to,
-  with the file, key, targets and requesting user, so the UI can follow its
-  progress.
-- **Pending change:** file path, secret key name, the command and agent that
-  sealed it, the key's fingerprint, the targets and one ciphertext per target.
-  The ID is derived from the path and key, so sealing a key again replaces
-  the change; a seal that finishes late does not replace a newer one (command
-  IDs are ULIDs). Ciphertexts are stored apart from the targets so listings
+  with the file, key, regions, targets and requesting user, so the UI can
+  follow its progress.
+- **Pending change:** file path, secret key name, the regions it was sealed
+  for (none for every document), the command and agent that sealed it, the
+  key's fingerprint, the targets and one ciphertext per target. The ID is
+  derived from the path, key and regions, so sealing a key for the same
+  regions again replaces the change; a seal that finishes late does not
+  replace a newer one (command IDs are ULIDs). Overlapping changes of a key
+  are resolved when read: the newest wins for each document. Ciphertexts are stored apart from the targets so listings
   leave them out; they are never returned to clients. Never plaintext.
   Discarding a session leaves its seals and changes to expire unreachable.
 - **Audit entry:** who (user or agent), what (seal, PR, command, key event),
@@ -850,8 +884,10 @@ A document belongs to the env when its env annotation equals the deployment's
 env name. The env annotation is how a fleet says which documents it manages:
 each deployment names its annotation (`annotations.env`, `APP_ENV_ANNOTATION`)
 and its env, and ignores every other document, so fleets can share a
-repository without touching each other's documents. The region annotation is
-a preference hint for choosing an agent and is shown in the UI. Files that
+repository without touching each other's documents. The region annotation
+says which region a document is for: a seal can be limited to some regions'
+documents (section 6, "Region-specific values"), the agent is preferably
+chosen in them, and the UI shows keys per region. Files that
 already use other annotation names keep working by configuring the keys to
 match them.
 
@@ -986,11 +1022,6 @@ roles. Each env is one instance of that module, in whichever region suits.
 
 ## 16. Future work (not in v1)
 
-- **Region-specific secrets.** A seal goes into every document of a file
-  for the env, so a value that differs by region (a regional endpoint's
-  credentials) needs a file per region today. A later version may let a seal
-  target only the documents of chosen regions, from their region
-  annotation, and show per region which keys are set.
 - **Reseal all.** Re-encrypt every sealed value in the env's repositories with
   the env key, so old keys can eventually be removed. Either the agent calls
   the controller's `/v1/rotate` (which re-encrypts without exposing plaintext

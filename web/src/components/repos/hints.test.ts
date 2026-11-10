@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RepositoryFile, SealedSecretDocument } from "@/api/types";
-import { fileHints, missingKeys } from "./hints";
+import { fileHints } from "./hints";
 
 function doc(over: Partial<SealedSecretDocument>): SealedSecretDocument {
   return {
@@ -48,17 +48,5 @@ describe("fileHints", () => {
       docs: undefined,
       expected: [],
     });
-  });
-});
-
-describe("missingKeys", () => {
-  it("lists the expected keys some document lacks, counting pending ones as there", () => {
-    const f = file([
-      doc({ keys: ["a"], expected_keys: ["a", "b", "c"] }),
-      doc({ keys: ["a", "b"], expected_keys: ["a", "b"] }),
-    ]);
-    expect(missingKeys(f, new Set())).toEqual(["b", "c"]);
-    expect(missingKeys(f, new Set(["c"]))).toEqual(["b"]);
-    expect(missingKeys(f, new Set(["b", "c"]))).toEqual([]);
   });
 });

@@ -1,12 +1,13 @@
 import { useRef, useState, type KeyboardEvent } from "react";
 import { Search } from "lucide-react";
-import type { RepositoryFile } from "@/api/types";
+import type { PendingChange, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { useShortcut } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
-import { fileHints, missingKeys } from "./hints";
+import { fileHints } from "./hints";
+import { missingKeys, pendingDocs } from "./keys";
 
 export type FileStatus = "ready" | "blocked" | "unreadable";
 
@@ -17,8 +18,6 @@ export function fileStatus(file: RepositoryFile): FileStatus {
   if (docs.length === 0 || docs.some((d) => d.problem)) return "blocked";
   return "ready";
 }
-
-const NONE: ReadonlySet<string> = new Set();
 
 const STATUS: Record<FileStatus, { label: string; dot: string }> = {
   ready: { label: "Ready", dot: "bg-success" },
@@ -61,14 +60,14 @@ function summary(file: RepositoryFile): string {
 export function FileList({
   files,
   selected,
-  pending,
+  changes,
   globs,
   onSelect,
 }: {
   files: RepositoryFile[];
   selected: string | undefined;
-  /** Keys with a value waiting in the session, per file path. */
-  pending: Map<string, Set<string>>;
+  /** The session's pending changes. */
+  changes: readonly PendingChange[];
   globs: string[];
   onSelect: (path: string) => void;
 }) {
@@ -158,10 +157,12 @@ export function FileList({
           {shown.map((f, i) => {
             const status = fileStatus(f);
             const isSelected = f.path === selected;
-            const keys = pending.get(f.path) ?? NONE;
-            const count = keys.size;
+            const count = changes.filter((c) => c.path === f.path).length;
             const { description } = fileHints(f);
-            const missing = status === "unreadable" ? [] : missingKeys(f, keys);
+            const missing =
+              status === "unreadable"
+                ? []
+                : missingKeys(f, pendingDocs(changes, f.path));
             return (
               <li key={f.path}>
                 <button

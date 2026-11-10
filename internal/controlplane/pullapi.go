@@ -1,7 +1,6 @@
 package controlplane
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -97,18 +96,20 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "there are no pending changes to open a pull request with")
 		return
 	}
-	slices.SortFunc(changes, func(a, b store.Change) int {
-		return cmp.Or(strings.Compare(a.Path, b.Path), strings.Compare(a.Key, b.Key))
-	})
-
-	text := s.pullRequestText(sess, user, changes)
+	// the text names each change's documents as they end up
+	effective := store.Effective(changes)
+	slices.SortFunc(effective, compareChanges)
+	text := s.pullRequestText(sess, user, effective)
+	// values are written in the order they were sealed, so where changes of
+	// a key overlap, the newest wins
+	slices.SortFunc(changes, func(a, b store.Change) int { return strings.Compare(a.CommandID, b.CommandID) })
 	values := make([]repos.Value, len(changes))
 	for i, c := range changes {
 		targets := make([]repos.Target, len(c.Targets))
 		for j, t := range c.Targets {
 			targets[j] = repos.Target{Namespace: t.Namespace, Name: t.Name, Scope: t.Scope}
 		}
-		values[i] = repos.Value{Path: c.Path, Key: c.Key, Targets: targets, Ciphertexts: c.Ciphertexts}
+		values[i] = repos.Value{Path: c.Path, Key: c.Key, Regions: c.Regions, Targets: targets, Ciphertexts: c.Ciphertexts}
 	}
 	branch := pullRequestBranch(s.env, user.Login, sess.ID)
 	pr, err := s.repos.OpenPullRequest(ctx, user, sess.Owner, sess.Repo, repos.NewPullRequest{
@@ -143,14 +144,14 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	log.InfoContext(ctx, "pull request opened",
 		"event", "pr.opened", "number", pr.Number, "url", pr.URL, "pr_commit", pr.Commit,
-		"files", text.files, "changes", len(changes), "keys", text.keys)
+		"files", text.files, "changes", len(effective), "keys", text.keys)
 	httpserver.WriteJSON(w, http.StatusCreated, map[string]any{"pull_request": pullRequestView{
 		Number:  pr.Number,
 		URL:     pr.URL,
 		Branch:  pr.Branch,
 		Title:   text.title,
 		Files:   text.files,
-		Changes: len(changes),
+		Changes: len(effective),
 	}})
 }
 
@@ -184,8 +185,8 @@ type prText struct {
 }
 
 // pullRequestText writes a pull request's title, description and commit
-// message. They name files, keys and documents, never values or
-// ciphertexts.
+// message from the changes as they apply. They name files, keys, regions
+// and documents, never values or ciphertexts.
 func (s *Server) pullRequestText(sess store.Session, user *userauth.User, changes []store.Change) prText {
 	var paths []string
 	keysByPath := map[string][]string{}
@@ -194,7 +195,11 @@ func (s *Server) pullRequestText(sess store.Session, user *userauth.User, change
 		if _, ok := keysByPath[c.Path]; !ok {
 			paths = append(paths, c.Path)
 		}
-		keysByPath[c.Path] = append(keysByPath[c.Path], c.Key)
+		key := c.Key
+		if len(c.Regions) > 0 {
+			key += " (" + strings.Join(c.Regions, ", ") + ")"
+		}
+		keysByPath[c.Path] = append(keysByPath[c.Path], key)
 		keys = append(keys, c.Key)
 	}
 	values := plural(len(changes), "value")
@@ -213,15 +218,30 @@ func (s *Server) pullRequestText(sess store.Session, user *userauth.User, change
 	var b strings.Builder
 	fmt.Fprintf(&b, "Sealed for the **%s** env with k8s-sealed-secrets-sealer, as requested by @%s.\n\n", s.env, user.Login)
 	b.WriteString("| File | Key | Documents | Sealed with |\n| --- | --- | --- | --- |\n")
+	regional := false
 	for _, c := range changes {
 		docs := make([]string, len(c.Targets))
 		for i, t := range c.Targets {
 			docs[i] = code(t.Namespace + "/" + t.Name)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(c.Path), code(c.Key), strings.Join(docs, ", "), code(shortFingerprint(c.Fingerprint)))
+		key := code(c.Key)
+		if len(c.Regions) > 0 {
+			regional = true
+			regions := make([]string, len(c.Regions))
+			for i, r := range c.Regions {
+				regions[i] = code(r)
+			}
+			key += " in " + strings.Join(regions, ", ")
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(c.Path), key, strings.Join(docs, ", "), code(shortFingerprint(c.Fingerprint)))
 	}
-	fmt.Fprintf(&b, "\nEach value was sealed once for every %s document in its file; only `spec.encryptedData` changed. Based on `%s` at %s.\n",
-		s.env, sess.Branch, sess.Commit)
+	if regional {
+		fmt.Fprintf(&b, "\nEach value was sealed once for each %s document listed: every one in its file, or those in the regions named. Only `spec.encryptedData` changed. Based on `%s` at %s.\n",
+			s.env, sess.Branch, sess.Commit)
+	} else {
+		fmt.Fprintf(&b, "\nEach value was sealed once for every %s document in its file; only `spec.encryptedData` changed. Based on `%s` at %s.\n",
+			s.env, sess.Branch, sess.Commit)
+	}
 
 	var m strings.Builder
 	m.WriteString(title + "\n\n")

@@ -50,7 +50,7 @@ type changeItem struct {
 // changeListAttributes is every change attribute but its ciphertexts.
 var changeListAttributes = []string{
 	"pk", "sk", "session_id", "change_id", "path", "key", "command_id", "agent_id",
-	"fingerprint", "targets", "user_id", "user_login", "sealed_at", "change_expires_at",
+	"fingerprint", "regions", "targets", "user_id", "user_login", "sealed_at", "change_expires_at",
 }
 
 func itemKey(pk, sk string) map[string]types.AttributeValue {

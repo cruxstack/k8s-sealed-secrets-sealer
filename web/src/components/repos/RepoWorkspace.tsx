@@ -132,13 +132,7 @@ export function RepoWorkspace({
   const chosen = files.find((f) => f.path === selected);
   const current = chosen ?? defaultFile(files);
   const canWrite = data?.repository.access === "write";
-  // keys with a value waiting in the session, per file
-  const pending = new Map<string, Set<string>>();
-  for (const c of session?.changes ?? []) {
-    const keys = pending.get(c.path) ?? new Set<string>();
-    keys.add(c.key);
-    pending.set(c.path, keys);
-  }
+  const changes = session?.changes ?? [];
 
   return (
     <div className="space-y-6">
@@ -277,7 +271,7 @@ export function RepoWorkspace({
                 <FileList
                   files={files}
                   selected={current?.path}
-                  pending={pending}
+                  changes={changes}
                   globs={data.file_globs}
                   onSelect={pick}
                 />

@@ -48,11 +48,14 @@ type sessionView struct {
 }
 
 // changeView is a pending change without its ciphertexts, which are never
-// returned to clients.
+// returned to clients. Its targets are the documents it still sets: a newer
+// change of the same key for some of them takes those over.
 type changeView struct {
-	ID          string       `json:"id"`
-	Path        string       `json:"path"`
-	Key         string       `json:"key"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Key  string `json:"key"`
+	// Regions is what the seal was limited to; absent for every document.
+	Regions     []string     `json:"regions,omitempty"`
 	Targets     []targetView `json:"targets"`
 	SealedAt    time.Time    `json:"sealed_at"`
 	SealedBy    agentView    `json:"sealed_by"`
@@ -73,7 +76,13 @@ type agentView struct {
 	Region  string `json:"region,omitempty"`
 }
 
+// viewSession views a session with its changes as they apply: changes a
+// newer one covers are left out, and those it partly covers lose the
+// documents it took over.
 func viewSession(s store.Session, changes []store.Change, agent func(string) agentView) sessionView {
+	if changes != nil {
+		changes = store.Effective(changes)
+	}
 	v := sessionView{
 		ID:         s.ID,
 		Repository: s.Owner + "/" + s.Repo,
@@ -90,16 +99,16 @@ func viewSession(s store.Session, changes []store.Change, agent func(string) age
 	if changes != nil {
 		v.Changes = []changeView{}
 	}
-	// by file, then key, as people read them
+	// by file, then key, then regions (every document first), as people
+	// read them
 	changes = slices.Clone(changes)
-	slices.SortFunc(changes, func(a, b store.Change) int {
-		return cmp.Or(strings.Compare(a.Path, b.Path), strings.Compare(a.Key, b.Key))
-	})
+	slices.SortFunc(changes, compareChanges)
 	for _, c := range changes {
 		v.Changes = append(v.Changes, changeView{
 			ID:          c.ID,
 			Path:        c.Path,
 			Key:         c.Key,
+			Regions:     c.Regions,
 			Targets:     viewTargets(c.Targets),
 			SealedAt:    c.SealedAt,
 			SealedBy:    agent(c.AgentID),
@@ -107,6 +116,16 @@ func viewSession(s store.Session, changes []store.Change, agent func(string) age
 		})
 	}
 	return v
+}
+
+// compareChanges orders changes by file, key and regions, with a change for
+// every document before those for some regions.
+func compareChanges(a, b store.Change) int {
+	return cmp.Or(
+		strings.Compare(a.Path, b.Path),
+		strings.Compare(a.Key, b.Key),
+		slices.Compare(a.Regions, b.Regions),
+	)
 }
 
 func viewTargets(ts []store.Target) []targetView {
@@ -144,7 +163,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v := viewSession(sess, nil, s.agentView)
-		v.PendingChanges = len(changes)
+		v.PendingChanges = len(store.Effective(changes))
 		out = append(out, v)
 	}
 	httpserver.WriteJSON(w, http.StatusOK, map[string]any{"sessions": out})

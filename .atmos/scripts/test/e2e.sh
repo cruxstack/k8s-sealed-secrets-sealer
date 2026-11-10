@@ -350,6 +350,40 @@ for deploy in sealer-system/sealer-control-plane $(stack_clusters | sed 's|$|-se
 done
 check "the seal is logged by the control plane and the agent, and the value by neither"
 
+# --- region-specific values: db-password differs between use1 and use2.
+# Each seal goes only into its region's documents, by an agent there. ---
+# seal_value <json body>: requests a seal, waits for it, prints its view
+seal_value() {
+  local out seal status=""
+  out="$(as_alice POST "${apps}/session/${session}/seals" "$1")"
+  [[ "${out%% *}" == 202 ]] || { echo "seal request: ${out}" >&2; return 1; }
+  seal="$(jq -r .id <<<"${out#* }")"
+  for _ in $(seq 1 60); do
+    out="$(as_alice GET "${apps}/session/${session}/seals/${seal}")"
+    status="$(jq -r .status <<<"${out#* }")"
+    [[ "$status" == queued || "$status" == sealing ]] || break
+    sleep 1
+  done
+  [[ "$status" == sealed ]] || { echo "the seal did not finish: ${out}" >&2; return 1; }
+  printf '%s' "${out#* }"
+}
+db_use1="e2e-$(openssl rand -hex 12)"
+db_use2="e2e-$(openssl rand -hex 12)"
+out="$(seal_value "$(jq -nc --arg v "$db_use1" \
+  '{path: "deploy/billing/sealed-secret.yaml", key: "db-password", value: $v, regions: ["use1"]}')")" \
+  || die "db-password for use1 was not sealed"
+jq -e '.regions == ["use1"] and (.targets | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps"]
+  and .agent.region == "use1"' <<<"$out" >/dev/null || die "the seal for use1: ${out}"
+out="$(seal_value "$(jq -nc --arg v "$db_use2" \
+  '{path: "deploy/billing/sealed-secret.yaml", key: "db-password", value: $v, regions: ["use2"]}')")" \
+  || die "db-password for use2 was not sealed"
+jq -e '.regions == ["use2"] and (.targets | map(.namespace)) == ["dev-use2-blue-apps"]
+  and .agent.region == "use2"' <<<"$out" >/dev/null || die "the seal for use2: ${out}"
+out="$(as_alice GET "${apps}/session")"
+jq -e '.session.changes | map(.key + ":" + ((.regions // []) | join(","))) == ["api-token:", "db-password:use1", "db-password:use2"]' \
+  <<<"${out#* }" >/dev/null || die "pending changes after the regional seals: ${out}"
+check "db-password is sealed apart for use1 and use2, each by an agent in its region"
+
 code="$(as_alice POST "${apps}/session/${session}/seals" \
   '{"path":"deploy/legacy/sealed-secret.yaml","key":"k","value":"v"}' | cut -d' ' -f1)"
 [[ "$code" == 422 ]] || die "a seal into a cluster-wide document answered ${code}"
@@ -381,8 +415,9 @@ jq -r '.files[0].after' <<<"$pull" >"${work}/after.yaml"
 # the file with the new lines taken out is the file before, with its three
 # empty mappings written as block mappings
 [[ "$(grep -c '^    api-token: Ag' "${work}/after.yaml")" == 3 ]] || die "the pull request does not seal api-token for three documents"
+[[ "$(grep -c '^    db-password: Ag' "${work}/after.yaml")" == 3 ]] || die "the pull request does not seal db-password for three documents"
 diff <(sed 's/^  encryptedData: {}$/  encryptedData:/' "${work}/before.yaml") \
-  <(grep -v '^    api-token: ' "${work}/after.yaml") >&2 || die "the pull request changes more than encryptedData"
+  <(grep -Ev '^    (api-token|db-password): ' "${work}/after.yaml") >&2 || die "the pull request changes more than encryptedData"
 if grep -qF -- "$(grep -m1 '^    api-token: ' "${work}/after.yaml" | cut -c 16-80)" <<<"$(jq -r '.body + .message + .title' <<<"$pull")"; then
   die "a ciphertext is in the pull request's text"
 fi
@@ -402,13 +437,21 @@ for name in $(stack_clusters); do
     sleep 2
   done
   [[ "$got" == "$value" ]] || die "controller ${name} did not unseal the pull request's billing secret"
+  case "$name" in
+    *-use1-*) want="$db_use1" ;;
+    *) want="$db_use2" ;;
+  esac
+  got="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" get secret billing \
+    -o jsonpath='{.data.db-password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  [[ "$got" == "$want" ]] || die "controller ${name} did not unseal its region's db-password"
 done
-check "applied to the clusters, the pull request's file unseals to the value in all $(stack_clusters | wc -l | tr -d ' ')"
+check "applied to the clusters, the pull request's file unseals to the value in all $(stack_clusters | wc -l | tr -d ' '), and to each region's db-password"
 
 [[ "$(log_events sealer-system sealer-control-plane pr.opened | wc -l | tr -d ' ')" == 1 ]] \
   || die "the control plane did not log pr.opened once"
-if kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null | grep -qF -- "$value"; then
-  die "the value appears in the control plane's log"
+if kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null \
+  | grep -qF -e "$value" -e "$db_use1" -e "$db_use2"; then
+  die "a value appears in the control plane's log"
 fi
 check "the pull request is logged, and the value is not"
 
