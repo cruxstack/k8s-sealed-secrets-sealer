@@ -26,12 +26,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
+{{/* the enabled capabilities, or "none": the agent then only reports its
+controller's active key */}}
 {{- define "agent.capabilities" -}}
 {{- $caps := list -}}
 {{- range $name, $on := .Values.capabilities -}}
 {{- if $on }}{{ $caps = append $caps $name }}{{ end -}}
 {{- end -}}
-{{- join "," $caps -}}
+{{- if $caps }}{{ join "," $caps }}{{ else }}none{{ end -}}
+{{- end -}}
+
+{{/* the control plane's URL without a trailing slash: the control plane
+compares the token audience with its own URL, which has none */}}
+{{- define "agent.controlPlaneURL" -}}
+{{- required "controlPlane.url is required" .Values.controlPlane.url | trimSuffix "/" -}}
+{{- end -}}
+
+{{- define "agent.audience" -}}
+{{- default (include "agent.controlPlaneURL" .) .Values.identity.audience -}}
 {{- end -}}
 
 {{- define "agent.identityMode" -}}

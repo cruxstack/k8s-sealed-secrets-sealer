@@ -6,9 +6,12 @@ metadata:
   labels:
     {{- include "agent.labels" . | nindent 4 }}
 spec:
-  # one agent per cluster; commands are single-use, so a brief overlap during
-  # a rollout is harmless
+  # one agent per cluster. The old pod stops before the new one starts: both
+  # would check in and run commands as the same agent, and key sync relies on
+  # one agent's check-ins coming one at a time.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "agent.selectorLabels" . | nindent 6 }}
@@ -47,13 +50,13 @@ spec:
             - name: APP_CONTROLLER_DEPLOYMENT
               value: {{ include "agent.controllerDeployment" . | quote }}
             - name: APP_CONTROL_PLANE_URL
-              value: {{ required "controlPlane.url is required" .Values.controlPlane.url | quote }}
+              value: {{ include "agent.controlPlaneURL" . | quote }}
             - name: APP_ALLOW_INSECURE_CONTROL_PLANE
               value: {{ .Values.controlPlane.allowInsecure | quote }}
             - name: APP_IDENTITY_MODE
               value: {{ include "agent.identityMode" . | quote }}
             - name: APP_IDENTITY_AUDIENCE
-              value: {{ default .Values.controlPlane.url .Values.identity.audience | quote }}
+              value: {{ include "agent.audience" . | quote }}
             {{- if eq .Values.identity.mode "k8s-oidc" }}
             - name: APP_IDENTITY_TOKEN_FILE
               value: /var/run/secrets/k8s-sealed-secrets-sealer/token
@@ -133,7 +136,7 @@ spec:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: {{ default .Values.controlPlane.url .Values.identity.audience | quote }}
+                  audience: {{ include "agent.audience" . | quote }}
                   expirationSeconds: {{ .Values.identity.expirationSeconds }}
       {{- end }}
       {{- with .Values.nodeSelector }}

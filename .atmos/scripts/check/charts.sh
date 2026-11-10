@@ -71,6 +71,31 @@ fi
 # an agent that does not seal needs no transit key
 validate deploy/helm/agent "${agent[@]}" --set kms.transitKeyId= --set capabilities.seal=false \
   --set capabilities.renewal=true
+# with every capability off the agent runs with none, not the default seal
+validate deploy/helm/agent "${agent[@]}" --set kms.transitKeyId= --set capabilities.seal=false
+if ! helm template check deploy/helm/agent "${agent[@]}" --set capabilities.seal=false \
+  | grep -A1 'name: APP_CAPABILITIES' | grep -q '"none"'; then
+  echo "Error: the agent chart does not render no capabilities as none" >&2
+  exit 1
+fi
+# the control plane compares the token audience with its URL, which has no
+# trailing slash
+if helm template check deploy/helm/agent "${agent[@]}" --set controlPlane.url=https://sealer.dev.example.com/ \
+  | grep -q 'sealer.dev.example.com/"'; then
+  echo "Error: the agent chart keeps a trailing slash on controlPlane.url" >&2
+  exit 1
+fi
+# two pods of one agent must never run at once
+if ! helm template check deploy/helm/agent "${agent[@]}" | grep -q 'type: Recreate'; then
+  echo "Error: the agent Deployment does not use the Recreate strategy" >&2
+  exit 1
+fi
+# only renewal may patch the controller Deployment
+if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.keys=true \
+  --set kms.escrowKeyId=alias/sealer-escrow | grep -q '"patch"'; then
+  echo "Error: the agent chart lets the keys capability patch the controller Deployment" >&2
+  exit 1
+fi
 
 # without their required values, the charts must refuse to render
 for chart in deploy/helm/control-plane deploy/helm/agent; do

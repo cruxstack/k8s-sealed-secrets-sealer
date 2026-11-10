@@ -36,9 +36,9 @@ capabilities:
   # by setting --key-renew-period on the controller's Deployment. Kubernetes
   # cannot limit that permission to one argument: an agent with it can
   # change the Deployment in any way, and so act as the controller's service
-  # account, which can read and write Secrets in every namespace. Turn it on
-  # in one cluster per env at most, or set the controller's own
-  # keyrenewperiod value and leave this off.
+  # account, which can read and write Secrets in every namespace. Give it to
+  # as few agents as you can (one per env is enough), or set the
+  # controller's own keyrenewperiod value and leave this off.
   renewal: false
 
 # The control plane this agent checks in with (required). It must be https;
@@ -57,7 +57,7 @@ controlPlane:
 # which is its public URL unless configured otherwise.
 identity:
   mode: k8s-oidc
-  # defaults to controlPlane.url
+  # defaults to controlPlane.url, without a trailing slash
   audience: ""
   # lifetime of the projected token (k8s-oidc)
   expirationSeconds: 600

@@ -134,14 +134,19 @@ func (a *Agent) cycle(ctx context.Context) {
 	a.noteActiveKey(ctx, report)
 	a.noteKeyCount(ctx, len(report.Keys))
 
-	commands := a.commands
+	// an agent with no capabilities still checks in, reporting its
+	// controller's active key; empty lists, not null
+	capabilities, commands := a.capabilities, a.commands
+	if capabilities == nil {
+		capabilities = []string{}
+	}
 	if commands == nil {
 		commands = []string{}
 	}
 	resp, err := a.controlPlane.CheckIn(ctx, protocol.CheckIn{
 		Protocol:     protocol.Version,
 		AgentVersion: a.version,
-		Capabilities: a.capabilities,
+		Capabilities: capabilities,
 		Commands:     commands,
 		Controller:   report.Controller,
 		Keys:         report.Keys,

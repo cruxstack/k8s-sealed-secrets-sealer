@@ -324,7 +324,9 @@ a creation time, an expiry and a typed payload. The rules:
 `keys` and `renewal` are off by default because they grant access to the
 sealing keys and to the controller Deployment. Key sync, which most
 multi-cluster envs need, works only on agents where an operator turned them
-on.
+on. An agent may have none (`APP_CAPABILITIES=none`, which the chart sets
+when all are off): it still checks in, reporting its controller's active
+key.
 
 v1 has no command that deletes or disables anything.
 
@@ -850,9 +852,9 @@ objects' names are generated or unknown.
 sets: an agent with `renewal` can change the controller's pod spec, and so
 run anything as the controller's ServiceAccount, which in the upstream
 chart reads and writes Secrets in every namespace. That is why `keys`
-restarts the controller by deleting its pods instead. Turn `renewal` on in
-one cluster per env at most, or set the controller's own renew period and
-leave it off.
+restarts the controller by deleting its pods instead. Give `renewal` to as
+few agents as you can (one per env is enough), or set the controller's own
+renew period and leave it off.
 
 ## 11. Data model
 

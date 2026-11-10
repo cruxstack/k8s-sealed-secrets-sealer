@@ -225,3 +225,20 @@ func TestAgent_WarnsAsKeysNearTheLimit(t *testing.T) {
 		t.Errorf("no too_many_keys error:\n%s", logs)
 	}
 }
+
+// With every capability off the agent still checks in with its
+// controller's active key.
+func TestAgent_ChecksInWithoutCapabilities(t *testing.T) {
+	cp := &fakeControlPlane{}
+	report := reportWith(t)
+	report.Complete = false
+	a := New(Options{Inventory: &fakeInventory{report: report}, ControlPlane: cp, Interval: 15 * time.Second, Logger: slog.New(slog.DiscardHandler)})
+	a.cycle(context.Background())
+	if len(cp.got) != 1 {
+		t.Fatalf("check-ins = %d", len(cp.got))
+	}
+	in := cp.got[0]
+	if in.Capabilities == nil || len(in.Capabilities) != 0 || in.Commands == nil || len(in.Keys) != 1 {
+		t.Fatalf("check-in = %+v", in)
+	}
+}

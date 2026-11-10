@@ -295,7 +295,7 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 		TokenFile:                 r.str("APP_IDENTITY_TOKEN_FILE", DefaultTokenFile),
 		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, protocol.MinCheckInInterval, protocol.MaxCheckInInterval),
 	}
-	cfg.ControllerDeployment = r.dnsLabel("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
+	cfg.ControllerDeployment = r.dnsSubdomain("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
 	cfg.ControlPlaneURL = r.required(r.url("APP_CONTROL_PLANE_URL", cfg.AllowInsecureControlPlane), "APP_CONTROL_PLANE_URL")
 	cfg.IdentityAudience = r.str("APP_IDENTITY_AUDIENCE", cfg.ControlPlaneURL)
 	cfg.AWSSTSRegion = r.str("APP_AWS_STS_REGION", "")
@@ -304,16 +304,7 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 	default:
 		r.fail("APP_IDENTITY_MODE must be %s or %s: %q", protocol.MethodK8sOIDC, protocol.MethodAWSSTS, cfg.IdentityMode)
 	}
-	for _, c := range strings.Split(r.str("APP_CAPABILITIES", protocol.CapabilitySeal), ",") {
-		c = strings.TrimSpace(c)
-		switch {
-		case c == "":
-		case !protocol.IsCapability(c):
-			r.fail("APP_CAPABILITIES: unknown capability %q", c)
-		case !slices.Contains(cfg.Capabilities, c):
-			cfg.Capabilities = append(cfg.Capabilities, c)
-		}
-	}
+	cfg.Capabilities = r.capabilities("APP_CAPABILITIES")
 	cfg.EnvName = r.required(r.dnsLabel("APP_ENV_NAME", ""), "APP_ENV_NAME")
 	cfg.KMSEscrowKeyID = r.str("APP_KMS_ESCROW_KEY_ID", "")
 	if cfg.HasCapability(protocol.CapabilityKeys) && cfg.KMSEscrowKeyID == "" {
@@ -361,6 +352,33 @@ func (r *reader) required(v, key string) string {
 	return v
 }
 
+// capabilities reads an agent's capabilities: a list, or "none" (or empty)
+// for none. An agent with none still checks in, reporting its controller's
+// active key. Unset, the agent seals.
+func (r *reader) capabilities(key string) []string {
+	v, set := r.lookup(key)
+	if !set {
+		return []string{protocol.CapabilitySeal}
+	}
+	if v = strings.TrimSpace(v); v == "none" {
+		return nil
+	}
+	var out []string
+	for _, c := range strings.Split(v, ",") {
+		c = strings.TrimSpace(c)
+		switch {
+		case c == "":
+		case c == "none":
+			r.fail("%s: none cannot be combined with capabilities", key)
+		case !protocol.IsCapability(c):
+			r.fail("%s: unknown capability %q", key, c)
+		case !slices.Contains(out, c):
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (r *reader) dnsLabel(key, fallback string) string {
 	v := r.str(key, fallback)
 	if v == "" {
@@ -368,6 +386,19 @@ func (r *reader) dnsLabel(key, fallback string) string {
 	}
 	if msgs := validation.IsDNS1123Label(v); len(msgs) > 0 {
 		r.fail("%s must be a DNS-1123 label: %s", key, strings.Join(msgs, "; "))
+	}
+	return v
+}
+
+// dnsSubdomain reads a Kubernetes object name that may contain dots, such as
+// a Deployment's.
+func (r *reader) dnsSubdomain(key, fallback string) string {
+	v := r.str(key, fallback)
+	if v == "" {
+		return ""
+	}
+	if msgs := validation.IsDNS1123Subdomain(v); len(msgs) > 0 {
+		r.fail("%s must be a DNS-1123 subdomain: %s", key, strings.Join(msgs, "; "))
 	}
 	return v
 }
