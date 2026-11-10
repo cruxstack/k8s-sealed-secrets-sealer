@@ -6,9 +6,15 @@ import (
 	"time"
 )
 
-// ErrTooManySessions is returned when a user already has the most live
-// sessions allowed.
-var ErrTooManySessions = errors.New("too many open sessions")
+// Session errors.
+var (
+	// ErrTooManySessions is returned when a user already has the most live
+	// sessions allowed.
+	ErrTooManySessions = errors.New("too many open sessions")
+	// ErrSessionBusy is returned when a session is locked while a pull
+	// request is opened from it.
+	ErrSessionBusy = errors.New("a pull request is being opened from this session")
+)
 
 // Session is one user's set of pending changes to one repository, based on
 // a commit of its default branch. A user has at most one live session per
@@ -29,10 +35,17 @@ type Session struct {
 	// EndsAt is the latest a session lasts. Its seals and pending changes
 	// are kept until then.
 	EndsAt time.Time `dynamodbav:"session_ends_at"`
+	// SubmitDeadline (epoch milliseconds) is set while a pull request is
+	// opened from the session: until then, or until the lock is released,
+	// the session cannot be used.
+	SubmitDeadline int64 `dynamodbav:"submit_deadline,omitempty"`
 }
 
 // Live reports whether the session is still open at now.
 func (s Session) Live(now time.Time) bool { return now.Before(s.ExpiresAt) }
+
+// Locked reports whether a pull request is being opened from the session.
+func (s Session) Locked(now time.Time) bool { return s.SubmitDeadline > now.UnixMilli() }
 
 // RepoKey identifies a repository in session keys. GitHub names are case
 // insensitive.

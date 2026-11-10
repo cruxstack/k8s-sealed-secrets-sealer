@@ -39,6 +39,10 @@ spec:
             # the control plane's callback; Tilt sets it from the stack's port
             - name: MOCK_GITHUB_CALLBACK_URLS
               value: http://localhost:4100/api/v1/auth/callback
+            # where browsers reach the mock, for pull request links; Tilt sets
+            # it from the stack's port
+            - name: MOCK_GITHUB_WEB_URL
+              value: http://localhost:4104
             # the GitHub App's ID (matching dev/values/control-plane.yaml) and
             # public key, which Tilt generates per stack
             - name: MOCK_GITHUB_APP_ID

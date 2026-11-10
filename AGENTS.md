@@ -23,11 +23,11 @@
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time
   - `internal/userauth/` - GitHub OAuth sign-in (org and team checks), user session cookies, CSRF
-  - `internal/githubapp/` - the GitHub App client: App JWTs, least-privilege installation tokens, repository reads
-  - `internal/manifest/` - finds an env's SealedSecret documents in a YAML file (scope, keys, why one cannot be sealed into)
-  - `internal/repos/` - repository access for signed-in users, checked against their own GitHub permission; SealedSecret discovery at the head or at a session's commit
+  - `internal/githubapp/` - the GitHub App client: App JWTs, least-privilege installation tokens, repository reads, and pull requests (one commit on a new branch)
+  - `internal/manifest/` - finds an env's SealedSecret documents in a YAML file (scope, keys, why one cannot be sealed into), and edits only their `spec.encryptedData` in place, byte for byte elsewhere
+  - `internal/repos/` - repository access for signed-in users, checked against their own GitHub permission; SealedSecret discovery at the head or at a session's commit; pull requests of sealed values
   - `internal/webui/` - serves the web UI embedded from `internal/webui/dist/app` (built by `atmos web build`)
-  - `internal/mockgithub/`, `cmd/mock-github/` - GitHub mock (OAuth, a GitHub App, fixture repositories in `internal/mockgithub/fixtures`) for tests and the local stack; never released
+  - `internal/mockgithub/`, `cmd/mock-github/` - GitHub mock (OAuth, a GitHub App, fixture repositories in `internal/mockgithub/fixtures`, Git writes and pull requests with a page per pull request) for tests and the local stack; never released
 - **Web UI**: `web/` (React, Vite, TanStack Router and Query, shadcn/ui). `atmos web check|test|build|dev`.
 - **Deploy**: `deploy/helm/agent` and `deploy/helm/control-plane`. AWS infrastructure lives in the separate `terraform-aws-k8s-sealed-secrets-sealer` repository.
 

@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import apiClient from "@/api/client";
 import type {
+  PullRequest,
   Seal,
   SealSession,
   SessionList,
@@ -91,6 +92,21 @@ export async function discardSession(
   await apiClient.delete(
     `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}`,
   );
+}
+
+/**
+ * Opens a pull request with the session's pending changes. The session ends
+ * once it is open.
+ */
+export async function openPullRequest(
+  owner: string,
+  repo: string,
+  sessionId: string,
+): Promise<PullRequest> {
+  const { data } = await apiClient.post<{ pull_request: PullRequest }>(
+    `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}/pull-request`,
+  );
+  return data.pull_request;
 }
 
 export async function removeChange(

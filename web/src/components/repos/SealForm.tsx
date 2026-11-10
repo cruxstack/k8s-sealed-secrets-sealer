@@ -48,6 +48,8 @@ interface SealFormProps {
   commit: string;
   session: SealSession | null;
   onClose: () => void;
+  /** Told when a seal starts and ends, and that none runs on close. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 /**
@@ -62,6 +64,7 @@ export function SealForm({
   commit,
   session,
   onClose,
+  onBusyChange,
 }: SealFormProps) {
   const queryClient = useQueryClient();
   const id = useId();
@@ -81,6 +84,11 @@ export function SealForm({
       alive.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   const docs = file.documents ?? [];
   const problem = keyProblem(key);

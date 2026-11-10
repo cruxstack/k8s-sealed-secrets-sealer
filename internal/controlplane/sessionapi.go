@@ -286,6 +286,10 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if sess.Locked(s.now()) {
+		writeError(w, http.StatusConflict, store.ErrSessionBusy.Error())
+		return
+	}
 	ctx := r.Context()
 	if _, err := s.store.DeleteSession(ctx, sess.UserID, store.RepoKey(sess.Owner, sess.Repo), sess.ID); err != nil {
 		s.internalError(w, r, "failed to delete session", err)
@@ -303,6 +307,10 @@ func (s *Server) deleteChange(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if sess.Locked(s.now()) {
+		writeError(w, http.StatusConflict, store.ErrSessionBusy.Error())
+		return
+	}
 	ctx := r.Context()
 	id := r.PathValue("change")
 	if !validChangeID(id) {
@@ -318,7 +326,12 @@ func (s *Server) deleteChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "change not found")
 		return
 	}
-	if _, err := s.touch(ctx, sess, s.now().UTC()); err != nil {
+	// removed before the session is marked used: a pull request that
+	// locked the session since may have read the change already
+	if _, err := s.touch(ctx, sess, s.now().UTC()); errors.Is(err, store.ErrSessionBusy) {
+		writeError(w, http.StatusConflict, "a pull request is being opened from this session and may include the change")
+		return
+	} else if err != nil {
 		s.logger.WarnContext(ctx, "failed to mark session used", "session_id", sess.ID, "error", err)
 	}
 	s.logger.InfoContext(ctx, "pending change removed",

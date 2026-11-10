@@ -222,9 +222,34 @@ func (m *Memory) TouchSession(_ context.Context, userID int64, repoKey, id strin
 	if !ok || s.ID != id || !s.Live(now) {
 		return false, nil
 	}
+	if s.Locked(now) {
+		return false, ErrSessionBusy
+	}
 	s.UsedAt, s.ExpiresAt = now, expires
 	m.sessions[userID][repoKey] = s
 	return true, nil
+}
+
+func (m *Memory) LockSession(_ context.Context, userID int64, repoKey, id string, until, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[userID][repoKey]
+	if !ok || s.ID != id || !s.Live(now) || s.Locked(now) {
+		return false, nil
+	}
+	s.SubmitDeadline = until.UnixMilli()
+	m.sessions[userID][repoKey] = s
+	return true, nil
+}
+
+func (m *Memory) UnlockSession(_ context.Context, userID int64, repoKey, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[userID][repoKey]; ok && s.ID == id {
+		s.SubmitDeadline = 0
+		m.sessions[userID][repoKey] = s
+	}
+	return nil
 }
 
 func (m *Memory) DeleteSession(_ context.Context, userID int64, repoKey, id string) (bool, error) {

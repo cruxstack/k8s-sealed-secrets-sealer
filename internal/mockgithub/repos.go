@@ -34,6 +34,7 @@ type repoState struct {
 	trees   map[string]map[string]string
 	commits map[string]commit
 	refs    map[string]string // "heads/main" -> commit
+	pulls   []pullRecord
 }
 
 type commit struct {

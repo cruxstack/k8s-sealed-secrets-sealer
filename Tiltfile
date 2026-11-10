@@ -181,7 +181,8 @@ def control_plane_secret():
 setup_objects.extend(control_plane_secret())
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
 def mock_github():
-    # register this stack's callback URL with the mock, as an OAuth app would
+    # register this stack's callback URL with the mock, as an OAuth app
+    # would, and tell it where browsers reach it
     objs = decode_yaml_stream(read_file("dev/k3d/mock-github.yaml"))
     for obj in objs:
         if obj["kind"] != "Deployment":
@@ -190,6 +191,8 @@ def mock_github():
             for e in container.get("env", []):
                 if e["name"] == "MOCK_GITHUB_CALLBACK_URLS":
                     e["value"] = PUBLIC_URL + "/api/v1/auth/callback"
+                if e["name"] == "MOCK_GITHUB_WEB_URL":
+                    e["value"] = GITHUB_URL
                 if e["name"] == "MOCK_GITHUB_APP_PUBLIC_KEY":
                     e["value"] = GITHUB_APP_PUBLIC_KEY
     return objs

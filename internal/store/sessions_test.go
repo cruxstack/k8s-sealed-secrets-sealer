@@ -135,6 +135,67 @@ func TestStore_Sessions(t *testing.T) {
 	}
 }
 
+func TestStore_SessionLock(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			user := time.Now().UnixNano()
+			sess := Session{
+				ID: "S1", UserID: user, UserLogin: "alice", Owner: "example-org", Repo: "apps", Branch: "main", Commit: "abc",
+				CreatedAt: now, UsedAt: now, ExpiresAt: now.Add(time.Hour), EndsAt: now.Add(8 * time.Hour),
+			}
+			if _, _, err := s.CreateSession(ctx, sess, 10, now); err != nil {
+				t.Fatal(err)
+			}
+			key := RepoKey("example-org", "apps")
+			if ok, err := s.LockSession(ctx, user, key, "S2", now.Add(time.Minute), now); err != nil || ok {
+				t.Fatalf("lock of another session: %v, %v", ok, err)
+			}
+			if ok, err := s.LockSession(ctx, user, key, "S1", now.Add(time.Minute), now); err != nil || !ok {
+				t.Fatalf("lock: %v, %v", ok, err)
+			}
+			if got, _, _ := s.Session(ctx, user, key, now); !got.Locked(now) || got.Locked(now.Add(time.Minute)) {
+				t.Fatalf("locked session = %+v", got)
+			}
+			if ok, err := s.LockSession(ctx, user, key, "S1", now.Add(time.Minute), now); err != nil || ok {
+				t.Fatalf("second lock: %v, %v", ok, err)
+			}
+			// a locked session cannot be used
+			if ok, err := s.TouchSession(ctx, user, key, "S1", now.Add(time.Hour), now); !errors.Is(err, ErrSessionBusy) || ok {
+				t.Fatalf("touch while locked: %v, %v", ok, err)
+			}
+			if ok, err := s.TouchSession(ctx, user, key, "S2", now.Add(time.Hour), now); err != nil || ok {
+				t.Fatalf("touch of another session: %v, %v", ok, err)
+			}
+			if err := s.UnlockSession(ctx, user, key, "S1"); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := s.TouchSession(ctx, user, key, "S1", now.Add(time.Hour), now); err != nil || !ok {
+				t.Fatalf("touch after unlock: %v, %v", ok, err)
+			}
+			// a lock lapses at its deadline
+			if ok, _ := s.LockSession(ctx, user, key, "S1", now.Add(time.Minute), now); !ok {
+				t.Fatal("lock again")
+			}
+			later := now.Add(2 * time.Minute)
+			if ok, err := s.TouchSession(ctx, user, key, "S1", later.Add(time.Hour), later); err != nil || !ok {
+				t.Fatalf("touch after the lock lapsed: %v, %v", ok, err)
+			}
+			if ok, _ := s.LockSession(ctx, user, key, "S1", later.Add(time.Minute), later); !ok {
+				t.Fatal("lock after the lock lapsed")
+			}
+			// an expired session cannot be locked
+			if ok, err := s.LockSession(ctx, user, key, "S1", now.Add(3*time.Hour), now.Add(2*time.Hour)); err != nil || ok {
+				t.Fatalf("lock of an expired session: %v, %v", ok, err)
+			}
+			if err := s.UnlockSession(ctx, user, "example-org/none", "S9"); err != nil {
+				t.Fatalf("unlock of a missing session: %v", err)
+			}
+		})
+	}
+}
+
 func TestStore_SealsAndChanges(t *testing.T) {
 	for name, s := range stores(t) {
 		t.Run(name, func(t *testing.T) {

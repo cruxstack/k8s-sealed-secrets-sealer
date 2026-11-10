@@ -88,8 +88,15 @@ type Store interface {
 	// Sessions returns a user's live sessions.
 	Sessions(ctx context.Context, userID int64, now time.Time) ([]Session, error)
 	// TouchSession marks a live session used at now and moves its expiry to
-	// expires, and reports whether it did. The session must still be id.
+	// expires, and reports whether it did. The session must still be id. It
+	// fails with ErrSessionBusy while the session is locked.
 	TouchSession(ctx context.Context, userID int64, repoKey, id string, expires, now time.Time) (bool, error)
+	// LockSession locks a live session (still id) until until, while a pull
+	// request is opened from it, and reports whether it did: not when the
+	// session is gone or already locked.
+	LockSession(ctx context.Context, userID int64, repoKey, id string, until, now time.Time) (bool, error)
+	// UnlockSession releases a session's lock.
+	UnlockSession(ctx context.Context, userID int64, repoKey, id string) error
 	// DeleteSession ends a session if it is still id, and reports whether
 	// it did. Its seals and changes are left to expire.
 	DeleteSession(ctx context.Context, userID int64, repoKey, id string) (bool, error)

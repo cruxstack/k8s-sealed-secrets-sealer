@@ -52,6 +52,8 @@ export function fakeApi(opts: {
   /** What a seal's progress answers, in order; the last one repeats. */
   sealStatuses?: Seal["status"][];
   sealError?: string;
+  /** Answers a pull request with this error instead of opening one. */
+  pullRequestError?: { status: number; error: string };
 }): FakeApi {
   const calls: Recorded[] = [];
   // copies, so the routes never change the caller's fixtures
@@ -155,6 +157,25 @@ export function fakeApi(opts: {
           seal.error = opts.sealError ?? "the agent could not seal the value";
         }
         return reply(200, seal);
+      }
+      if (method === "POST" && rest === "/pull-request") {
+        if (opts.pullRequestError) {
+          return reply(opts.pullRequestError.status, {
+            error: opts.pullRequestError.error,
+          });
+        }
+        const changes = current.changes ?? [];
+        delete sessions[key];
+        return reply(201, {
+          pull_request: {
+            number: 7,
+            url: `https://github.com/${key}/pull/7`,
+            branch: `sealer/dev/alice-${id.toLowerCase()}`,
+            title: `Seal ${changes.length} values for dev`,
+            files: new Set(changes.map((c) => c.path)).size,
+            changes: changes.length,
+          },
+        });
       }
       const change = /^\/changes\/([^/]+)$/.exec(rest);
       if (method === "DELETE" && change) {
