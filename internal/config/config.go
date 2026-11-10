@@ -1,9 +1,15 @@
 // Package config reads and validates the configuration of the control plane
 // and the agent. It is the only package that reads the environment, except
 // that the AWS SDK reads its own standard variables (credentials, region).
+//
+// Any of the control plane's APP_ settings may instead hold the ARN of an
+// SSM Parameter Store parameter, whose value is read once at start. On
+// Lambda this keeps secrets out of environment variables, and lets the agent
+// registry be larger than environment variables allow.
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -62,8 +68,10 @@ type ControlPlane struct {
 	// AgentAudience is the aud claim agent login tokens must carry; it
 	// defaults to PublicURL.
 	AgentAudience string
-	// RegistryFile is the agent registry (see internal/registry).
+	// RegistryFile is the agent registry (see internal/registry). Registry
+	// holds it inline instead; exactly one of the two is set.
 	RegistryFile string
+	Registry     []byte
 	// AgentSessionKey signs agent session tokens.
 	AgentSessionKey []byte
 	// AdminToken enables the admin API when set.
@@ -178,9 +186,14 @@ type Agent struct {
 func (a *Agent) HasCapability(c string) bool { return slices.Contains(a.Capabilities, c) }
 
 // LoadControlPlane reads the control plane's configuration from the
-// environment and reports every invalid setting at once.
-func LoadControlPlane() (*ControlPlane, error) {
-	return loadControlPlane(os.LookupEnv)
+// environment, reading settings given as SSM parameter ARNs from SSM, and
+// reports every invalid setting at once.
+func LoadControlPlane(ctx context.Context) (*ControlPlane, error) {
+	lookup, err := resolveParameters(ctx, os.Environ(), newSSMReader)
+	if err != nil {
+		return nil, err
+	}
+	return loadControlPlane(lookup)
 }
 
 // LoadAgent reads the agent's configuration from the environment and reports
@@ -196,7 +209,8 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		Logging:             r.logging(),
 		EnvName:             r.required(r.dnsLabel("APP_ENV_NAME", ""), "APP_ENV_NAME"),
 		PublicURL:           r.required(r.url("APP_PUBLIC_URL", true), "APP_PUBLIC_URL"),
-		RegistryFile:        r.required(r.str("APP_REGISTRY_FILE", ""), "APP_REGISTRY_FILE"),
+		RegistryFile:        r.str("APP_REGISTRY_FILE", ""),
+		Registry:            []byte(r.str("APP_REGISTRY", "")),
 		AgentSessionKey:     []byte(r.secret("APP_AGENT_SESSION_KEY", MinSessionKeyBytes, true)),
 		AdminToken:          r.secret("APP_ADMIN_TOKEN", MinAdminTokenBytes, false),
 		DynamoDBTable:       r.required(r.str("APP_DYNAMODB_TABLE", ""), "APP_DYNAMODB_TABLE"),
@@ -204,6 +218,9 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		DynamoDBCreateTable: r.boolean("APP_DYNAMODB_CREATE_TABLE", false),
 	}
 	cfg.AgentAudience = r.str("APP_AGENT_AUDIENCE", cfg.PublicURL)
+	if (cfg.RegistryFile == "") == (len(cfg.Registry) == 0) {
+		r.fail("set exactly one of APP_REGISTRY_FILE and APP_REGISTRY (the registry inline)")
+	}
 
 	cfg.AllowInsecureGitHub = r.boolean("APP_ALLOW_INSECURE_GITHUB", false)
 	cfg.GitHubURL = r.url("APP_GITHUB_URL", cfg.AllowInsecureGitHub)

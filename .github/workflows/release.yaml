@@ -1,0 +1,172 @@
+name: release
+
+# Every push to main runs the whole CI suite on that commit, then releases it
+# when its conventional commits since the last release call for one (see
+# .atmos/scripts/release/version.sh). Running the workflow by hand retries a
+# release of main's head; a commit that is already released is skipped.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  ATMOS_VERSION: 1.233.2
+  IMAGE_PREFIX: ghcr.io/cruxstack/k8s-sealed-secrets-sealer
+  CHARTS: oci://ghcr.io/cruxstack/charts
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
+    permissions:
+      contents: read
+
+  release:
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # the tag and the release
+      packages: write # images and charts on GHCR
+      id-token: write # signing provenance attestations
+      attestations: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the release notes need the history since the last tag
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Atmos
+        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+        with:
+          atmos-version: ${{ env.ATMOS_VERSION }}
+          install-wrapper: false
+          checksum-validation: enforce
+      - name: Compute Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: atmos release version
+
+      - name: Build Release Files
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: atmos release artifacts --version "$VERSION"
+
+      - name: Setup Buildx
+        if: steps.version.outputs.version != ''
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log In to GHCR
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"
+      - name: Build and Push Images
+        id: images
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          for target in control-plane agent; do
+            image="${IMAGE_PREFIX}-${target}"
+            meta="${RUNNER_TEMP}/${target}.json"
+            # the labels and index annotations link each image to this
+            # repository on GHCR
+            docker buildx build --platform linux/amd64,linux/arm64 --target "$target" \
+              --build-arg VERSION="v${VERSION}" \
+              --label "org.opencontainers.image.source=${source}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.version=${VERSION}" \
+              --label "org.opencontainers.image.licenses=MIT" \
+              --annotation "index:org.opencontainers.image.source=${source}" \
+              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --annotation "index:org.opencontainers.image.version=${VERSION}" \
+              --annotation "index:org.opencontainers.image.licenses=MIT" \
+              --annotation "index:org.opencontainers.image.description=k8s-sealed-secrets-sealer ${target}" \
+              --provenance=mode=max --sbom=true \
+              --tag "${image}:${VERSION}" --metadata-file "$meta" --push .
+            digest="$(jq -r '."containerimage.digest"' "$meta")"
+            [[ "$digest" == sha256:* ]] || { echo "no digest for ${image}" >&2; exit 1; }
+            echo "${target//-/_}=${digest}" >>"$GITHUB_OUTPUT"
+          done
+      - name: Attest Control Plane Image
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}-control-plane
+          subject-digest: ${{ steps.images.outputs.control_plane }}
+          push-to-registry: true
+      - name: Attest Agent Image
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}-agent
+          subject-digest: ${{ steps.images.outputs.agent }}
+          push-to-registry: true
+
+      - name: Push Charts
+        id: charts
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: atmos release charts --target "$CHARTS"
+      - name: Attest Agent Chart
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-agent
+          subject-digest: ${{ steps.charts.outputs.agent }}
+          push-to-registry: true
+      - name: Attest Control Plane Chart
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-control-plane
+          subject-digest: ${{ steps.charts.outputs.control_plane }}
+          push-to-registry: true
+      - name: Attest Release Files
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tgz
+
+      - name: Create Release
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          CONTROL_PLANE_DIGEST: ${{ steps.images.outputs.control_plane }}
+          AGENT_DIGEST: ${{ steps.images.outputs.agent }}
+        run: |
+          set -euo pipefail
+          cat >>release/notes.md <<EOF
+
+          ## Install
+
+          - **Control plane on Lambda:** \`k8s-sealed-secrets-sealer-lambda_arm64.zip\` or \`_amd64.zip\`, for the \`provided.al2023\` runtime.
+          - **Control plane image:** \`${IMAGE_PREFIX}-control-plane:${VERSION}@${CONTROL_PLANE_DIGEST}\`
+          - **Agent image:** \`${IMAGE_PREFIX}-agent:${VERSION}@${AGENT_DIGEST}\`
+          - **Charts:** \`${CHARTS}/k8s-sealed-secrets-sealer-agent\` and \`${CHARTS}/k8s-sealed-secrets-sealer-control-plane\`, version \`${VERSION}\`.
+
+          Every file, image and chart has a build provenance attestation; check one with \`gh attestation verify <file or oci://image> --repo ${GITHUB_REPOSITORY}\`.
+          EOF
+          gh release create "v${VERSION}" release/*.zip release/*.tgz release/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v${VERSION}" --notes-file release/notes.md

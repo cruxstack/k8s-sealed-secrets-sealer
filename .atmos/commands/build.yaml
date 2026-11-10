@@ -9,8 +9,9 @@ commands:
           tools:
             golang/go: 1.27.3
         description: |
-          Build the control plane server and the agent into dist/ for the
-          given platform (default: this machine).
+          Build the control plane (server and Lambda) and the agent into
+          dist/ for the given platform (default: this machine). Releases
+          package the Lambda binary with `atmos release artifacts`.
 
             atmos build bin
             atmos build bin --os linux --arch arm64
@@ -34,7 +35,7 @@ commands:
               ldflags="-s -w -X github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version.Version=${version}"
               export CGO_ENABLED=0 GOOS="${BUILD_GOOS:-$(go env GOOS)}" GOARCH="${BUILD_GOARCH:-$(go env GOARCH)}"
               mkdir -p dist
-              for bin in server agent; do
+              for bin in server lambda agent; do
                 echo "+ go build -o dist/${bin} ./cmd/${bin} (${GOOS}/${GOARCH}, ${version})" >&2
                 go build -trimpath -ldflags "$ldflags" -o "dist/${bin}" "./cmd/${bin}"
               done

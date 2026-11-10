@@ -9,8 +9,9 @@ commands:
           tools:
             golang/go: 1.27.3
         description: |
-          Run the Go unit tests with the race detector. They need no network,
-          cluster or Docker. Extra arguments after `--` go to `go test`.
+          Run the Go unit tests with the race detector, and the release
+          version script's tests. They need no network, cluster or Docker.
+          Extra arguments after `--` go to `go test`, and skip the script's.
 
             atmos test unit
             atmos test unit -- -run TestParseCert ./internal/agent
@@ -19,9 +20,14 @@ commands:
             command: |
               set -euo pipefail
               args=({{ .TrailingArgs }})
-              [[ ${#args[@]} -gt 0 ]] || args=(./...)
-              echo "+ go test -race -count=1 ${args[*]}" >&2
-              exec go test -race -count=1 "${args[@]}"
+              if [[ ${#args[@]} -gt 0 ]]; then
+                echo "+ go test -race -count=1 ${args[*]}" >&2
+                exec go test -race -count=1 "${args[@]}"
+              fi
+              echo "+ go test -race -count=1 ./..." >&2
+              go test -race -count=1 ./...
+              echo "+ .atmos/scripts/release/version_test.sh" >&2
+              bash .atmos/scripts/release/version_test.sh
 
       - name: integration
         dependencies:

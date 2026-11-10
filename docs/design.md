@@ -917,6 +917,25 @@ This repository releases:
 - container images for the control plane and the agent;
 - Helm charts for the agent and for the control plane in container mode.
 
+Each release is published only after the whole CI suite, end-to-end tests
+included, passed on its commit. Every file, image and chart carries a build
+provenance attestation (`gh attestation verify`), and the images carry
+SBOMs.
+
+**On Lambda** the control plane is the same HTTP handler as in a container,
+behind an API Gateway HTTP API (payload format 2.0, `$default` stage) or a
+function URL; CloudFront and WAF sit in front. The function's timeout must
+exceed the agents' longest command poll (20 seconds), and API Gateway's 30
+seconds bound every request. The function keeps no state between requests:
+anything durable is in DynamoDB, and the remote JWKS of Kubernetes issuers
+are cached per instance. Secrets come from SSM Parameter Store: any setting
+may hold a parameter's ARN instead of its value, read once at start. The
+agent registry, which can outgrow Lambda's 4 KB of environment variables,
+can be given the same way (`APP_REGISTRY`, an advanced-tier parameter up to
+8 KB) or packaged as a file. The function's role needs
+`ssm:GetParameter` on those parameters (and `kms:Decrypt` for SecureStrings),
+the table's DynamoDB actions, and `kms:GenerateDataKey` on the transit key.
+
 AWS infrastructure lives in a separate repository,
 `terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
 CloudFront and WAF, the DynamoDB table (PITR, TTL, CMK), the transit and

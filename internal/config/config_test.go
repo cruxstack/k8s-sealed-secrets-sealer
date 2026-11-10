@@ -112,7 +112,7 @@ func TestLoadControlPlane_ReportsEveryProblem(t *testing.T) {
 	for _, want := range []string{
 		"APP_ENV_NAME is required",
 		"APP_PUBLIC_URL must be an absolute http(s) URL",
-		"APP_REGISTRY_FILE is required",
+		"set exactly one of APP_REGISTRY_FILE and APP_REGISTRY",
 		"APP_AGENT_SESSION_KEY must be at least 32 bytes",
 		"APP_ADMIN_TOKEN must be at least 32 bytes",
 		"APP_DYNAMODB_TABLE is required",
