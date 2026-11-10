@@ -13,7 +13,7 @@ RUN npm run build
 
 # The builder runs on the build machine's platform and cross-compiles for
 # the target platform, so multi-platform builds need no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS builder
 
 WORKDIR /src
 
