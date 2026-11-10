@@ -16,7 +16,7 @@ commands:
           skip the scripts'.
 
             atmos test unit
-            atmos test unit -- -run TestParseCert ./internal/agent
+            atmos test unit -- -run TestParseCert ./internal/keys
         steps:
           - type: shell
             command: |

@@ -2,7 +2,8 @@
 // belong to an env.
 //
 // A document belongs to the env when its env annotation equals the env's
-// name; its region annotation is a preference for which agent seals. The
+// name; its region annotation says which region it is for, so a value that
+// differs by region goes only into its regions' documents. The
 // decryption label (name, namespace and scope) always comes from the
 // document's own metadata, the same place the controller reads it, so it
 // can never be chosen by a user.

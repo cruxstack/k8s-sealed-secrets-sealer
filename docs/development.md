@@ -69,8 +69,8 @@ use only). The control plane and the agents use the transit key through
 `alias/sealer-transit`, and agents the escrow key through
 `alias/sealer-escrow`. local-kms does not enforce key policies, so "the
 control plane cannot decrypt" and "an agent can decrypt only its own seals"
-are tested with the Terraform module, not here; the control plane's transit
-client has no decrypt method either way.
+are left to the Terraform module (not released yet), not tested here; the
+control plane's transit client has no decrypt method either way.
 
 Every simulated controller starts with its own key and with key renewal off
 (`--key-renew-period 0`). Within a minute or so of `atmos dev up`, the agents
@@ -176,6 +176,12 @@ and waits until it is ready. Several can run beside `atmos dev up`. Use
 |                          | Helm lint and kubeconform                                  |
 | `atmos verify pr`        | All of the above, as CI runs them (`--fast` skips e2e)     |
 
+Each of `atmos check all`'s checks also runs alone: `atmos check tidy`,
+`fmt` (`--write` formats in place), `lint`, `vuln` and `charts`.
+`atmos web fmt` formats the web sources. Arguments after `--` go to
+`go test`, for one package or test:
+`atmos test unit -- -run TestParseCert ./internal/keys`.
+
 `atmos test e2e` uses the cluster `sealer-e2e` and ports that do not clash
 with a running development stack. Pass `--keep` to leave the cluster up after
 the run for inspection. Besides bringing the stack up, it checks that:
@@ -232,6 +238,19 @@ verifies tokens against those keys and never calls the Kubernetes API. Its
 local-only secrets, including the admin token `atmos dev status` uses, are in
 `dev/k3d/control-plane-secret.yaml`.
 
+## Building
+
+| Command                    | What it does                                        |
+| -------------------------- | --------------------------------------------------- |
+| `atmos build bin`          | The control plane (server and Lambda) and the agent |
+|                            | into `dist/`; `--os` and `--arch` cross-compile     |
+| `atmos build image <name>` | A release image, `control-plane` or `agent`, for    |
+|                            | this machine's platform                             |
+| `atmos web install`        | The web dependencies, from the lockfile             |
+| `atmos web build`          | The UI into `internal/webui/dist/app`, which the    |
+|                            | control plane embeds                                |
+| `atmos web dev`            | Vite with hot reload (see "Signing in locally")     |
+
 ## Releases
 
 Every push to `main` runs the whole CI suite on that commit from
@@ -260,6 +279,7 @@ workflow by hand retries it. The same steps run locally:
 ```sh
 atmos release version                    # the next version and its notes (release/notes.md)
 atmos release artifacts --version 0.1.0  # the Lambda zips, charts and checksums in release/
+atmos release charts --target oci://...  # push release/'s charts (REGISTRY_USER, REGISTRY_TOKEN)
 ```
 
 CI builds the release files on every pull request, so packaging problems show
@@ -334,11 +354,11 @@ the settings that are its own, and every other setting is shared:
 envs:
   - name: dev
     dynamodbTable: sealer-dev
-    kmsTransitKeyId: arn:aws:kms:us-east-2:111111111111:key/mrk-...
-    registry: arn:aws:ssm:us-east-2:999999999999:parameter/sealer/dev/registry
+    kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
+    registry: arn:aws:ssm:us-east-2:111111111111:parameter/sealer/dev/registry
   - name: prod
     dynamodbTable: sealer-prod
-    kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
+    kmsTransitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-...
     registryFile: /etc/sealer/prod.yaml
     allowedTeams: [prod-sealers]
     adminTeams: [platform]
@@ -353,3 +373,6 @@ empty), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs` and
 refused. Env names cannot be the UI's own paths (`secrets`, `fleet`,
 `login` and so on). [docs/deployment.md](deployment.md) shows a whole
 deployment across envs, accounts and regions.
+
+`APP_ADMIN_TOKEN` is shared too: one token reads every env's fleet through
+the admin API ([docs/operations.md](operations.md#admin-api)).

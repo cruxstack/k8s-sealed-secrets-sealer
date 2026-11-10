@@ -26,7 +26,8 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// fleet serves the env's fleet view, to admins and to signed-in users.
+// fleet serves the env's fleet view: to automation holding the admin token,
+// and to signed-in users who administer the env.
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request) {
 	ids := make([]string, 0, len(s.reg.Agents))
 	for _, a := range s.reg.Agents {

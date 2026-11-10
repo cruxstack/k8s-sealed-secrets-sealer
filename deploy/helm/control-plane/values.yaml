@@ -18,10 +18,10 @@ env: ""
 #   envs:
 #     - name: dev
 #       dynamodbTable: sealer-dev
-#       kmsTransitKeyId: arn:aws:kms:us-east-2:111111111111:key/mrk-...
+#       kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
 #     - name: prod
 #       dynamodbTable: sealer-prod
-#       kmsTransitKeyId: arn:aws:kms:us-east-2:222222222222:key/mrk-...
+#       kmsTransitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-...
 #       allowedTeams: [prod-sealers]
 #       adminTeams: [platform]
 # An env reads its registry from registry-<name>.yaml in the registry
@@ -34,9 +34,10 @@ envs: []
 publicURL: ""
 agentAudience: ""
 
-# ConfigMap holding registry.yaml (the agents allowed to log in) and any JWKS
-# or CA files it references, mounted at /etc/k8s-sealed-secrets-sealer
-# (required)
+# ConfigMap holding the agent registry (the agents allowed to log in) and any
+# JWKS or CA files it references, mounted at /etc/k8s-sealed-secrets-sealer
+# (required): registry.yaml with env, or registry-<name>.yaml for each of
+# envs that sets neither registryFile nor registry
 registry:
   configMapName: ""
 
@@ -72,9 +73,11 @@ github:
 # how long a user stays signed in
 userSessionTTL: 8h
 
-# The annotation keys that place a SealedSecret document in an env (the
-# document belongs to this deployment when it equals env) and a region (a
-# preference for which cluster seals).
+# The annotation keys that place a SealedSecret document in an env (it
+# belongs to an env when the annotation equals the env's name) and a region
+# (a value that differs by region goes only into its regions' documents, and
+# an agent there is preferred). Each of envs may set its own envAnnotation
+# and regionAnnotation.
 annotations:
   env: k8s-sealed-secrets-sealer/env
   region: k8s-sealed-secrets-sealer/region
@@ -114,8 +117,9 @@ aws:
   region: ""
   # STS hosts agents' signed login requests may target (aws-sts agents).
   # Empty allows sts.amazonaws.com and the regional hosts of known AWS
-  # regions; set it for newer regions or other endpoints, such as VPC
-  # endpoint host names.
+  # regions; set it for a newer region. Agents always sign for the regional
+  # host (sts.<region>.amazonaws.com), so a control plane that reaches STS
+  # through a VPC endpoint needs that endpoint's private DNS for it.
   stsHosts: []
 
 log:

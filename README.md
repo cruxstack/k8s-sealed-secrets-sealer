@@ -144,12 +144,14 @@ flowchart LR
   whose registry must list the agent's IAM role:
 
   ```yaml
-  # agent chart values in prod-use2-blue
+  # agent chart values in prod-use2-blue; docs/deployment.md has the rest
   env: prod
   controlPlane:
     url: https://sealer.example.com
   identity:
     mode: aws-sts
+  kms:
+    transitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-transit
   ```
 
 - **Each env's KMS keys** can live in its own account. The control plane may
@@ -191,8 +193,10 @@ publishes:
 | Control plane chart      | `oci://ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-control-plane`, for containers |
 
 [docs/deployment.md](docs/deployment.md) shows how to lay out the control
-plane, the agents and their keys across envs, accounts and regions. Install
-the agent in each cluster, beside its sealed-secrets controller:
+plane, the agents and their keys across envs, accounts and regions, and
+[docs/operations.md](docs/operations.md) how to run them: the admin API,
+size limits and cost, upgrades, backups and troubleshooting. Install the
+agent in each cluster, beside its sealed-secrets controller:
 
 ```sh
 helm install sealer-agent oci://ghcr.io/cruxstack/charts/k8s-sealed-secrets-sealer-agent \
@@ -218,7 +222,7 @@ gh attestation verify oci://ghcr.io/cruxstack/k8s-sealed-secrets-sealer-agent:<v
 | `deploy/helm/`               | Helm charts for the agent and the control plane  |
 | `dev/`, `Tiltfile`           | The local k3d stack                              |
 | `.atmos/`, `atmos.yaml`      | Developer and CI commands                        |
-| `docs/`                      | Design, deployment and development guides        |
+| `docs/`                      | Design, deployment, operations, development      |
 
 AWS infrastructure for the control plane (API Gateway, Lambda, DynamoDB, KMS)
 lives in a companion Terraform module repository,

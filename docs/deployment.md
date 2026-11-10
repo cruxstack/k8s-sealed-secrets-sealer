@@ -131,6 +131,40 @@ and ID. The escrow key's policy allows the env's agent roles
 the env and `kms:EncryptionContext:purpose` is `key-escrow`, and allows the
 control plane nothing.
 
+A multi-Region key's primary and each of its replicas have a key policy of
+their own: put these statements on the primary and on every replica.
+
+A key policy is at most 32 KB. Each `AgentDecryptsItsOwnCommands` statement
+takes 300 to 450 bytes, depending on the names and formatting, so a transit
+key's policy holds roughly 70 to 100 agents. For more, or to leave the key
+policy alone when an agent is added, one statement can match the
+encryption context's `agent_id` to a tag on the agent's role:
+
+```json
+{
+  "Sid": "AgentsDecryptTheirOwnCommands",
+  "Effect": "Allow",
+  "Principal": { "AWS": "arn:aws:iam::333333333333:root" },
+  "Action": "kms:Decrypt",
+  "Resource": "*",
+  "Condition": {
+    "ArnLike": { "aws:PrincipalArn": "arn:aws:iam::333333333333:role/sealer-agent-prod-*" },
+    "StringEquals": {
+      "kms:EncryptionContext:env": "prod",
+      "kms:EncryptionContext:agent_id": "${aws:PrincipalTag/sealer-agent-id}"
+    }
+  }
+}
+```
+
+Tag each agent role `sealer-agent-id` with its agent ID. With EKS Pod
+Identity, `${aws:PrincipalTag/eks-cluster-name}` works without a tag when
+each agent's ID is its cluster's name. With the account as the principal,
+each agent role also needs `kms:Decrypt` on the key in its own IAM policy.
+The trade-off: whoever may tag those roles (`iam:TagRole`) then decides
+which agent's commands each role can decrypt, so guard that permission as
+you would the key policy.
+
 The control plane's only grant across accounts is `kms:GenerateDataKey` on
 each env's transit key. Its role also needs that action on the keys' ARNs in
 its own IAM policy, as any cross-account KMS call does. Agents use only keys
@@ -139,8 +173,7 @@ in their own account, and nothing in the tools account can decrypt anything.
 ## 2. An agent in each cluster
 
 Each cluster runs the agent beside its sealed-secrets controller, with its
-own IAM role (through EKS Pod Identity) in its env's account. Its Helm values
-for `prod-use2-blue`:
+own IAM role in its env's account. Its Helm values for `prod-use2-blue`:
 
 ```yaml
 env: prod
@@ -154,12 +187,63 @@ aws:
 capabilities:
   seal: true
   keys: true
-  renewal: true
+  # this cluster runs only at times; renewal belongs in one that is always
+  # up (design section 9)
+  renewal: false
 kms:
   # the replicas in this cluster's region
   transitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-transit
   escrowKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-escrow
 ```
+
+Installed with `helm install sealer-agent ... --namespace sealer`, the chart
+creates the service account `sealer-agent` (the release's full name, unless
+`serviceAccount.name` is set) in the namespace `sealer`. Attach the agent's
+role to it in one of two ways:
+
+- **EKS Pod Identity.** The role trusts `pods.eks.amazonaws.com` with
+  `sts:AssumeRole` and `sts:TagSession`, and an association names the
+  cluster, namespace and service account:
+
+  ```sh
+  aws eks create-pod-identity-association --cluster-name prod-use2-blue \
+    --namespace sealer --service-account sealer-agent \
+    --role-arn arn:aws:iam::333333333333:role/sealer-agent-prod-use2-blue
+  ```
+
+- **IRSA.** The role trusts the cluster's OIDC provider for
+  `system:serviceaccount:sealer:sealer-agent`, and the chart annotates the
+  service account:
+
+  ```yaml
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::333333333333:role/sealer-agent-prod-use2-blue
+  ```
+
+The role needs no permission to log in: signing `sts:GetCallerIdentity`
+needs none. The key policies in step 1 name it for KMS.
+
+How the login reaches STS:
+
+- The agent signs the request for the STS endpoint of `aws.region` (or the
+  AWS SDK's region) and sends it to the control plane, which forwards it.
+  So the control plane needs HTTPS to `sts.us-east-2.amazonaws.com` here.
+  The agent needs HTTPS to the control plane and to KMS in its region, and
+  whatever its credentials need (STS itself, with IRSA).
+- An agent may sign for any region whose STS endpoint its account has
+  active, so `aws.region` can be the control plane's own region, for
+  example when the control plane reaches only that region's STS, through a
+  VPC endpoint with private DNS.
+- The control plane accepts `sts.amazonaws.com` and the regional STS hosts
+  of the AWS regions it knows. For a newer region, list the hosts it may
+  forward to in the chart's `aws.stsHosts` (`APP_AWS_STS_HOSTS`), which
+  replaces that default.
+- The agent signs a header naming `identity.audience`, by default
+  `controlPlane.url`. It must equal the control plane's agent audience: its
+  `publicURL`, unless `agentAudience` is set. If agents reach the control
+  plane at a URL other than people's (a private endpoint, say), set
+  `identity.audience` to the control plane's `publicURL`.
 
 With one URL, every agent uses the same `controlPlane.url`. Each names its
 env (`env`) on every request, in the `X-K8s-Sealed-Secrets-Sealer-Env`
@@ -186,7 +270,7 @@ agents:
   - id: prod-use2-blue
     cluster: prod-use2-blue
     region: use2
-    capabilities: [seal, keys, renewal]
+    capabilities: [seal, keys]
     identity:
       aws:
         roleArn: arn:aws:iam::333333333333:role/sealer-agent-prod-use2-blue
@@ -203,6 +287,90 @@ meanwhile still decrypts there. When the cluster comes back, or is rebuilt,
 its agent restores the env's keys from escrow. Seals meant for `use2` go to
 an agent in `use1` while no `use2` agent is healthy; any agent of the env
 can seal for any of its clusters.
+
+### The registry's format
+
+| Field                         | Holds                                                  |
+| ----------------------------- | ------------------------------------------------------ |
+| `agents[].id`                 | The agent's ID, unique in the env. Commands, transit   |
+|                               | key policies and the fleet use it.                     |
+| `agents[].cluster`            | The cluster's name, shown in the fleet and logs.       |
+| `agents[].region`             | The cluster's region label (`use1`), which documents'  |
+|                               | region annotations name.                               |
+| `agents[].capabilities`       | What the agent may do: `seal`, `keys`, `renewal`.      |
+| `agents[].identity.aws`       | `roleArn`, and optionally `roleId` (`AROA...`).        |
+| `agents[].identity.k8s`       | `issuer` (an issuer's `name`) and `subject`            |
+|                               | (`system:serviceaccount:<namespace>:<name>`).          |
+| `issuers[].name`              | The name agents refer to.                              |
+| `issuers[].url`               | The issuer as in its tokens' `iss` claim, https.       |
+| `issuers[].jwksURL`           | Where its signing keys are, https; or                  |
+| `issuers[].jwksFile`          | a file holding them.                                   |
+| `issuers[].caFile`            | Optionally, the CA bundle that serves `jwksURL`.       |
+
+IDs, cluster names, regions and issuer names are DNS labels. Each agent has
+exactly one identity, and no identity belongs to two agents. The control
+plane refuses to start with an invalid registry and reports every problem
+at once. An agent's capabilities are those both its registry entry and its
+Helm values grant: the control plane ignores any other the agent reports
+(and logs `agent.capability_ignored`), and the agent never uses one its
+values leave out.
+
+A registry grows by about 200 bytes per agent. Given as an SSM parameter,
+that is about 20 agents in a standard parameter (4 KB) and 40 in an
+advanced one (8 KB). A larger registry goes in a file: `registryFile`, in
+the control plane chart's registry ConfigMap or, on Lambda, in a layer
+(under `/opt`).
+
+### Agents outside AWS: k8s-oidc
+
+An agent can log in with its projected service-account token instead of an
+IAM role (`identity.mode: k8s-oidc`, the chart's default). The chart mounts
+a token for `identity.audience` (by default `controlPlane.url`) that lives
+`identity.expirationSeconds` (10 minutes), and the registry names the
+cluster's token issuer and the agent's service account:
+
+```yaml
+issuers:
+  - name: dev-use1-blue
+    # the iss claim of the cluster's service-account tokens
+    url: https://oidc.example.com/clusters/dev-use1-blue
+    jwksURL: https://oidc.example.com/clusters/dev-use1-blue/keys
+  - name: dev-use1-green
+    url: https://kubernetes.default.svc.cluster.local
+    # the keys themselves, for an issuer the control plane cannot reach
+    jwksFile: dev-use1-green-jwks.json
+agents:
+  - id: dev-use1-blue
+    cluster: dev-use1-blue
+    region: use1
+    capabilities: [seal, keys, renewal]
+    identity:
+      k8s:
+        issuer: dev-use1-blue
+        subject: system:serviceaccount:sealer:sealer-agent
+  - id: dev-use1-green
+    cluster: dev-use1-green
+    region: use1
+    capabilities: [seal, keys]
+    identity:
+      k8s:
+        issuer: dev-use1-green
+        subject: system:serviceaccount:sealer:sealer-agent
+```
+
+- A cluster's issuer is the `issuer` in
+  `kubectl get --raw /.well-known/openid-configuration`, and its keys are
+  `kubectl get --raw /openid/v1/jwks`.
+- `jwksURL` is fetched and cached; give `caFile` when its certificate is not
+  publicly trusted. A `jwksFile` is read at start and does not follow key
+  rotation: when the cluster's signing keys change, update it and restart
+  the control plane.
+- Relative `jwksFile` and `caFile` paths are relative to the registry
+  file's directory; the chart's registry ConfigMap can hold the files. In a
+  registry given inline or from SSM, use absolute paths.
+- The subject is the chart's service account in the release's namespace.
+- The agent still needs AWS credentials for KMS, from the AWS SDK's default
+  chain (environment variables through `extraEnv`, for example).
 
 ## 4. The control plane, in the tools account
 
@@ -232,18 +400,43 @@ the GitHub App and OAuth client, the session keys, and so on
 shared `APP_GITHUB_ALLOWED_TEAMS` and `APP_GITHUB_ADMIN_TEAMS`; here anyone
 in the org may use dev, and only `prod-sealers` may use prod. In a container,
 the control plane chart takes the same list as `envs`, and reads each env's
-registry from `registry-<env>.yaml` in its registry ConfigMap.
+registry from `registry-<env>.yaml` in its registry ConfigMap. Lambda's
+environment variables hold 4 KB in all; `APP_ENVS` may itself be an SSM
+parameter's ARN when the list grows.
 
 Its role needs:
 
-- `dynamodb` actions on `sealer-dev` and `sealer-prod`;
+- `dynamodb:GetItem`, `BatchGetItem`, `Query`, `PutItem`, `UpdateItem` and
+  `DeleteItem` on `sealer-dev` and `sealer-prod`;
 - `kms:GenerateDataKey` on each env's transit key (the replica in
   `us-east-2`);
 - `ssm:GetParameter` on its parameters, and `kms:Decrypt` for those that are
   SecureStrings.
 
+Each env's table has a string partition key `pk` and a string sort key
+`sk`, TTL on `expires_at`, point-in-time recovery and a customer-managed
+KMS key, and no secondary indexes; on-demand capacity suits it. With the
+AWS CLI:
+
+```sh
+aws dynamodb create-table --table-name sealer-prod \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --sse-specification Enabled=true,SSEType=KMS,KMSMasterKeyId=<table key ARN>
+aws dynamodb update-time-to-live --table-name sealer-prod \
+  --time-to-live-specification Enabled=true,AttributeName=expires_at
+aws dynamodb update-continuous-backups --table-name sealer-prod \
+  --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true
+```
+
+An env keeps its table for good: the table holds its escrowed keys
+([backups and restore](operations.md#backups-and-restore)).
+
 One GitHub App serves every env: it reads files and opens pull requests, and
-signs people in.
+signs people in. [docs/operations.md](operations.md) covers running all
+this: the admin API, size limits and cost, upgrades, backups and
+troubleshooting.
 
 ## 5. Documents in the repositories
 

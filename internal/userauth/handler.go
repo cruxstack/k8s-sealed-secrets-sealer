@@ -324,13 +324,14 @@ func (g *EnvGuard) RequireCSRF(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // RequireAdmin is Handler.RequireAdmin: the user must administer the env.
-// It must run behind RequireUser.
+// It must run behind the guard's RequireUser.
 func (g *EnvGuard) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return g.h.RequireAdmin(next)
 }
 
-// RequireAdmin rejects users who are not admins. It must run behind
-// RequireUser.
+// RequireAdmin rejects users who are not admins. Admin is per env, set only
+// by EnvGuard.RequireUser, so it must run behind that; behind
+// Handler.RequireUser it refuses everyone.
 func (h *Handler) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if u := UserFrom(r.Context()); u == nil || !u.Admin {
