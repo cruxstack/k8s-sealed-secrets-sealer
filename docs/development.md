@@ -76,8 +76,9 @@ Every simulated controller starts with its own key and with key renewal off
 (`--key-renew-period 0`). Within a minute or so of `atmos dev up`, the agents
 escrow their keys, each cluster restores the others' keys from escrow (its
 controller restarts once per restore), and the control plane turns renewal on
-in one cluster, `dev-use1-blue`. `atmos dev status` then shows the same env
-key everywhere.
+in one cluster, `dev-use1-blue`. `atmos dev status` then shows dev's env key
+held by every dev cluster, and prod with no env key, since its cluster does
+not run.
 
 | Endpoint       | Default                 |
 | -------------- | ----------------------- |
@@ -95,7 +96,8 @@ redeploy in seconds; the images only wrap the binaries
 | ------------------------ | ------------------------------------------------------- |
 | `atmos dev up`           | Start the stack, Tilt in the foreground                 |
 | `atmos dev ci`           | Start the stack, wait until ready, exit                 |
-| `atmos dev status`       | Pods, the fleet (env key, each agent's keys), endpoints |
+| `atmos dev status`       | Pods, each env's fleet (env key, each agent's keys),    |
+|                          | endpoints                                               |
 | `atmos dev logs [res]`   | Tilt logs, optionally for one resource (`-f` to follow) |
 | `atmos dev down`         | Remove the workloads, keep the cluster                  |
 | `atmos dev destroy`      | Delete the cluster, its registry and every key in it    |
@@ -163,7 +165,8 @@ and waits until it is ready. Several can run beside `atmos dev up`. Use
 
 | Command                  | What it does                                               |
 | ------------------------ | ---------------------------------------------------------- |
-| `atmos test unit`        | Go unit tests with the race detector                       |
+| `atmos test unit`        | Go unit tests with the race detector, and the scripts'     |
+|                          | tests (release version, dev status)                        |
 | `atmos test integration` | The store against DynamoDB Local and envelope encryption   |
 |                          | against local KMS, both in Docker                          |
 | `atmos web test`         | Web UI tests (vitest)                                      |

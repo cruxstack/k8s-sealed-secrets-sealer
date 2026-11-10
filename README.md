@@ -170,7 +170,7 @@ installs every other tool (Go, k3d, Tilt, Helm, kubectl) into `.tools/`.
 ```sh
 atmos dev up        # k3d cluster + Tilt dashboard at http://localhost:10350
 open http://localhost:4100   # sign in as alice (a GitHub mock)
-atmos dev status    # pods, each agent's controller key, endpoints
+atmos dev status    # pods, each env's fleet and keys, endpoints
 atmos test e2e      # the end-to-end suite in a throwaway cluster
 ```
 

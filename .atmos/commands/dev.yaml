@@ -68,7 +68,7 @@ commands:
 
       - name: status
         dependencies: *stack_tools
-        description: Show the stack's pods, each agent's active controller key, and the local endpoints.
+        description: Show the stack's pods, each env's fleet (its env key and each agent's keys), and the local endpoints.
         steps:
           - type: shell
             command: bash .atmos/scripts/dev/status.sh

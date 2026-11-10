@@ -8,10 +8,12 @@ commands:
         dependencies:
           tools:
             golang/go: 1.27.3
+            jqlang/jq: 1.8.1
         description: |
-          Run the Go unit tests with the race detector, and the release
-          version script's tests. They need no network, cluster or Docker.
-          Extra arguments after `--` go to `go test`, and skip the script's.
+          Run the Go unit tests with the race detector, and the tests of the
+          release version and dev status scripts. They need no network,
+          cluster or Docker. Extra arguments after `--` go to `go test`, and
+          skip the scripts'.
 
             atmos test unit
             atmos test unit -- -run TestParseCert ./internal/agent
@@ -28,6 +30,8 @@ commands:
               go test -race -count=1 ./...
               echo "+ .atmos/scripts/release/version_test.sh" >&2
               bash .atmos/scripts/release/version_test.sh
+              echo "+ .atmos/scripts/dev/status_test.sh" >&2
+              bash .atmos/scripts/dev/status_test.sh
 
       - name: integration
         dependencies:
