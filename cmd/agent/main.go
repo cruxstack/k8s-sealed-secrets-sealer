@@ -83,7 +83,10 @@ func run() error {
 			return err
 		}
 		sealer := agent.NewSealer(agent.SealerOptions{
-			Keys:         inventory,
+			// while the controller restarts, seal with the keys it reported
+			// last, for as long as the control plane counts this agent
+			// healthy without a check-in
+			Keys:         inventory.Fallback(3 * cfg.CheckInInterval),
 			KMS:          kmsClient,
 			TransitKeyID: cfg.KMSTransitKeyID,
 			Env:          cfg.EnvName,
@@ -93,6 +96,7 @@ func run() error {
 		commands.Handle(protocol.CommandSeal, sealer.Seal)
 	}
 	var escrow agent.Escrower
+	var loader agent.KeyLoader
 	if cfg.HasCapability(protocol.CapabilityKeys) {
 		kmsClient, err := newKMS(cfg, cfg.KMSEscrowKeyID)
 		if err != nil {
@@ -108,7 +112,7 @@ func run() error {
 			Escrow:      client,
 			Logger:      logger,
 		})
-		escrow = keySync
+		escrow, loader = keySync, keySync
 		commands.Handle(protocol.CommandKeysRestore, keySync.Restore)
 	}
 	if cfg.HasCapability(protocol.CapabilityRenewal) {
@@ -123,6 +127,7 @@ func run() error {
 		Capabilities: cfg.Capabilities,
 		Commands:     commands.Types(),
 		Escrow:       escrow,
+		Loader:       loader,
 		Logger:       logger,
 		Version:      version.Version,
 	})

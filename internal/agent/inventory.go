@@ -4,8 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
+	"sync"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -23,6 +28,10 @@ type Report struct {
 	Keys       []protocol.Key
 	// Complete is false when Keys is only the active certificate.
 	Complete bool
+	// Pending lists keys the agent restored that the controller has not
+	// loaded yet. They are not in Keys: the controller cannot decrypt with
+	// them until it restarts.
+	Pending []string
 }
 
 // Inventory reads the sealed-secrets controller's keys and settings.
@@ -34,6 +43,11 @@ type Inventory struct {
 	deployment string
 	listKeys   bool
 	logger     *slog.Logger
+	now        func() time.Time
+
+	mu     sync.Mutex
+	last   Report
+	lastAt time.Time
 }
 
 // InventoryOptions configures an Inventory.
@@ -47,6 +61,7 @@ type InventoryOptions struct {
 	// capability's RBAC. Without it only the active certificate is known.
 	ListKeys bool
 	Logger   *slog.Logger
+	Now      func() time.Time
 }
 
 // NewInventory returns an Inventory. It makes no network calls.
@@ -54,6 +69,10 @@ func NewInventory(opts InventoryOptions) *Inventory {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
 	}
 	return &Inventory{
 		certs:      opts.Certs,
@@ -63,12 +82,24 @@ func NewInventory(opts InventoryOptions) *Inventory {
 		deployment: opts.Deployment,
 		listKeys:   opts.ListKeys,
 		logger:     logger,
+		now:        now,
 	}
 }
 
 // Collect reads the controller's active certificate, its flags and, when
 // allowed, its whole key set.
 func (inv *Inventory) Collect(ctx context.Context) (Report, error) {
+	r, err := inv.collect(ctx)
+	if err != nil {
+		return Report{}, err
+	}
+	inv.mu.Lock()
+	inv.last, inv.lastAt = r, inv.now()
+	inv.mu.Unlock()
+	return r, nil
+}
+
+func (inv *Inventory) collect(ctx context.Context) (Report, error) {
 	activePEM, err := inv.certs.ActiveCert(ctx)
 	if err != nil {
 		return Report{}, err
@@ -86,15 +117,21 @@ func (inv *Inventory) Collect(ctx context.Context) (Report, error) {
 		},
 		Keys: []protocol.Key{active},
 	}
-	r.Controller.KeyRenewPeriod, r.Controller.KeyOrderPriority = inv.controllerFlags(ctx)
+	d := inv.controllerDeployment(ctx)
+	if d != nil {
+		s := readSettings(d)
+		r.Controller.KeyRenewPeriod, r.Controller.KeyOrderPriority = s.keyRenewPeriod, s.keyOrderPriority
+	}
 
 	if !inv.listKeys {
 		return r, nil
 	}
-	all, err := inv.keySet(ctx)
+	list, err := inv.kube.CoreV1().Secrets(inv.namespace).List(ctx, metav1.ListOptions{LabelSelector: keyLabelSelector})
 	if err != nil {
-		return Report{}, err
+		return Report{}, fmt.Errorf("failed to list key secrets in %s: %w", inv.namespace, err)
 	}
+	r.Pending = inv.pending(ctx, d, list.Items, active.Fingerprint)
+	all := inv.keySet(ctx, list.Items, r.Pending)
 	if !containsKey(all, active.Fingerprint) {
 		// the controller seals with a key that is not a labeled key Secret;
 		// report it anyway so the key set is never missing the active key
@@ -108,34 +145,9 @@ func (inv *Inventory) Collect(ctx context.Context) (Report, error) {
 	return r, nil
 }
 
-// keySet reads the certificate of every key Secret. The private keys come
-// back in the same objects; they are never read or kept.
-func (inv *Inventory) keySet(ctx context.Context) ([]protocol.Key, error) {
-	list, err := inv.kube.CoreV1().Secrets(inv.namespace).List(ctx, metav1.ListOptions{LabelSelector: keyLabelSelector})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list key secrets in %s: %w", inv.namespace, err)
-	}
-	var out []protocol.Key
-	for i := range list.Items {
-		s := &list.Items[i]
-		k, err := toProtocolKey(s.Data["tls.crt"])
-		if err != nil {
-			inv.logger.WarnContext(ctx, "skipping unusable key secret",
-				"event", "controller.key_unusable", "secret", s.Name, "error", err)
-			continue
-		}
-		if !containsKey(out, k.Fingerprint) {
-			out = append(out, k)
-		}
-	}
-	return out, nil
-}
-
-// controllerFlags returns the controller's key renew period and key order,
-// with the controller's defaults for settings it does not set. Both are
-// empty when the Deployment cannot be read, and each when the agent cannot
-// tell its value.
-func (inv *Inventory) controllerFlags(ctx context.Context) (string, string) {
+// controllerDeployment reads the controller's Deployment, or returns nil
+// when it cannot.
+func (inv *Inventory) controllerDeployment(ctx context.Context) *appsv1.Deployment {
 	d, err := inv.kube.AppsV1().Deployments(inv.namespace).Get(ctx, inv.deployment, metav1.GetOptions{})
 	if err != nil {
 		level := slog.LevelWarn
@@ -144,10 +156,80 @@ func (inv *Inventory) controllerFlags(ctx context.Context) (string, string) {
 		}
 		inv.logger.Log(ctx, level, "cannot read controller deployment; its flags are unknown",
 			"deployment", inv.namespace+"/"+inv.deployment, "error", err)
-		return "", ""
+		return nil
 	}
-	s := readSettings(d)
-	return s.keyRenewPeriod, s.keyOrderPriority
+	return d
+}
+
+// pending returns the restored keys among secrets that the controller has
+// not loaded. When its pods cannot be read, none of them counts as loaded.
+func (inv *Inventory) pending(ctx context.Context, d *appsv1.Deployment, secrets []corev1.Secret, active string) []string {
+	if !slices.ContainsFunc(secrets, restoredByAgent) {
+		return nil
+	}
+	var pods []corev1.Pod
+	if d != nil {
+		var err error
+		if pods, err = controllerPods(ctx, inv.kube, d); err != nil {
+			inv.logger.WarnContext(ctx, "cannot tell which restored keys the controller has loaded; leaving them out",
+				"event", "controller.read_failed", "error", err)
+		}
+	}
+	st := restoreState(secrets, pods, active)
+	if len(st.pending) > 0 {
+		inv.logger.DebugContext(ctx, "restored keys the controller has not loaded yet", "fingerprints", st.fingerprints())
+	}
+	return st.fingerprints()
+}
+
+// keySet reads the certificate of every key Secret, leaving out the keys in
+// skip. The private keys come back in the same objects; they are never read
+// or kept.
+func (inv *Inventory) keySet(ctx context.Context, secrets []corev1.Secret, skip []string) []protocol.Key {
+	var out []protocol.Key
+	for i := range secrets {
+		s := &secrets[i]
+		k, err := toProtocolKey(s.Data[corev1.TLSCertKey])
+		if err != nil {
+			inv.logger.WarnContext(ctx, "skipping unusable key secret",
+				"event", "controller.key_unusable", "secret", s.Name, "error", err)
+			continue
+		}
+		if !containsKey(out, k.Fingerprint) && !slices.Contains(skip, k.Fingerprint) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// Fallback returns a Collector that reads the controller as Collect does,
+// but while the controller cannot be read answers with the last report
+// read within maxAge. A controller restarting serves nothing for a few
+// seconds, and the keys it loaded before are still the keys it holds; the
+// sealer uses it so seals do not fail meanwhile.
+func (inv *Inventory) Fallback(maxAge time.Duration) Collector {
+	return fallback{inv: inv, maxAge: maxAge}
+}
+
+type fallback struct {
+	inv    *Inventory
+	maxAge time.Duration
+}
+
+func (f fallback) Collect(ctx context.Context) (Report, error) {
+	r, err := f.inv.Collect(ctx)
+	if err == nil {
+		return r, nil
+	}
+	f.inv.mu.Lock()
+	last, at := f.inv.last, f.inv.lastAt
+	f.inv.mu.Unlock()
+	if at.IsZero() || f.inv.now().Sub(at) > f.maxAge {
+		return Report{}, err
+	}
+	f.inv.logger.WarnContext(ctx, "cannot read the controller; using the keys it reported last",
+		"event", "controller.read_failed", "error", err, "reported_at", at.UTC().Format(time.RFC3339))
+	return last, nil
 }
 
 func toProtocolKey(pem []byte) (protocol.Key, error) {

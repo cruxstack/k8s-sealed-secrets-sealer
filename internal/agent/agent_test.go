@@ -183,3 +183,45 @@ func TestAgent_EscrowsWhatTheControlPlaneAsksFor(t *testing.T) {
 		t.Fatalf("check-in commands = %v", got)
 	}
 }
+
+type recordingLoader struct{ active []string }
+
+func (r *recordingLoader) LoadRestored(_ context.Context, active string) {
+	r.active = append(r.active, active)
+}
+
+// While restored keys are not loaded, each cycle retries the restart.
+func TestAgent_LoadsPendingRestoredKeys(t *testing.T) {
+	report := reportWith(t)
+	inv := &fakeInventory{report: report}
+	loader := &recordingLoader{}
+	a := New(Options{
+		Inventory: inv, ControlPlane: &fakeControlPlane{}, Interval: 15 * time.Second,
+		Loader: loader, Logger: slog.New(slog.DiscardHandler),
+	})
+	a.cycle(context.Background())
+	if len(loader.active) != 0 {
+		t.Fatal("restarted with nothing pending")
+	}
+	inv.report.Pending = []string{"SHA256:restored"}
+	a.cycle(context.Background())
+	if len(loader.active) != 1 || loader.active[0] != report.Controller.ActiveFingerprint {
+		t.Fatalf("loader calls = %v", loader.active)
+	}
+}
+
+// A check-in reporting more than protocol.MaxKeys keys is refused, so the
+// agent warns well before.
+func TestAgent_WarnsAsKeysNearTheLimit(t *testing.T) {
+	report := reportWith(t)
+	a, logs := newTestAgent(&fakeInventory{report: report}, &fakeControlPlane{}, nil)
+	for _, n := range []int{keysWarnAt - 1, keysWarnAt, keysWarnAt, protocol.MaxKeys + 1} {
+		a.noteKeyCount(context.Background(), n)
+	}
+	if got := strings.Count(logs.String(), "event=controller.many_keys"); got != 1 {
+		t.Errorf("many_keys warnings = %d, want 1:\n%s", got, logs)
+	}
+	if !strings.Contains(logs.String(), "event=controller.too_many_keys") {
+		t.Errorf("no too_many_keys error:\n%s", logs)
+	}
+}

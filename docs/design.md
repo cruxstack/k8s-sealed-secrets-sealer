@@ -592,7 +592,9 @@ control plane that answers for another env.
 
 **Upload.** Each check-in response lists the agent's keys that have no
 escrow record (`escrow_needed`), for agents with the `keys` capability. The
-agent encrypts and uploads them. The control plane parses the public
+agent first checks each key Secret as a restore would (step 2 below), so a
+key the controller could not use is never uploaded, then encrypts and
+uploads it. The control plane parses the public
 certificate, checks that its fingerprint matches the URL, that the agent's
 latest check-in reported that key, and that the envelope's context is this
 env and key, and stores the record with a conditional write (the first upload
@@ -602,26 +604,44 @@ URL-safe alphabet (`+` as `-`, `/` as `_`).
 
 **Restore.** When an in-scope cluster's agent checks in missing an escrowed
 key, the control plane queues `keys.restore.v1` for that agent with the
-missing fingerprints. The agent, for each one not already present:
+missing fingerprints. The agent, for each one not already present (a key
+Secret with that fingerprint under any value of the key label counts, so a
+key relabeled, for example as `compromised`, is never brought back):
 
 1. downloads the escrow record and decrypts it with KMS, naming its own
    configured escrow key and the expected context (neither is taken from the
    record, so a record made under another key or for another env or key does
    not open);
-2. checks that the private key matches the certificate and the certificate's
-   fingerprint matches the one requested;
+2. reads the private key and certificate as the controller does (the first
+   private key it can parse, which must be RSA, and the first
+   certificate), and checks that the private key matches the certificate and
+   the certificate's fingerprint matches the one requested;
 3. creates a `kubernetes.io/tls` Secret in the controller namespace with the
    controller's key name prefix (its `--key-prefix`) and the label
    `sealedsecrets.bitnami.com/sealed-secrets-key=active`, annotated with
    `sealer.cruxstack.io/fingerprint`,
    `sealer.cruxstack.io/restored-from: escrow` and the time.
 
-After restoring the missing keys, the agent restarts the controller once, the
-way `kubectl rollout restart` does (the pod template annotation
-`kubectl.kubernetes.io/restartedAt`). This is required: the controller lists
-key secrets only at startup (`initKeyRegistry`) and does not watch for new
-ones. The agent refuses the whole command if its controller orders keys by
-`SecretCreationTimestamp`.
+After restoring the missing keys, the agent restarts the controller. This is
+required: the controller lists key secrets only at startup
+(`initKeyRegistry`) and does not watch for new ones. It deletes the
+controller's pods that were created before the newest restored key's Secret,
+and their Deployment starts new ones; with one replica the controller is
+unavailable for the few seconds its new pod takes to start. Deleting pods
+needs no write access to the Deployment. Before deleting anything, the agent
+checks that every key Secret would load, since a new pod stops at one that
+does not. The agent refuses the whole command if its controller orders keys
+by `SecretCreationTimestamp`, or if it cannot tell how it orders them.
+
+A restored key counts as held only once the controller has loaded it: when
+every ready controller pod was created after the key's Secret (in a later
+second, as creation times are whole seconds), or when the controller seals
+with it. Until then the agent leaves it out of its check-ins and does not
+seal with it, so it cannot become the env key while this cluster could not
+decrypt with it. If the restart failed or never happened, the agent retries
+it on its check-ins, backing off from 30 seconds to 10 minutes, and a
+repeated restore command retries it too. While the controller restarts, the
+agent seals with the keys it reported last.
 
 Key commands expire after 10 minutes. The control plane does not queue a
 restore for a key that an open restore command already covers, nor for 2
@@ -687,18 +707,20 @@ delete them.
 **Restore is automatic,** with alerts through structured log events at `warn`
 level or above:
 
-| Event                   | When                                              |
-| ----------------------- | ------------------------------------------------- |
-| `key.discovered`        | A check-in reports a fingerprint never seen.      |
-| `key.escrowed`          | An agent uploads a key to escrow.                 |
-| `key.restore_queued`    | A restore is queued for a cluster missing keys.   |
-| `key.restored`          | An agent restores a key into its controller.      |
-| `key.sync_failed`       | An upload or restore fails.                       |
-| `key.order_mismatch`    | A controller does not order keys by NotBefore.    |
-| `keys.out_of_sync`      | A seal was refused because no env key exists.     |
-| `renewal.enable_queued` | No cluster renews; one is asked to.               |
-| `renewal.enabled`       | An agent turned on key renewal.                   |
-| `controller.restarted`  | An agent restarted its controller.                |
+| Event                       | When                                            |
+| --------------------------- | ----------------------------------------------- |
+| `key.discovered`            | A check-in reports a fingerprint never seen.    |
+| `key.escrowed`              | An agent uploads a key to escrow.               |
+| `key.restore_queued`        | A restore is queued for a cluster missing keys. |
+| `key.restored`              | An agent restores a key into its controller.    |
+| `key.restore_skipped`       | A key to restore is held under another label.   |
+| `key.sync_failed`           | An upload or restore fails.                     |
+| `key.order_mismatch`        | A controller does not order keys by NotBefore.  |
+| `keys.out_of_sync`          | A seal was refused because no env key exists.   |
+| `renewal.enable_queued`     | No cluster renews; one is asked to.             |
+| `renewal.enabled`           | An agent turned on key renewal.                 |
+| `controller.restarted`      | An agent restarted its controller.              |
+| `controller.restart_failed` | An agent could not restart its controller.      |
 
 Every event names the env, agent, cluster and fingerprint.
 
@@ -811,12 +833,20 @@ bound to the agent's ServiceAccount in the agent's own namespace:
 |            | (for `/v1/cert.pem`); `get` the controller Deployment (to     |
 |            | read its flags).                                              |
 | `seal`     | Nothing more: sealing uses public certificates in process.    |
-| `keys`     | `get`, `list`, `watch`, `create` Secrets; `patch` the         |
-|            | controller Deployment (restart).                              |
+| `keys`     | `list`, `create` Secrets; `list`, `delete` Pods (restart).    |
 | `renewal`  | `patch` the controller Deployment.                            |
 
 `get` and `patch` are limited to the named Service and Deployment with
-`resourceNames`; `list` and `create` cannot be.
+`resourceNames`; `list`, `create` and `delete` cannot be, because the
+objects' names are generated or unknown.
+
+`patch` on the Deployment cannot be limited to the one argument renewal
+sets: an agent with `renewal` can change the controller's pod spec, and so
+run anything as the controller's ServiceAccount, which in the upstream
+chart reads and writes Secrets in every namespace. That is why `keys`
+restarts the controller by deleting its pods instead. Turn `renewal` on in
+one cluster per env at most, or set the controller's own renew period and
+leave it off.
 
 ## 11. Data model
 

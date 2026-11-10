@@ -23,14 +23,22 @@ controller:
 env: ""
 
 # Capabilities decide which RBAC is installed and which commands the agent
-# accepts. The control plane cannot change them. See docs/design.md.
+# accepts. The control plane cannot change them. See docs/design.md. With
+# all of them off the agent only reports its controller's active key.
 capabilities:
   # seal values with the env key; needs only the controller's public cert
   seal: true
-  # escrow and restore sealing keys; reads and creates key Secrets and
-  # restarts the controller after a restore; needs kms.escrowKeyId
+  # escrow and restore sealing keys; reads and creates key Secrets, and
+  # restarts the controller after a restore by deleting its pods; needs
+  # kms.escrowKeyId
   keys: false
-  # turn on the controller's key renewal when no cluster in the env has it
+  # turn on the controller's key renewal when no cluster in the env has it,
+  # by setting --key-renew-period on the controller's Deployment. Kubernetes
+  # cannot limit that permission to one argument: an agent with it can
+  # change the Deployment in any way, and so act as the controller's service
+  # account, which can read and write Secrets in every namespace. Turn it on
+  # in one cluster per env at most, or set the controller's own
+  # keyrenewperiod value and leave this off.
   renewal: false
 
 # The control plane this agent checks in with (required). It must be https;
