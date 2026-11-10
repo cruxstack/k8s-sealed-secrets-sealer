@@ -14,8 +14,15 @@ Keys:
           Description: escrow key (local only)
         BackingKeys:
           - 24f1e4a5d1280d15ab8d502e905b1ca57fd90a4ed2e977f890f9b92f524252c4
+      - Metadata:
+          KeyId: 1038a9c0-3176-40e2-bebc-c69fd37a6bf6
+          Description: prod's transit key (local only)
+        BackingKeys:
+          - 71ac61e6b8faa14e7c3ed48141fce214875f5e3a229d357b71da086e6c426911
 Aliases:
   - AliasName: alias/sealer-transit
     TargetKeyId: 2ee47573-3fd6-4204-a872-018797d24a3e
+  - AliasName: alias/sealer-transit-prod
+    TargetKeyId: 1038a9c0-3176-40e2-bebc-c69fd37a6bf6
   - AliasName: alias/sealer-escrow
     TargetKeyId: c32aaf1d-d72d-490d-b529-e4cf4d67cc79

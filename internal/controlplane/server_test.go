@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -174,6 +175,33 @@ func TestSession_Rejects(t *testing.T) {
 	}
 	if !strings.Contains(h.logs.String(), "event=agent.login_rejected") {
 		t.Error("rejected login was not logged")
+	}
+}
+
+type throttledVerifier struct{}
+
+func (throttledVerifier) VerifyLogin(context.Context, protocol.SessionRequest) (*registry.Agent, error) {
+	return nil, fmt.Errorf("%w: sts call limit reached", agentauth.ErrTooManyLogins)
+}
+
+func TestSession_Throttled(t *testing.T) {
+	sessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "https://sealer.dev.example.com", "dev", nil)
+	logs := &bytes.Buffer{}
+	srv := New(Options{
+		Logger:   slog.New(slog.NewTextHandler(logs, nil)),
+		Env:      "dev",
+		Registry: &registry.Registry{},
+		Logins:   map[string]LoginVerifier{protocol.MethodAWSSTS: throttledVerifier{}},
+		Sessions: sessions,
+		Store:    store.NewMemory(),
+	})
+	h := &harness{t: t, h: srv.Handler(), logs: logs}
+	rec := h.do(http.MethodPost, "/agent/v1/session", "", protocol.SessionRequest{Method: protocol.MethodAWSSTS, AWS: &protocol.SignedRequest{}})
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("throttled login = %d %v", rec.Code, rec.Header())
+	}
+	if !strings.Contains(logs.String(), "event=agent.login_throttled") {
+		t.Fatalf("logs:\n%s", logs)
 	}
 }
 

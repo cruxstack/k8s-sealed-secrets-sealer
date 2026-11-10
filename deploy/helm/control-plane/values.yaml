@@ -25,9 +25,13 @@ env: ""
 #       allowedTeams: [prod-sealers]
 #       adminTeams: [platform]
 # An env reads its registry from registry-<name>.yaml in the registry
-# ConfigMap unless it sets registryFile or registry. Each may also set
-# kmsRegion, envAnnotation, regionAnnotation, discoveryFileGlobs and
-# keyRenewPeriod; teams it sets replace github.allowedTeams and adminTeams.
+# ConfigMap unless it sets registryFile or registry. Each env needs its own
+# transit key, and an agent identity may be in only one env's registry. Each
+# may also set kmsRegion, envAnnotation, regionAnnotation, discoveryFileGlobs
+# and keyRenewPeriod; teams it sets replace github.allowedTeams and
+# adminTeams. adminToken gives an env its own admin token instead of
+# APP_ADMIN_TOKEN; it is written into the Deployment, so give the ARN of an
+# SSM parameter holding it.
 envs: []
 # the control plane's external URL (required); also the audience agent login
 # tokens must carry unless agentAudience is set
@@ -37,7 +41,9 @@ agentAudience: ""
 # ConfigMap holding the agent registry (the agents allowed to log in) and any
 # JWKS or CA files it references, mounted at /etc/k8s-sealed-secrets-sealer
 # (required): registry.yaml with env, or registry-<name>.yaml for each of
-# envs that sets neither registryFile nor registry
+# envs that sets neither registryFile nor registry. The control plane reads
+# the registry again about once a minute, so a change to it needs no restart
+# once the kubelet has updated the mounted file.
 registry:
   configMapName: ""
 

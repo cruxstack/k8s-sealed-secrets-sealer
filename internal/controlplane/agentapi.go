@@ -9,6 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/keys"
@@ -34,12 +35,19 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxSessionBody, &req) {
 		return
 	}
-	verifier, ok := s.logins[req.Method]
+	verifier, ok := s.agents.Load().logins[req.Method]
 	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported login method")
 		return
 	}
 	agent, err := verifier.VerifyLogin(r.Context(), req)
+	if errors.Is(err, agentauth.ErrTooManyLogins) {
+		s.logger.WarnContext(r.Context(), "agent login throttled",
+			"event", "agent.login_throttled", "env", s.env, "method", req.Method, "error", err)
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "too many logins; try again shortly")
+		return
+	}
 	if err != nil {
 		s.logger.WarnContext(r.Context(), "agent login rejected",
 			"event", "agent.login_rejected", "env", s.env, "method", req.Method, "error", err)
@@ -68,8 +76,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *reg
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		// an agent removed from the registry loses access with its session
-		agent, ok := s.reg.Agent(id)
+		// an agent removed from the registry loses access with its session,
+		// or when the registry is next read (Options.ReloadRegistry)
+		agent, ok := s.currentRegistry().Agent(id)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return

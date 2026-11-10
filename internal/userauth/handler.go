@@ -77,10 +77,27 @@ func NewHandler(opts HandlerOptions) *Handler {
 	h := &Handler{opts: opts, secure: secure, sessionCookie: "sealer_session", stateCookie: "sealer_oauth_state"}
 	if secure {
 		// __Host- cookies must be Secure, host-only and at path /, so a
-		// sibling subdomain can neither set nor read them
+		// sibling subdomain can neither set nor read them. A planted state
+		// cookie would let someone finish their own sign-in in the victim's
+		// browser, signing the victim in as them.
 		h.sessionCookie = "__Host-sealer_session"
+		h.stateCookie = "__Host-sealer_oauth_state"
 	}
 	return h
+}
+
+// oauthState returns the state cookie; a negative maxAge clears it. It is
+// at path /, as __Host- cookies must be, and only lives for the sign-in.
+func (h *Handler) oauthState(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     h.stateCookie,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   h.secure,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 // Login starts the OAuth flow: a random state in a short-lived cookie, then
@@ -88,15 +105,7 @@ func NewHandler(opts HandlerOptions) *Handler {
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	state := randomHex(32)
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
-	http.SetCookie(w, &http.Cookie{
-		Name:     h.stateCookie,
-		Value:    state + "." + base64.RawURLEncoding.EncodeToString([]byte(returnTo)),
-		Path:     callbackPath,
-		MaxAge:   int(stateTTL / time.Second),
-		HttpOnly: true,
-		Secure:   h.secure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, h.oauthState(state+"."+base64.RawURLEncoding.EncodeToString([]byte(returnTo)), int(stateTTL/time.Second)))
 	q := url.Values{
 		"client_id":    {h.opts.ClientID},
 		"redirect_uri": {h.callbackURL()},
@@ -115,7 +124,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	cookie, err := r.Cookie(h.stateCookie)
-	http.SetCookie(w, &http.Cookie{Name: h.stateCookie, Path: callbackPath, MaxAge: -1, HttpOnly: true, Secure: h.secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, h.oauthState("", -1))
 	var returnTo string
 	if err == nil {
 		state, rt, _ := strings.Cut(cookie.Value, ".")

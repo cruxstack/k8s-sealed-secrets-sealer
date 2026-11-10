@@ -66,8 +66,9 @@ The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
 and an `escrow` key (`dev/local-kms/seed.yaml`; throwaway key material, local
 use only). The control plane and the agents use the transit key through
-`alias/sealer-transit`, and agents the escrow key through
-`alias/sealer-escrow`. local-kms does not enforce key policies, so "the
+`alias/sealer-transit` (prod, whose cluster doesn't run, has its own,
+`alias/sealer-transit-prod`, since envs cannot share one), and agents the
+escrow key through `alias/sealer-escrow`. local-kms does not enforce key policies, so "the
 control plane cannot decrypt" and "an agent can decrypt only its own seals"
 are left to the Terraform module (not released yet), not tested here; the
 control plane's transit client has no decrypt method either way.
@@ -291,9 +292,11 @@ version give the same bytes.
 The binaries read `APP_` environment variables, all in `internal/config`.
 Invalid or missing settings are reported together at startup. Any control
 plane setting may instead hold the ARN of an SSM Parameter Store parameter
-(`arn:aws:ssm:<region>:<account>:parameter/<name>`), which is read once at
-start, decrypted when it is a SecureString. On Lambda, that keeps secrets out
-of environment variables.
+(`arn:aws:ssm:<region>:<account>:parameter/<name>`), which is read at start,
+decrypted when it is a SecureString. On Lambda, that keeps secrets out of
+environment variables. The agent registry, from `APP_REGISTRY_FILE` or a
+parameter, is read again about once a minute, so registry changes need no
+restart; a registry written inline in `APP_REGISTRY` needs one.
 
 | Variable                           | Component     | Default                            |
 | ---------------------------------- | ------------- | ---------------------------------- |
@@ -364,15 +367,18 @@ envs:
     adminTeams: [platform]
 ```
 
-Each env needs a name, a table of its own, a transit key and a registry
-(inline, as a file, or an SSM parameter ARN). It may also set `kmsRegion`,
-`allowedTeams` and `adminTeams` (which replace the shared teams, even when
-empty), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs` and
-`keyRenewPeriod`. With `APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`,
+Each env needs a name, a table and a transit key of its own, and a registry
+(inline, as a file, or an SSM parameter ARN). An agent identity may be in only
+one env's registry. An env may also set `kmsRegion`, `allowedTeams` and
+`adminTeams` (which replace the shared teams, even when empty), `adminToken`
+(its own admin token, or an SSM parameter ARN holding it, instead of
+`APP_ADMIN_TOKEN`), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs`
+and `keyRenewPeriod`. With `APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`,
 `APP_REGISTRY_FILE`, `APP_DYNAMODB_TABLE` and `APP_KMS_TRANSIT_KEY_ID` are
 refused. Env names cannot be the UI's own paths (`secrets`, `fleet`,
 `login` and so on). [docs/deployment.md](deployment.md) shows a whole
 deployment across envs, accounts and regions.
 
-`APP_ADMIN_TOKEN` is shared too: one token reads every env's fleet through
-the admin API ([docs/operations.md](operations.md#admin-api)).
+`APP_ADMIN_TOKEN` is shared by default: one token reads every env's fleet
+through the admin API ([docs/operations.md](operations.md#admin-api)). An
+env's `adminToken` in `APP_ENVS` gives that env a token of its own.

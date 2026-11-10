@@ -37,6 +37,9 @@ type envEntry struct {
 	DynamoDBTable   string `yaml:"dynamodbTable"`
 	KMSTransitKeyID string `yaml:"kmsTransitKeyId"`
 	KMSRegion       string `yaml:"kmsRegion"`
+	// AdminToken is the env's own admin token, or the ARN of an SSM
+	// parameter holding it, instead of the shared APP_ADMIN_TOKEN.
+	AdminToken string `yaml:"adminToken"`
 
 	AllowedTeams       []string `yaml:"allowedTeams"`
 	AdminTeams         []string `yaml:"adminTeams"`
@@ -77,6 +80,10 @@ func LoadControlPlanes(ctx context.Context) ([]*ControlPlane, error) {
 func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, error)) ([]*ControlPlane, error) {
 	doc, ok := lookup("APP_ENVS")
 	if !ok || strings.TrimSpace(doc) == "" {
+		lookup, registryARN, err := readRegistryParameter(lookup, resolve)
+		if err != nil {
+			return nil, fmt.Errorf("invalid configuration: %w", err)
+		}
 		cfg, err := loadControlPlane(lookup)
 		if err != nil {
 			return nil, err
@@ -84,6 +91,7 @@ func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, erro
 		if slices.Contains(reservedEnvNames, cfg.EnvName) {
 			return nil, fmt.Errorf("invalid configuration: APP_ENV_NAME: %q is one of the web UI's own paths", cfg.EnvName)
 		}
+		cfg.RegistryParameter = registryARN
 		return []*ControlPlane{cfg}, nil
 	}
 
@@ -110,6 +118,7 @@ func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, erro
 	var out []*ControlPlane
 	names := map[string]bool{}
 	tables := map[string]string{}
+	transitKeys := map[string]string{}
 	for i, e := range parsed.Envs {
 		where := fmt.Sprintf("APP_ENVS[%d]", i)
 		if e.Name != "" {
@@ -134,7 +143,7 @@ func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, erro
 			tables[e.DynamoDBTable] = e.Name
 		}
 
-		overlay, err := e.settings(resolve)
+		overlay, registryARN, err := e.settings(resolve)
 		if err != nil {
 			r.fail("%s: %v", where, err)
 			continue
@@ -152,6 +161,15 @@ func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, erro
 			r.fail("%s: %v", where, strings.TrimPrefix(err.Error(), "invalid configuration: "))
 			continue
 		}
+		// a seal's transit envelope is bound to its env by the encryption
+		// context, but a key policy can only keep envs apart if each has
+		// its own key
+		key := transitKeyIdentity(cfg)
+		if other, ok := transitKeys[key]; ok {
+			r.fail("%s: transit key %q is also %s's; each env needs its own", where, cfg.KMSTransitKeyID, other)
+		}
+		transitKeys[key] = e.Name
+		cfg.RegistryParameter = registryARN
 		// an agent's session from one env never verifies in another, even
 		// if a token's own env check were wrong; people sign in once for
 		// every env, so their session key is shared
@@ -164,8 +182,48 @@ func loadControlPlanes(lookup lookupFunc, resolve func(arn string) (string, erro
 	return out, nil
 }
 
-// settings returns the APP_ settings an env's entry sets.
-func (e envEntry) settings(resolve func(string) (string, error)) (map[string]string, error) {
+// readRegistryParameter reads APP_REGISTRY from SSM when it names a
+// parameter, and returns a lookup that reads as its value, and its ARN.
+func readRegistryParameter(lookup lookupFunc, resolve func(string) (string, error)) (lookupFunc, string, error) {
+	v, _ := lookup("APP_REGISTRY")
+	arn := strings.TrimSpace(v)
+	if !IsSSMParameterARN(arn) {
+		return lookup, "", nil
+	}
+	value, err := resolve(arn)
+	if err != nil {
+		return nil, "", fmt.Errorf("APP_REGISTRY: failed to read SSM parameter %s: %w", arn, err)
+	}
+	return func(key string) (string, bool) {
+		if key == "APP_REGISTRY" {
+			return value, true
+		}
+		return lookup(key)
+	}, arn, nil
+}
+
+// transitKeyIdentity names the KMS key a transit key ID refers to, as far as
+// the ID alone tells: an ARN names its key in its region, a key ID or alias
+// one in the region the env calls, and the replicas of a multi-Region key
+// (mrk-), which share their key material, are one key in every region.
+func transitKeyIdentity(cfg *ControlPlane) string {
+	id := cfg.KMSTransitKeyID
+	if parts := strings.SplitN(id, ":", 6); len(parts) == 6 && parts[0] == "arn" && parts[2] == "kms" {
+		if strings.HasPrefix(parts[5], "key/mrk-") {
+			parts[3] = "*"
+		}
+		return strings.Join(parts, ":")
+	}
+	region := cfg.KMSRegion
+	if strings.HasPrefix(id, "mrk-") {
+		region = "*"
+	}
+	return region + "/" + id
+}
+
+// settings returns the APP_ settings an env's entry sets, and the ARN of
+// the SSM parameter its registry was read from, if it was.
+func (e envEntry) settings(resolve func(string) (string, error)) (map[string]string, string, error) {
 	s := map[string]string{"APP_ENV_NAME": e.Name}
 	set := func(key, v string) {
 		if v != "" {
@@ -187,27 +245,38 @@ func (e envEntry) settings(resolve func(string) (string, error)) (map[string]str
 		s["APP_GITHUB_ADMIN_TEAMS"] = strings.Join(e.AdminTeams, ",")
 	}
 
+	if token := strings.TrimSpace(e.AdminToken); IsSSMParameterARN(token) {
+		read, err := resolve(token)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to read the admin token from %s: %w", token, err)
+		}
+		set("APP_ADMIN_TOKEN", read)
+	} else {
+		set("APP_ADMIN_TOKEN", e.AdminToken)
+	}
+
 	set("APP_REGISTRY_FILE", e.RegistryFile)
+	var registryARN string
 	switch e.Registry.Kind {
 	case 0:
 	case yaml.ScalarNode:
 		v := e.Registry.Value
-		if IsSSMParameterARN(strings.TrimSpace(v)) {
-			read, err := resolve(strings.TrimSpace(v))
+		if arn := strings.TrimSpace(v); IsSSMParameterARN(arn) {
+			read, err := resolve(arn)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read the registry from %s: %w", strings.TrimSpace(v), err)
+				return nil, "", fmt.Errorf("failed to read the registry from %s: %w", arn, err)
 			}
-			v = read
+			v, registryARN = read, arn
 		}
 		set("APP_REGISTRY", v)
 	default:
 		b, err := yaml.Marshal(&e.Registry)
 		if err != nil {
-			return nil, fmt.Errorf("registry: %w", err)
+			return nil, "", fmt.Errorf("registry: %w", err)
 		}
 		s["APP_REGISTRY"] = string(b)
 	}
-	return s, nil
+	return s, registryARN, nil
 }
 
 // deriveKey derives a key for one purpose from a configured secret.

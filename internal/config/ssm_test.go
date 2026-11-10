@@ -55,14 +55,15 @@ func TestResolveParameters(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(read)
-	if strings.Join(read, ",") != registryARN+","+keyARN {
+	if strings.Join(read, ",") != keyARN {
 		t.Fatalf("parameters read: %v", read)
 	}
 	for key, want := range map[string]string{
 		"APP_ENV_NAME":               "dev",
 		"APP_GITHUB_APP_PRIVATE_KEY": "-----BEGIN RSA PRIVATE KEY-----\nk\n",
-		"APP_REGISTRY":               "agents: []\n",
-		"OTHER":                      keyARN,
+		// the registry is read by loadControlPlanes, which keeps its ARN
+		"APP_REGISTRY": registryARN,
+		"OTHER":        keyARN,
 	} {
 		if got, _ := lookup(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)

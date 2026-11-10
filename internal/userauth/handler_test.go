@@ -225,6 +225,62 @@ func TestSecureCookiesOnHTTPS(t *testing.T) {
 	}
 }
 
+// The OAuth state cookie is a __Host- cookie over https, so a sibling
+// subdomain cannot plant one, and is cleared with the same attributes.
+func TestStateCookie(t *testing.T) {
+	for publicURL, want := range map[string]string{
+		"https://sealer.dev.example.com": "__Host-sealer_oauth_state",
+		"http://localhost:4100":          "sealer_oauth_state",
+	} {
+		t.Run(want, func(t *testing.T) {
+			f := newFlow(t, publicURL)
+			set := cookieNamed(t, f.do(http.MethodGet, "/api/v1/auth/login", nil), want)
+			secure := strings.HasPrefix(publicURL, "https://")
+			if set.Path != "/" || set.Domain != "" || set.Secure != secure || !set.HttpOnly || set.MaxAge <= 0 {
+				t.Fatalf("state cookie = %+v", set)
+			}
+			if len(f.cookies) != 1 {
+				t.Fatalf("cookies after login = %v", f.cookies)
+			}
+			if got := f.signIn("alice", "/"); got != "/" {
+				t.Fatalf("sign-in redirected to %q", got)
+			}
+			if _, ok := f.cookies[want]; ok {
+				t.Fatal("the state cookie outlived the callback")
+			}
+
+			// the callback reads only this name, and clears it as it was set
+			resp := f.do(http.MethodGet, "/api/v1/auth/callback?code=x&state=y", nil)
+			cleared := cookieNamed(t, resp, want)
+			if cleared.Path != set.Path || cleared.Domain != "" || cleared.Secure != secure || cleared.MaxAge >= 0 {
+				t.Fatalf("cleared state cookie = %+v", cleared)
+			}
+		})
+	}
+
+	// a state cookie without the prefix, as a sibling subdomain could set,
+	// is not read over https
+	f := newFlow(t, "https://sealer.dev.example.com")
+	login := cookieNamed(t, f.do(http.MethodGet, "/api/v1/auth/login", nil), "__Host-sealer_oauth_state")
+	state, _, _ := strings.Cut(login.Value, ".")
+	f.cookies = map[string]*http.Cookie{"sealer_oauth_state": {Name: "sealer_oauth_state", Value: login.Value}}
+	resp := f.do(http.MethodGet, "/api/v1/auth/callback?code=x&state="+state, nil)
+	if loc := resp.Header.Get("Location"); loc != "/login?error="+ErrCodeStateMismatch {
+		t.Fatalf("callback with a planted state cookie redirected to %q", loc)
+	}
+}
+
+func cookieNamed(t *testing.T, resp response, name string) *http.Cookie {
+	t.Helper()
+	for _, line := range resp.Header.Values("Set-Cookie") {
+		if c, err := http.ParseSetCookie(line); err == nil && c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no %s cookie in %v", name, resp.Header.Values("Set-Cookie"))
+	return nil
+}
+
 func TestSessions_Rejects(t *testing.T) {
 	now := time.Now()
 	s, _ := NewSessions([]byte(testKey), "https://sealer.example.com", time.Hour, func() time.Time { return now })

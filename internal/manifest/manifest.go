@@ -108,6 +108,12 @@ type Document struct {
 // Sealable reports whether values can be sealed into the document.
 func (d Document) Sealable() bool { return d.Problem == "" }
 
+// IsRegion reports whether s can name a region: a lowercase DNS label (RFC
+// 1123) of at most 63 characters, such as use1, like agents' regions in the
+// registry. Regions are written into commit messages and pull requests, so
+// nothing else is accepted.
+func IsRegion(s string) bool { return s != "" && len(validation.IsDNS1123Label(s)) == 0 }
+
 // Find returns the SealedSecret documents in content whose env annotation
 // equals env. Other documents, and other envs' SealedSecrets, are ignored.
 func Find(content []byte, ann Annotations, env string) ([]Document, error) {
@@ -160,6 +166,8 @@ func problem(root, spec *yaml.Node, d Document) string {
 		return "metadata.namespace is missing; the decryption label needs it"
 	case len(validation.IsDNS1123Label(d.Namespace)) > 0:
 		return "metadata.namespace is not a valid namespace"
+	case d.Region != "" && !IsRegion(d.Region):
+		return "the region annotation is not a valid region: use a lowercase DNS label of at most 63 characters, such as use1"
 	case spec != nil && mapValue(spec, "data") != nil:
 		return "uses the legacy spec.data format"
 	case !isMappingOrEmpty(mapValue(spec, "encryptedData")):

@@ -167,8 +167,9 @@ func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]
 // syncKeys runs the key sync plan for an agent that just checked in, queues
 // its commands, and returns the keys it should escrow.
 func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState) ([]string, error) {
-	ids := make([]string, 0, len(s.reg.Agents))
-	for _, a := range s.reg.Agents {
+	reg := s.currentRegistry()
+	ids := make([]string, 0, len(reg.Agents))
+	for _, a := range reg.Agents {
 		ids = append(ids, a.ID)
 	}
 	states, err := s.store.GetAgentStates(ctx, ids)
@@ -178,7 +179,7 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 	// the store may lag this agent's own write; the check-in is newer
 	states[self.ID] = state
 	now := s.now().UTC()
-	f := fleet.Compute(s.env, s.reg, states, now)
+	f := fleet.Compute(s.env, reg, states, now)
 
 	fps := make([]string, 0, len(state.Keys))
 	for _, a := range f.Agents {

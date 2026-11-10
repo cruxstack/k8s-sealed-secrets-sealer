@@ -181,7 +181,8 @@ func TestSetup_ServesTheControlPlane(t *testing.T) {
 	if resp.StatusCode != http.StatusFound || location.Host != "github.com" || location.Query().Get("client_id") != "client-id" {
 		t.Fatalf("login = %+v", resp)
 	}
-	if len(resp.Cookies) != 1 || !strings.HasPrefix(resp.Cookies[0], "sealer_oauth_state=") || !strings.Contains(resp.Cookies[0], "Secure") {
+	if len(resp.Cookies) != 1 || !strings.HasPrefix(resp.Cookies[0], "__Host-sealer_oauth_state=") ||
+		!strings.Contains(resp.Cookies[0], "Secure") || !strings.Contains(resp.Cookies[0], "Path=/;") {
 		t.Fatalf("login cookies = %q", resp.Cookies)
 	}
 }

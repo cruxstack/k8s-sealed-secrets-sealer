@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 )
@@ -27,6 +29,26 @@ const (
 	maxHeaderValue   = 8 << 10
 	maxSTSResponse   = 64 << 10
 )
+
+// Default limit on calls to STS, per env and process. A login that passes
+// every local check costs one STS call, and anyone can make one, so the calls
+// are limited. The burst lets an env's whole fleet, up to 100 agents, log in
+// at once after a restart. The rate is far above steady use: each agent logs
+// in every 14 minutes (15-minute sessions, renewed a minute early), so 100
+// agents need about 0.12 calls a second.
+const (
+	DefaultSTSCallsPerSecond = 1
+	DefaultSTSBurst          = 100
+)
+
+// ErrTooManyLogins is returned, instead of calling STS, while logins exceed
+// the STS call limit.
+var ErrTooManyLogins = errors.New("too many logins")
+
+// NewSTSLimiter returns a limiter with the default STS call limit.
+func NewSTSLimiter() *rate.Limiter {
+	return rate.NewLimiter(DefaultSTSCallsPerSecond, DefaultSTSBurst)
+}
 
 // headers an agent may send with its signed request; anything else is
 // refused rather than forwarded
@@ -75,6 +97,7 @@ type AWSVerifier struct {
 	endpoints map[string]string
 	http      *http.Client
 	replays   ReplayStore
+	stsLimit  *rate.Limiter
 	now       func() time.Time
 }
 
@@ -91,6 +114,10 @@ type AWSOptions struct {
 	// not.
 	HTTPClient *http.Client
 	Replays    ReplayStore
+	// STSLimiter limits calls to STS. Pass the same one to every verifier
+	// built for an env, so a registry change does not reset it. Nil uses
+	// NewSTSLimiter.
+	STSLimiter *rate.Limiter
 	Now        func() time.Time
 }
 
@@ -126,12 +153,17 @@ func NewAWSVerifier(opts AWSOptions) (*AWSVerifier, error) {
 	if now == nil {
 		now = time.Now
 	}
+	limit := opts.STSLimiter
+	if limit == nil {
+		limit = NewSTSLimiter()
+	}
 	return &AWSVerifier{
 		reg:       opts.Registry,
 		audience:  opts.Audience,
 		endpoints: endpoints,
 		http:      &noRedirects,
 		replays:   opts.Replays,
+		stsLimit:  limit,
 		now:       now,
 	}, nil
 }
@@ -148,12 +180,21 @@ func (v *AWSVerifier) VerifyLogin(ctx context.Context, req protocol.SessionReque
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
-	signature, signedAt, err := v.checkSignatureShape(sr)
+	// the headers checked here are the ones sent to STS, and the signature
+	// remembered below is the one STS verified
+	headers, err := canonicalHeaders(sr.Headers)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
+	signature, signedAt, err := v.checkSignatureShape(headers)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
+	}
+	if !v.stsLimit.AllowN(v.now(), 1) {
+		return nil, fmt.Errorf("%w: sts call limit reached", ErrTooManyLogins)
+	}
 
-	identity, err := v.callSTS(ctx, target, sr)
+	identity, err := v.callSTS(ctx, target, headers)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
@@ -200,30 +241,36 @@ func (v *AWSVerifier) checkTarget(sr *protocol.SignedRequest) (string, error) {
 	return endpoint, nil
 }
 
-// checkSignatureShape checks the headers before anything is sent to STS: only
-// known headers, the audience header present, ours and signed, and a fresh
-// signature date. STS itself verifies the signature.
-func (v *AWSVerifier) checkSignatureShape(sr *protocol.SignedRequest) (string, time.Time, error) {
-	for name, value := range sr.Headers {
-		if !slices.Contains(allowedSTSHeaders, http.CanonicalHeaderKey(name)) {
-			return "", time.Time{}, fmt.Errorf("header %q is not allowed", name)
+// canonicalHeaders returns the agent's headers as they are sent to STS:
+// only known headers, each given once. Names differing only in case are the
+// same header, and with two of them the checks and STS could each read a
+// different one.
+func canonicalHeaders(in map[string]string) (http.Header, error) {
+	h := make(http.Header, len(in))
+	for name, value := range in {
+		key := http.CanonicalHeaderKey(name)
+		if !slices.Contains(allowedSTSHeaders, key) {
+			return nil, fmt.Errorf("header %q is not allowed", name)
 		}
 		if len(value) > maxHeaderValue {
-			return "", time.Time{}, fmt.Errorf("header %q is too large", name)
+			return nil, fmt.Errorf("header %q is too large", name)
 		}
-	}
-	get := func(name string) string {
-		for k, v := range sr.Headers {
-			if strings.EqualFold(k, name) {
-				return v
-			}
+		if _, dup := h[key]; dup {
+			return nil, fmt.Errorf("header %q is given more than once", key)
 		}
-		return ""
+		h[key] = []string{value}
 	}
-	if get(protocol.AWSAudienceHeader) != v.audience {
+	return h, nil
+}
+
+// checkSignatureShape checks the headers before anything is sent to STS: the
+// audience header present, ours and signed, and a fresh signature date. STS
+// itself verifies the signature.
+func (v *AWSVerifier) checkSignatureShape(h http.Header) (string, time.Time, error) {
+	if h.Get(protocol.AWSAudienceHeader) != v.audience {
 		return "", time.Time{}, errors.New("signed request is for another audience")
 	}
-	m := sigV4Auth.FindStringSubmatch(get("Authorization"))
+	m := sigV4Auth.FindStringSubmatch(h.Get("Authorization"))
 	if m == nil {
 		return "", time.Time{}, errors.New("authorization is not a sigv4 signature for sts")
 	}
@@ -233,7 +280,7 @@ func (v *AWSVerifier) checkSignatureShape(sr *protocol.SignedRequest) (string, t
 			return "", time.Time{}, fmt.Errorf("header %q is not signed", required)
 		}
 	}
-	signedAt, err := time.Parse("20060102T150405Z", get("X-Amz-Date"))
+	signedAt, err := time.Parse("20060102T150405Z", h.Get("X-Amz-Date"))
 	if err != nil {
 		return "", time.Time{}, errors.New("x-amz-date is missing or malformed")
 	}
@@ -248,14 +295,12 @@ type callerIdentity struct {
 	UserID string `xml:"GetCallerIdentityResult>UserId"`
 }
 
-func (v *AWSVerifier) callSTS(ctx context.Context, endpoint string, sr *protocol.SignedRequest) (*callerIdentity, error) {
+func (v *AWSVerifier) callSTS(ctx context.Context, endpoint string, headers http.Header) (*callerIdentity, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(protocol.AWSGetCallerIdentityBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build sts request: %w", err)
 	}
-	for name, value := range sr.Headers {
-		req.Header.Set(name, value)
-	}
+	req.Header = headers.Clone()
 	resp, err := v.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call sts: %w", err)

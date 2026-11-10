@@ -158,7 +158,7 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 // sealsRunning reports whether any seal of the session is queued or being
 // sealed.
 func (s *Server) sealsRunning(ctx context.Context, sessionID string, now time.Time) (bool, error) {
-	for _, a := range s.reg.Agents {
+	for _, a := range s.currentRegistry().Agents {
 		cmds, err := s.store.Commands(ctx, a.ID)
 		if err != nil {
 			return false, err
@@ -197,7 +197,8 @@ func (s *Server) pullRequestText(sess store.Session, user *userauth.User, change
 		}
 		key := c.Key
 		if len(c.Regions) > 0 {
-			key += " (" + strings.Join(c.Regions, ", ") + ")"
+			// changes stored before regions were checked may hold any text
+			key += " (" + plain(strings.Join(c.Regions, ", ")) + ")"
 		}
 		keysByPath[c.Path] = append(keysByPath[c.Path], key)
 		keys = append(keys, c.Key)

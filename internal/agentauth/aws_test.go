@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"golang.org/x/time/rate"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agent"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
@@ -85,6 +86,11 @@ type awsHarness struct {
 
 func newAWSHarness(t *testing.T, roleID string) *awsHarness {
 	t.Helper()
+	return newLimitedAWSHarness(t, roleID, nil)
+}
+
+func newLimitedAWSHarness(t *testing.T, roleID string, limit *rate.Limiter) *awsHarness {
+	t.Helper()
 	sts := &fakeSTS{creds: agentCreds, arn: roleARN, userID: roleUserID}
 	srv := httptest.NewTLSServer(sts)
 	t.Cleanup(srv.Close)
@@ -106,6 +112,7 @@ agents:
 		AllowedHosts: []string{srv.Listener.Addr().String()},
 		HTTPClient:   srv.Client(),
 		Replays:      store.NewMemory(),
+		STSLimiter:   limit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +153,89 @@ func TestAWSVerifier_AcceptsRegisteredRoleOnce(t *testing.T) {
 	}
 	if _, err := h.verifier.VerifyLogin(context.Background(), req); err == nil || !strings.Contains(err.Error(), "already used") {
 		t.Fatalf("replayed login: %v", err)
+	}
+}
+
+func TestAWSVerifier_AcceptsHeaderNamesInAnyCase(t *testing.T) {
+	h := newAWSHarness(t, "")
+	req := h.signed(t, awsAudience, time.Now(), agentCreds)
+	lower := map[string]string{}
+	for k, v := range req.AWS.Headers {
+		lower[strings.ToLower(k)] = v
+	}
+	req.AWS.Headers = lower
+	if _, err := h.verifier.VerifyLogin(context.Background(), req); err != nil {
+		t.Fatalf("VerifyLogin with lower-case header names: %v", err)
+	}
+}
+
+// A header given twice, in two cases, could be checked in one spelling and
+// sent to STS in the other. Map order is random, so each attack is tried
+// many times; before headers were made canonical, some attempts got in.
+func TestAWSVerifier_RefusesHeadersGivenTwice(t *testing.T) {
+	h := newAWSHarness(t, "")
+	ctx := context.Background()
+
+	// a used login, replayed with a second authorization header carrying a
+	// new, random signature: the replay record must not be dodged
+	used := h.signed(t, awsAudience, time.Now(), agentCreds)
+	if _, err := h.verifier.VerifyLogin(ctx, used); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	auth := used.AWS.Headers["Authorization"]
+	prefix := auth[:strings.LastIndex(auth, "Signature=")+len("Signature=")]
+	for i := range 200 {
+		req := copyLogin(used)
+		sig := sha256.Sum256(fmt.Appendf(nil, "fake-%d", i))
+		req.AWS.Headers["authorization"] = prefix + hex.EncodeToString(sig[:])
+		if _, err := h.verifier.VerifyLogin(ctx, req); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("replay with a second authorization header = %v, want ErrUnauthorized", err)
+		}
+	}
+
+	// a login signed for another deployment, with an unsigned audience
+	// header naming this one
+	for i := range 100 {
+		req := h.signed(t, "https://sealer.other.example.com", time.Now().Add(-time.Duration(i)*time.Second), agentCreds)
+		req.AWS.Headers[strings.ToLower(protocol.AWSAudienceHeader)] = awsAudience
+		if _, err := h.verifier.VerifyLogin(ctx, req); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("foreign login with a second audience header = %v, want ErrUnauthorized", err)
+		}
+	}
+	if n := h.sts.calls.Load(); n != 1 {
+		t.Errorf("STS was called %d times, want once, for the first login", n)
+	}
+}
+
+func copyLogin(req protocol.SessionRequest) protocol.SessionRequest {
+	signed := *req.AWS
+	signed.Headers = map[string]string{}
+	for k, v := range req.AWS.Headers {
+		signed.Headers[k] = v
+	}
+	req.AWS = &signed
+	return req
+}
+
+func TestAWSVerifier_LimitsSTSCalls(t *testing.T) {
+	// two calls, and none more until tokens are added
+	h := newLimitedAWSHarness(t, "", rate.NewLimiter(0, 2))
+	ctx := context.Background()
+	for i := range 2 {
+		if _, err := h.verifier.VerifyLogin(ctx, h.signed(t, awsAudience, time.Now().Add(-time.Duration(i)*time.Second), agentCreds)); err != nil {
+			t.Fatalf("login %d: %v", i, err)
+		}
+	}
+	// a request refused before STS uses no call
+	bad := h.signed(t, "https://sealer.other.example.com", time.Now(), agentCreds)
+	if _, err := h.verifier.VerifyLogin(ctx, bad); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("foreign login = %v", err)
+	}
+	if _, err := h.verifier.VerifyLogin(ctx, h.signed(t, awsAudience, time.Now().Add(-5*time.Second), agentCreds)); !errors.Is(err, ErrTooManyLogins) {
+		t.Fatalf("login past the limit = %v, want ErrTooManyLogins", err)
+	}
+	if n := h.sts.calls.Load(); n != 2 {
+		t.Errorf("STS calls = %d, want 2", n)
 	}
 }
 

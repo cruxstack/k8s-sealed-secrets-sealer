@@ -558,3 +558,35 @@ func TestViewSession_SortsChangesByFileKeyAndRegions(t *testing.T) {
 		t.Fatalf("changes = %v (%d)", got, v.PendingChanges)
 	}
 }
+
+func TestSealRegions(t *testing.T) {
+	docs := []manifest.Document{{Region: "use1"}, {Region: "use2"}, {Region: ""}}
+	cases := map[string]struct {
+		named []string
+		want  []string
+		err   string
+	}{
+		"none":            {nil, nil, ""},
+		"one":             {[]string{"use2"}, []string{"use2"}, ""},
+		"sorted, once":    {[]string{"use2", "use1", "use2"}, []string{"use1", "use2"}, ""},
+		"not in the file": {[]string{"use3"}, nil, `no document of this file for the env is in region "use3"`},
+		"empty":           {[]string{""}, nil, "region names"},
+		"upper case":      {[]string{"USE1"}, nil, "region names"},
+		"new lines":       {[]string{"use1)\n\nCo-authored-by: x <x@example.com>"}, nil, "region names"},
+		"too long":        {[]string{strings.Repeat("a", 64)}, nil, "region names"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := sealRegions(tc.named, docs)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("sealRegions = %v, %v; want error %q", got, err, tc.err)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tc.want) {
+				t.Fatalf("sealRegions = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
