@@ -22,8 +22,11 @@ function renderFleet(fleet: Fleet | null, fleetStatus?: number) {
   );
 }
 
+/** An agent's row; its header names the agent, then its cluster. */
 function row(name: string) {
-  return screen.getByRole("rowheader", { name }).closest("tr") as HTMLElement;
+  return screen
+    .getByRole("rowheader", { name: new RegExp(`^${name}( |$)`) })
+    .closest("tr") as HTMLElement;
 }
 
 describe("FleetView", () => {
@@ -54,6 +57,14 @@ describe("FleetView", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/keys out of sync/i)).not.toBeInTheDocument();
     expect(screen.getAllByRole("row")).toHaveLength(3); // header + 2 agents
+    expect(screen.getByRole("heading", { name: "Fleet" })).toBeInTheDocument();
+    expect(screen.getByText("2 of 2 healthy")).toBeInTheDocument();
+    // the agents whose active key is the env key say so
+    expect(within(row("use1-blue")).getByText("env key")).toBeInTheDocument();
+    // the cluster shows under the agent when it is named differently
+    expect(
+      screen.getByRole("rowheader", { name: "use1-blue blue" }),
+    ).toBeInTheDocument();
   });
 
   it("warns when keys are out of sync and shows missing keys per agent", async () => {
@@ -82,6 +93,8 @@ describe("FleetView", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/keys out of sync/i);
+    // without an env key, no agent is marked as holding it
+    expect(screen.queryByText("env key")).not.toBeInTheDocument();
     expect(
       within(row("use1-blue")).getByTitle(KEY_B.fingerprint),
     ).toHaveTextContent("1");
@@ -119,6 +132,7 @@ describe("FleetView", () => {
     });
 
     await screen.findByRole("region", { name: /environment key/i });
+    expect(screen.getByText("1 of 3 healthy")).toHaveClass("text-warning");
     expect(within(row("use1-blue")).getByText("Healthy")).toBeInTheDocument();
     expect(
       within(row("use1-green")).getByText("Unhealthy"),

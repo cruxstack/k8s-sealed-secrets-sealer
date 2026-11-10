@@ -877,10 +877,10 @@ metadata:
     k8s-sealed-secrets-sealer/docs: https://docs.example.com/runbooks/billing
 ```
 
-The UI shows the description in the file list and above the file's
-documents, links the docs, marks expected keys a document lacks as missing,
-offers expected keys first in the seal form and warns, without refusing, when
-a new key is not among them. Invalid values are dropped: a key that cannot
+The UI shows the description in the file list and the file's header, links
+the docs, lists the expected keys first among the file's keys and marks the
+ones some document lacks, suggests them first in the seal form and warns,
+without refusing, when a new key is not among them. Invalid values are dropped: a key that cannot
 name a Secret value, a link that is not absolute http(s) or carries
 credentials. They come from the documents themselves, so they are reviewed
 with the file like any other change.

@@ -125,9 +125,11 @@ The mock is also a GitHub App, installed on the fixture repositories in
 In `example-org/apps`, `deploy/billing/sealed-secret.yaml` has one dev
 document per simulated cluster (one seal updates all three) and a prod
 document the dev stack ignores; the other files cover namespace-wide and
-cluster-wide scope and a prod-only file. The billing and search files carry
-the hint annotations (description, expected keys and, for billing, a docs
-link), so the UI shows them; the others have none.
+cluster-wide scope and a prod-only file. The billing, search and worker files
+carry the hint annotations (description, expected keys and, for billing, a
+docs link), so the UI shows them; the others have none. The worker file's
+documents disagree on purpose, so its keys show every state: in all
+documents, in some, and expected but in none.
 
 Its installation tokens carry the permissions they were minted with, and every
 repository call checks them, as GitHub does: writes need a token minted with

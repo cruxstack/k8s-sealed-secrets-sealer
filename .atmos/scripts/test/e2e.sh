@@ -167,7 +167,7 @@ check "alice sees only the repositories she can read, with her access"
 
 files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/repos/example-org/apps/files")"
 jq -e '
-  (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml"]
+  (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml", "deploy/worker/sealed-secret.yaml"]
   and (.files[0].documents | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"]
   and (.files[1].documents[0].problem | test("cluster-wide"))
 ' <<<"$files" >/dev/null || die "SealedSecret discovery in example-org/apps: ${files}"

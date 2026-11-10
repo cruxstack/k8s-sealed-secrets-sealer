@@ -1,7 +1,14 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type FormEvent,
+  type Ref,
+} from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, CheckCircle2, Eye, EyeOff, Loader2, Lock } from "lucide-react";
-import { toast } from "sonner";
 import { extractApiError } from "@/api/client";
 import {
   getSeal,
@@ -17,7 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
-import { fileHints, missingKeys } from "./hints";
+import { fileHints } from "./hints";
 
 /** How often a seal's progress is checked; tests shorten it. */
 export const sealPolling = { intervalMs: 1000 };
@@ -48,7 +55,14 @@ function documents(n: number): string {
   return n === 1 ? "1 document" : `${n} documents`;
 }
 
+/** What the rest of the panel may do with the form. */
+export interface SealFormHandle {
+  /** Fill the key and move to the value. */
+  pick: (key: string) => void;
+}
+
 interface SealFormProps {
+  ref?: Ref<SealFormHandle>;
   owner: string;
   repo: string;
   file: RepositoryFile;
@@ -61,6 +75,8 @@ interface SealFormProps {
   onBusyChange?: (busy: boolean) => void;
   /** Focus the key on mount, when the user just picked this file. */
   autoFocus?: boolean;
+  /** Told the key as it changes, from "" on mount. */
+  onKeyChange?: (key: string) => void;
 }
 
 /**
@@ -70,6 +86,7 @@ interface SealFormProps {
  * failed seal can be retried) and cleared then.
  */
 export function SealForm({
+  ref,
   owner,
   repo,
   file,
@@ -78,6 +95,7 @@ export function SealForm({
   pendingKeys,
   onBusyChange,
   autoFocus = false,
+  onKeyChange,
 }: SealFormProps) {
   const queryClient = useQueryClient();
   const id = useId();
@@ -113,6 +131,15 @@ export function SealForm({
       keyRef.current?.focus();
     }
   }, [busy]);
+  useEffect(() => {
+    onKeyChange?.(key);
+  }, [key, onKeyChange]);
+  useImperativeHandle(ref, () => ({
+    pick: (k: string) => {
+      setKey(k);
+      valueRef.current?.focus();
+    },
+  }));
   useEffect(() => {
     if (!justSealed) return;
     const t = window.setTimeout(() => setJustSealed(false), 2000);
@@ -150,12 +177,8 @@ export function SealForm({
           : key
             ? `Adds ${key} to spec.encryptedData.`
             : expected.length > 0
-              ? "The name in spec.encryptedData; pick an expected key or type one."
+              ? "The name in spec.encryptedData; pick a key above or type one."
               : "The name in spec.encryptedData; existing keys are suggested.";
-  const pick = (k: string) => {
-    setKey(k);
-    valueRef.current?.focus();
-  };
 
   async function submit(e?: FormEvent) {
     e?.preventDefault();
@@ -188,9 +211,6 @@ export function SealForm({
         setSeal(progress);
       }
       if (progress.status === "sealed") {
-        toast.success(`Sealed ${progress.key}`, {
-          description: `For ${documents(progress.targets.length)} in ${agentName(progress)}, with ${shortFingerprint(progress.fingerprint)}`,
-        });
         setKey("");
         setValue("");
         setShown(false);
@@ -221,12 +241,12 @@ export function SealForm({
       aria-label={`Seal a value into ${file.path}`}
       className="space-y-4 border-t border-border bg-muted/25 px-5 py-5"
     >
-      <div className="flex items-baseline justify-between gap-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="text-sm font-semibold">Seal a value</h3>
         <p className="text-xs text-muted-foreground">
           {docs.length === 1
-            ? "Sealed for the document above"
-            : `Sealed once for each of the ${docs.length} documents above`}
+            ? "Sealed for the document below"
+            : `Sealed once for each of the ${docs.length} documents below`}
         </p>
       </div>
 
@@ -272,16 +292,6 @@ export function SealForm({
         >
           {note}
         </p>
-        {expected.length > 0 && (
-          <ExpectedKeys
-            expected={expected}
-            file={file}
-            pendingKeys={pendingKeys}
-            current={key}
-            disabled={busy}
-            onPick={pick}
-          />
-        )}
       </div>
 
       <div className="space-y-1.5">
@@ -357,73 +367,6 @@ export function SealForm({
         </div>
       </div>
     </form>
-  );
-}
-
-/**
- * The keys the file expects, as chips to fill the key with: missing ones
- * dashed, ones with a value waiting in the session marked, and set ones
- * plain.
- */
-function ExpectedKeys({
-  expected,
-  file,
-  pendingKeys,
-  current,
-  disabled,
-  onPick,
-}: {
-  expected: string[];
-  file: RepositoryFile;
-  pendingKeys: Set<string>;
-  current: string;
-  disabled: boolean;
-  onPick: (key: string) => void;
-}) {
-  const lacking = new Set(missingKeys(file, pendingKeys));
-  const state = (k: string) =>
-    pendingKeys.has(k) ? "pending" : lacking.has(k) ? "missing" : "set";
-  const missing = lacking.size;
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 pt-1">
-      <span className="mr-0.5 text-xs text-muted-foreground">
-        Expected
-        {missing > 0 && (
-          <span className="text-warning"> · {missing} missing</span>
-        )}
-      </span>
-      <ul className="flex flex-wrap gap-1.5" aria-label="Expected keys">
-        {expected.map((k) => {
-          const s = state(k);
-          return (
-            <li key={k}>
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() => onPick(k)}
-                aria-pressed={current === k}
-                aria-label={`${k}, ${s}`}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50",
-                  s === "missing" &&
-                    "border-dashed border-warning/60 text-warning hover:bg-warning/10",
-                  s === "pending" &&
-                    "border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 dark:bg-primary/20",
-                  s === "set" &&
-                    "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                  current === k && "ring-2 ring-ring/50",
-                )}
-              >
-                {s === "set" && (
-                  <Check className="h-3 w-3 text-success" aria-hidden="true" />
-                )}
-                {k}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
   );
 }
 

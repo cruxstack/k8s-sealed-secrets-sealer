@@ -1,4 +1,5 @@
 import type { FleetAgent } from "@/api/types";
+import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { formatDateTime, shortFingerprint, timeAgo } from "@/lib/utils";
 
@@ -21,7 +22,15 @@ function Dash() {
   );
 }
 
-function AgentRow({ agent, now }: { agent: FleetAgent; now: Date }) {
+function AgentRow({
+  agent,
+  envKey,
+  now,
+}: {
+  agent: FleetAgent;
+  envKey?: string;
+  now: Date;
+}) {
   const health = agentHealth(agent);
   const keys = agent.keys ?? [];
   const missing = agent.missing_keys ?? [];
@@ -29,38 +38,44 @@ function AgentRow({ agent, now }: { agent: FleetAgent; now: Date }) {
   const capabilities =
     agent.capabilities ?? agent.registered_capabilities ?? [];
   const active = agent.controller?.active_fingerprint;
+  // the cluster, when its name says more than the agent's
+  const cluster = agent.cluster !== agent.id ? agent.cluster : "";
 
   return (
-    <tr className="border-b border-border last:border-0 align-top">
+    <tr className="border-b border-border align-top last:border-0">
       <th
         scope="row"
         className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
       >
         {agent.id}
+        {cluster && (
+          <>
+            {" "}
+            <span className="block font-sans text-xs font-normal text-muted-foreground">
+              {cluster}
+            </span>
+          </>
+        )}
       </th>
       <td className="px-4 py-3 whitespace-nowrap">{agent.region}</td>
-      <td className="px-4 py-3 whitespace-nowrap">{agent.cluster}</td>
-      <td className="px-4 py-3">
-        <Badge variant={health.variant}>{health.label}</Badge>
-      </td>
       <td className="px-4 py-3 whitespace-nowrap">
-        {agent.last_checkin ? (
+        <Badge variant={health.variant}>{health.label}</Badge>
+        {agent.last_checkin && (
           <time
+            className="ml-2 text-xs text-muted-foreground"
             dateTime={agent.last_checkin}
-            title={formatDateTime(agent.last_checkin)}
+            title={`Last check-in ${formatDateTime(agent.last_checkin)}`}
           >
             {timeAgo(agent.last_checkin, now)}
           </time>
-        ) : (
-          <Dash />
         )}
       </td>
-      <td className="px-4 py-3 font-mono text-xs">
+      <td className="px-4 py-3 pt-3.5 font-mono text-xs">
         {agent.agent_version ?? <Dash />}
       </td>
       <td className="px-4 py-3">
         {capabilities.length > 0 ? (
-          <ul className="flex flex-wrap gap-1" aria-label="Capabilities">
+          <ul className="flex gap-1" aria-label="Capabilities">
             {capabilities.map((c) => (
               <li key={c}>
                 <Badge variant="outline">{c}</Badge>
@@ -103,9 +118,20 @@ function AgentRow({ agent, now }: { agent: FleetAgent; now: Date }) {
       </td>
       <td className="px-4 py-3">
         {active ? (
-          <code className="font-mono text-xs" title={active}>
-            {shortFingerprint(active)}
-          </code>
+          <span className="flex items-center gap-1.5 whitespace-nowrap">
+            <code className="font-mono text-xs" title={active}>
+              {shortFingerprint(active)}
+            </code>
+            {active === envKey && (
+              <span title="The env key: values are sealed with it">
+                <Check
+                  className="h-3.5 w-3.5 text-success"
+                  aria-hidden="true"
+                />
+                <span className="sr-only">env key</span>
+              </span>
+            )}
+          </span>
         ) : (
           <Dash />
         )}
@@ -128,16 +154,19 @@ function AgentRow({ agent, now }: { agent: FleetAgent; now: Date }) {
 /** One row per registered agent. */
 export function AgentTable({
   agents,
+  envKey,
   now = new Date(),
 }: {
   agents: FleetAgent[];
+  /** The env key's fingerprint, to mark the agents whose active key it is. */
+  envKey?: string;
   now?: Date;
 }) {
   return (
     <div className="overflow-x-auto rounded-xl border bg-card">
       <table className="w-full text-sm">
         <caption className="sr-only">Agents in this environment</caption>
-        <thead className="border-b border-border bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
+        <thead className="border-b border-border bg-muted/50 text-xs tracking-wide whitespace-nowrap text-muted-foreground uppercase">
           <tr>
             <th scope="col" className="px-4 py-3 text-left font-semibold">
               Agent
@@ -146,13 +175,7 @@ export function AgentTable({
               Region
             </th>
             <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Cluster
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
               Health
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Last check-in
             </th>
             <th scope="col" className="px-4 py-3 text-left font-semibold">
               Version
@@ -176,7 +199,7 @@ export function AgentTable({
         </thead>
         <tbody>
           {agents.map((agent) => (
-            <AgentRow key={agent.id} agent={agent} now={now} />
+            <AgentRow key={agent.id} agent={agent} envKey={envKey} now={now} />
           ))}
         </tbody>
       </table>

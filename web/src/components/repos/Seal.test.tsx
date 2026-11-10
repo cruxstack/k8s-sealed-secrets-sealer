@@ -82,6 +82,10 @@ describe("sealing", () => {
     const { form, key, value, seal } = await openForm();
     expect(within(form).getByText(/each of the 2 documents/)).toBeVisible();
     expect(seal).toBeDisabled();
+    // before the first seal, the pending changes say what will gather there
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toHaveTextContent(/Nothing sealed yet/);
     // Enter in the key moves to the value; Ctrl/⌘+Enter seals
     fireEvent.change(key, { target: { value: "api-token" } });
     fireEvent.keyDown(key, { key: "Enter" });
@@ -89,15 +93,15 @@ describe("sealing", () => {
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
 
-    expect(
-      await within(form).findByText(/sealed/i, { selector: "span" }),
-    ).toHaveTextContent(/Sealed api-token for 2 documents in dev-use1-blue/);
+    const done = await within(form).findByText(/sealed/i, { selector: "span" });
+    expect(done).toHaveTextContent(
+      /Sealed api-token for 2 documents in dev-use1-blue/,
+    );
+    // ready for the next value, with a notice that names no value
+    expect(done.closest("[role=status]")).not.toHaveTextContent("s3cr3t");
     expect(value).toHaveValue("");
     expect(key).toHaveValue("");
-    // ready for the next value, with a notice that names no value
     expect(key).toHaveFocus();
-    const toast = await screen.findByText("Sealed api-token");
-    expect(toast.closest("li")).not.toHaveTextContent("s3cr3t");
 
     // the session opened at the commit on screen; both writes carry the
     // CSRF token, and the value went out once, to the seal request
@@ -116,23 +120,25 @@ describe("sealing", () => {
       api.calls.filter((c) => JSON.stringify(c.body ?? "").includes("s3cr3t")),
     ).toHaveLength(1);
 
-    // the pending change appears, and the file marks the key as new
+    // the pending change appears beside the files, and the file marks the
+    // key as new
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
-    const row = await within(pending).findByRole("rowheader", {
-      name: "api-token",
-    });
-    const cells = within(row.closest("tr") as HTMLElement);
-    expect(cells.getByText(BILLING)).toBeInTheDocument();
-    expect(cells.getByText("2 documents")).toBeInTheDocument();
-    expect(cells.getByText(/dev-use1-blue/)).toBeInTheDocument();
-    const documents = within(
+    const item = within(
+      (await within(pending).findByText("api-token")).closest(
+        "li",
+      ) as HTMLElement,
+    );
+    expect(item.getByRole("button", { name: BILLING })).toBeInTheDocument();
+    expect(item.getByText("2 documents")).toBeInTheDocument();
+    expect(item.getByTitle(/^Sealed by dev-use1-blue with/)).toBeVisible();
+    const keys = within(
       screen.getByRole("region", { name: BILLING }),
-    ).getByRole("table");
+    ).getByRole("list", { name: "Keys" });
     expect(
-      within(documents).getAllByText("api-token", { selector: "code" }),
-    ).toHaveLength(2);
+      within(keys).getByRole("button", { name: /^api-token/ }),
+    ).toHaveTextContent("api-tokenNew, in your pending changes");
     const files = screen.getByRole("list", { name: "Files" });
     expect(
       within(files).getByRole("button", { name: /billing.*1 pending change/ }),
@@ -214,7 +220,10 @@ describe("sealing", () => {
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
-    expect(within(pending).getAllByRole("row")).toHaveLength(3);
+    const changes = within(pending).getByRole("list", {
+      name: "Pending changes",
+    });
+    expect(within(changes).getAllByRole("listitem")).toHaveLength(2);
     // the files are read at the session's commit
     expect(api.calls.find((c) => c.url === `${APPS}/files`)?.params).toEqual({
       commit: SESSION.commit,
@@ -226,7 +235,7 @@ describe("sealing", () => {
       }),
     );
     await within(pending).findByText("1", { selector: "span" });
-    expect(within(pending).getAllByRole("row")).toHaveLength(2);
+    expect(within(changes).getAllByRole("listitem")).toHaveLength(1);
 
     fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
     const dialog = await screen.findByRole("dialog", {
@@ -234,17 +243,46 @@ describe("sealing", () => {
     });
     expect(dialog).toHaveTextContent("This removes 1 pending change");
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("region", { name: /pending changes/i }),
-      ).not.toBeInTheDocument(),
-    );
+    // the card stays, saying what will gather in it
+    expect(await screen.findByText(/Nothing sealed yet/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open pull request" }),
+    ).not.toBeInTheDocument();
     expect(
       api.calls.filter((c) => c.method === "DELETE").map((c) => c.url),
     ).toEqual([
       `${APPS}/session/${SESSION.id}/changes/${changeFor({ ...SEAL, key: "password" }).id}`,
       `${APPS}/session/${SESSION.id}`,
     ]);
+  });
+
+  it("keeps pending changes reachable when their commit can't be read", async () => {
+    // no files: the listing at the session's commit is not found
+    const api = fakeApi({
+      me: ME,
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 1,
+          changes: [changeFor(SEAL)],
+        },
+      },
+    });
+    renderAt(PAGE, api);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Could not load this repository.*If it is gone from main, discard the changes/,
+    );
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Discard pending changes?",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(
+        api.calls.filter((c) => c.method === "DELETE").map((c) => c.url),
+      ).toEqual([`${APPS}/session/${SESSION.id}`]),
+    );
   });
 
   it("offers no sealing to read-only users", async () => {
@@ -260,6 +298,13 @@ describe("sealing", () => {
     await screen.findByRole("region", { name: BILLING });
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.getByText(/not write to it/)).toBeInTheDocument();
+    // the keys show, but picking one fills nothing
+    const keys = screen.getByRole("list", { name: "Keys" });
+    expect(within(keys).getByText("api-key")).toBeInTheDocument();
+    expect(within(keys).queryByRole("button")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /pending changes/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("marks repositories with pending changes", async () => {
@@ -343,11 +388,8 @@ describe("sealing", () => {
     expect(
       within(banner).getByRole("link", { name: /view pull request/i }),
     ).toHaveAttribute("href", "https://github.com/example-org/apps/pull/7");
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("region", { name: /pending changes/i }),
-      ).not.toBeInTheDocument(),
-    );
+    // the session ended with it
+    expect(await screen.findByText(/Nothing sealed yet/)).toBeInTheDocument();
     const call = api.calls.find((c) => c.url.endsWith("/pull-request"));
     expect(call).toMatchObject({
       method: "POST",
@@ -429,6 +471,11 @@ describe("sealing", () => {
       ),
     );
     expect(open).toBeDisabled();
+    // nor can a key be picked while it runs
+    const keys = screen.getByRole("list", { name: "Keys" });
+    expect(
+      within(keys).getByRole("button", { name: /api-key/ }),
+    ).toBeDisabled();
     await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
   });
 
@@ -519,12 +566,18 @@ describe("hints", () => {
     );
     expect(docs).toHaveAttribute("rel", "noopener noreferrer");
 
-    // the first document lacks both keys, the second only db-password
-    const [first, second] = within(panel)
-      .getAllByRole("list", { name: "Keys" })
-      .map((l) => l.textContent);
-    expect(first).toBe("api-keymissingdb-passwordmissing");
-    expect(second).toBe("api-keydb-passwordmissing");
+    // the expected keys come first: api-key is in one document of two,
+    // db-password in none
+    const keys = within(panel).getByRole("list", { name: "Keys" });
+    expect(
+      within(keys)
+        .getAllByRole("button")
+        .map((b) => b.textContent),
+    ).toEqual([
+      "api-keyIn 1 of 2; not in dev-use1-blue-apps/billingSeal",
+      "db-passwordExpected, in none of the 2 documentsSeal",
+    ]);
+    expect(within(panel).getByText("2 to seal")).toBeVisible();
 
     // the file list says so too, and matches on the description
     const files = screen.getByRole("list", { name: "Files" });
@@ -537,20 +590,24 @@ describe("hints", () => {
     expect(within(files).getAllByRole("button")).toHaveLength(1);
   });
 
-  it("fills an expected key from its chip and warns about unexpected ones", async () => {
+  it("fills the form from the key list and warns about unexpected keys", async () => {
     renderAt(
       PAGE,
       fakeApi({ me: ME, files: { "example-org/apps": hinted() } }),
     );
     const { form, key, value } = await openForm();
 
-    const chips = within(form).getByRole("list", { name: "Expected keys" });
-    expect(within(form).getByText(/2 missing/)).toBeVisible();
-    fireEvent.click(within(chips).getByRole("button", { name: /db-password/ }));
+    const keys = screen.getByRole("list", { name: "Keys" });
+    const row = within(keys).getByRole("button", { name: /^db-password/ });
+    fireEvent.click(row);
     expect(key).toHaveValue("db-password");
     expect(value).toHaveFocus();
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    // typing another key moves the mark
+    fireEvent.change(key, { target: { value: "api-key" } });
+    expect(row).toHaveAttribute("aria-pressed", "false");
     expect(
-      within(chips).getByRole("button", { name: /db-password/ }),
+      within(keys).getByRole("button", { name: /^api-key/ }),
     ).toHaveAttribute("aria-pressed", "true");
 
     // expected keys are suggested first

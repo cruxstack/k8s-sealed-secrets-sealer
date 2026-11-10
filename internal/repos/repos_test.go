@@ -186,7 +186,7 @@ func TestFiles(t *testing.T) {
 		paths = append(paths, f.Path)
 	}
 	// reports (prod only) and deployment.yaml (no match) are left out
-	if !slices.Equal(paths, []string{"deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml"}) {
+	if !slices.Equal(paths, []string{"deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml", "deploy/worker/sealed-secret.yaml"}) {
 		t.Fatalf("paths = %v", paths)
 	}
 	if billing := l.Files[0]; len(billing.Documents) != 3 || !githubapp.ValidSHA(billing.Blob) {
@@ -254,7 +254,7 @@ func TestHeadAndFile(t *testing.T) {
 
 	// a listing at a commit, then single files at it, share one tree read
 	l, err := s.Files(ctx, alice, "example-org", "apps", head)
-	if err != nil || l.Commit != head || len(l.Files) != 3 {
+	if err != nil || l.Commit != head || len(l.Files) != 4 {
 		t.Fatalf("Files at %s = %+v, %v", head, l, err)
 	}
 	f, err := s.File(ctx, alice, "example-org", "apps", head, "deploy/billing/sealed-secret.yaml", true)

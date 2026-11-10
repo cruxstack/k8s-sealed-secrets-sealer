@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { BookOpen, ExternalLink, FileWarning, Info } from "lucide-react";
 import type {
   RepositoryFile,
@@ -13,10 +13,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 import { FilePath, fileStatus } from "./FileList";
 import { fileHints } from "./hints";
-import { SealForm } from "./SealForm";
+import { KeyList } from "./KeyList";
+import { keyStatuses } from "./keys";
+import { SealForm, type SealFormHandle } from "./SealForm";
 
 const SCOPES: Record<
   SealedSecretDocument["scope"],
@@ -73,69 +74,73 @@ function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
 }
 
 /**
- * A document's keys, with values waiting in this session marked, and then
- * the keys it is expected to hold but does not yet.
+ * The documents a value is sealed for: where each lives, and its scope. A
+ * document values can't be sealed into says why.
  */
-function Keys({
-  keys,
-  pending,
-  expected,
+function Documents({
+  file,
+  docs,
+  sealing,
 }: {
-  keys: string[];
-  pending: Set<string>;
-  expected: string[];
+  file: RepositoryFile;
+  docs: SealedSecretDocument[];
+  /** Whether the form above seals into them. */
+  sealing: boolean;
 }) {
-  const all = [...new Set([...keys, ...pending])].sort();
-  const missing = expected.filter((k) => !all.includes(k));
-  if (all.length === 0 && missing.length === 0) {
-    return <span className="text-xs text-muted-foreground">No keys yet</span>;
-  }
+  if (docs.length === 0) return null;
   return (
-    <ul className="flex flex-wrap gap-1" aria-label="Keys">
-      {all.map((k) => {
-        const isPending = pending.has(k);
-        const replaces = isPending && keys.includes(k);
-        return (
-          <li key={k}>
-            <code
-              className={cn(
-                "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-xs",
-                isPending
-                  ? "bg-primary/10 text-primary ring-1 ring-primary/25 dark:bg-primary/20"
-                  : "bg-muted",
-              )}
-              title={
-                isPending
-                  ? replaces
-                    ? "A new value is pending"
-                    : "Pending: not in the file yet"
-                  : undefined
-              }
+    <div className="border-t border-border">
+      <h3 className="px-5 pt-4 pb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+        {sealing
+          ? docs.length === 1
+            ? "Sealed for this document"
+            : `Sealed for these ${docs.length} documents`
+          : docs.length === 1
+            ? "1 document"
+            : `${docs.length} documents`}
+      </h3>
+      <table className="w-full text-sm">
+        <caption className="sr-only">
+          SealedSecret documents in {file.path}
+        </caption>
+        <thead className="sr-only">
+          <tr>
+            <th scope="col">Namespace / name</th>
+            <th scope="col">Region</th>
+            <th scope="col">Scope</th>
+          </tr>
+        </thead>
+        <tbody>
+          {docs.map((d) => (
+            <tr
+              key={d.index}
+              className="border-t border-border/60 align-top first:border-0"
             >
-              {k}
-              {isPending && (
-                <span className="font-sans text-[10px] font-semibold uppercase">
-                  {replaces ? "new value" : "new"}
-                </span>
-              )}
-            </code>
-          </li>
-        );
-      })}
-      {missing.map((k) => (
-        <li key={k}>
-          <code
-            className="inline-flex items-center gap-1 rounded-md border border-dashed border-warning/60 px-1.5 py-px font-mono text-xs text-warning"
-            title="Expected, but not set yet"
-          >
-            {k}
-            <span className="font-sans text-[10px] font-semibold uppercase">
-              missing
-            </span>
-          </code>
-        </li>
-      ))}
-    </ul>
+              <th
+                scope="row"
+                className="w-full py-2 pr-3 pl-5 text-left font-mono text-[13px] font-medium [overflow-wrap:anywhere]"
+              >
+                {d.namespace || <Dash />}
+                <span className="text-muted-foreground">/</span>
+                {d.name || <Dash />}
+                {d.problem && (
+                  <p className="mt-1 max-w-md font-sans text-xs font-normal text-warning">
+                    {d.problem}
+                  </p>
+                )}
+              </th>
+              <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">
+                {d.region || <Dash />}
+              </td>
+              <td className="py-1.5 pr-5 pl-3 text-right">
+                <ScopeBadge scope={d.scope} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="h-2" />
+    </div>
   );
 }
 
@@ -209,6 +214,17 @@ export function FilePanel({
       .filter((c) => c.path === file.path)
       .map((c) => c.key),
   );
+  const form = useRef<SealFormHandle>(null);
+  const [current, setCurrent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const busyChange = useCallback(
+    (b: boolean) => {
+      setBusy(b);
+      onBusyChange(b);
+    },
+    [onBusyChange],
+  );
+  const sealing = canWrite && status === "ready";
 
   if (status === "unreadable") {
     return (
@@ -252,78 +268,28 @@ export function FilePanel({
         )
       }
     >
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[40rem] text-sm">
-          <caption className="sr-only">
-            SealedSecret documents in {file.path}
-          </caption>
-          <thead className="border-b border-border bg-muted/40 text-xs tracking-wide text-muted-foreground uppercase">
-            <tr>
-              <th scope="col" className="px-5 py-2 text-left font-semibold">
-                Namespace / name
-              </th>
-              <th scope="col" className="px-3 py-2 text-left font-semibold">
-                Region
-              </th>
-              <th scope="col" className="px-3 py-2 text-left font-semibold">
-                Scope
-              </th>
-              <th
-                scope="col"
-                className="px-3 py-2 pr-5 text-left font-semibold"
-              >
-                Keys
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {docs.map((d) => (
-              <tr
-                key={d.index}
-                className="border-b border-border align-top last:border-0"
-              >
-                <th
-                  scope="row"
-                  className="px-5 py-2.5 text-left font-mono text-[13px] font-medium whitespace-nowrap"
-                >
-                  {d.namespace || <Dash />}
-                  <span className="text-muted-foreground">/</span>
-                  {d.name || <Dash />}
-                  {d.problem && (
-                    <p className="mt-1 max-w-md font-sans text-xs font-normal whitespace-normal text-warning">
-                      {d.problem}
-                    </p>
-                  )}
-                </th>
-                <td className="px-3 py-2.5 whitespace-nowrap">
-                  {d.region || <Dash />}
-                </td>
-                <td className="px-3 py-2.5">
-                  <ScopeBadge scope={d.scope} />
-                </td>
-                <td className="px-3 py-2.5 pr-5">
-                  <Keys
-                    keys={d.keys}
-                    pending={d.problem ? new Set() : pending}
-                    expected={d.expected_keys ?? []}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {!canWrite ? null : status === "ready" ? (
+      {docs.length > 0 && (
+        <KeyList
+          keys={keyStatuses(file, sealing ? pending : new Set())}
+          docs={docs.length}
+          current={sealing ? current : undefined}
+          onPick={sealing ? (k) => form.current?.pick(k) : undefined}
+          disabled={busy}
+        />
+      )}
+      {!canWrite ? null : sealing ? (
         <SealForm
           // a new form per file, so a value never carries over to another
           key={`${owner}/${repo}:${file.path}:${round}`}
+          ref={form}
           owner={owner}
           repo={repo}
           file={file}
           commit={commit}
           session={session}
           pendingKeys={pending}
-          onBusyChange={onBusyChange}
+          onBusyChange={busyChange}
+          onKeyChange={setCurrent}
           autoFocus={focusForm}
         />
       ) : (
@@ -333,6 +299,7 @@ export function FilePanel({
             : "A document in this file can't be sealed into, so the file can't be either. Fix it in the repository, then reload."}
         </p>
       )}
+      <Documents file={file} docs={docs} sealing={sealing} />
     </Panel>
   );
 }

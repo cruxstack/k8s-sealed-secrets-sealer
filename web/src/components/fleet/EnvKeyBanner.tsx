@@ -33,9 +33,9 @@ export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
             )}
           </div>
           <div>
-            <h1 className="text-xl font-bold">
+            <h2 className="text-lg font-semibold">
               Environment <span className="font-mono">{fleet.env}</span>
-            </h1>
+            </h2>
             <p className="text-sm text-muted-foreground">
               Values are sealed with the newest key every cluster holds.
             </p>
