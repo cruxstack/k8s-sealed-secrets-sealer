@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -34,6 +35,15 @@ const (
 	// keys one check-in asks an agent for; keys with no copy are not held
 	// back.
 	maxCopiesPerCheckIn = 20
+	// presentHold holds off restoring a key that a restore found already in
+	// the cluster while the agent still does not report it: held under
+	// another label (relabeled as compromised, say), or not loaded by its
+	// controller, which the agent retries on its own. Restoring it again
+	// would change nothing.
+	presentHold = time.Hour
+	// presentLookback is how far back key sync reads an agent's commands to
+	// find such restores. It is read only when a restore is due.
+	presentLookback = keyCommandTTL + presentHold + time.Minute
 )
 
 // keySyncPlan is what one agent's check-in leads to.
@@ -183,11 +193,18 @@ func recent(c store.CommandRecord, now time.Time) bool {
 	return now.Sub(*c.FinishedAt) < hold
 }
 
-// busyFingerprints are keys a recent restore command covers.
+// busyFingerprints are keys a recent restore command covers, and keys a
+// restore found already present within presentHold.
 func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]bool {
 	busy := map[string]bool{}
 	for _, c := range commands {
-		if c.Type != protocol.CommandKeysRestore || !recent(c, now) {
+		if c.Type != protocol.CommandKeysRestore {
+			continue
+		}
+		for _, fp := range foundPresent(c, now) {
+			busy[fp] = true
+		}
+		if !recent(c, now) {
 			continue
 		}
 		var p protocol.KeysRestorePayload
@@ -199,6 +216,50 @@ func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]
 		}
 	}
 	return busy
+}
+
+// foundPresent returns the keys a restore command found already in its
+// cluster, while its result is within presentHold.
+func foundPresent(c store.CommandRecord, now time.Time) []string {
+	if c.Type != protocol.CommandKeysRestore || c.FinishedAt == nil || c.Result == "" || now.Sub(*c.FinishedAt) >= presentHold {
+		return nil
+	}
+	var res protocol.KeysRestoreResult
+	if json.Unmarshal([]byte(c.Result), &res) != nil {
+		return nil
+	}
+	return res.AlreadyPresent
+}
+
+// noteHeldKeys adds an issue to each agent in f missing keys that a recent
+// restore found already in its cluster. Only those agents' commands are
+// read.
+func (s *Server) noteHeldKeys(ctx context.Context, f *fleet.Fleet, now time.Time) {
+	for i := range f.Agents {
+		a := &f.Agents[i]
+		if len(a.MissingKeys) == 0 {
+			continue
+		}
+		commands, err := s.store.CommandsSince(ctx, a.ID, time.Now().Add(-presentLookback))
+		if err != nil {
+			s.logger.WarnContext(ctx, "failed to read commands for the fleet", "agent_id", a.ID, "error", err)
+			continue
+		}
+		var held []string
+		for _, c := range commands {
+			for _, fp := range foundPresent(c, now) {
+				if slices.Contains(a.MissingKeys, fp) && !slices.Contains(held, fp) {
+					held = append(held, fp)
+				}
+			}
+		}
+		if len(held) > 0 {
+			sort.Strings(held)
+			a.Issues = append(a.Issues, fmt.Sprintf(
+				"a restore found missing keys already in its cluster (%s): held under a label other than active, or not loaded by its controller; they are not restored again for an hour",
+				strings.Join(held, ", ")))
+		}
+	}
 }
 
 // syncKeys runs the key sync plan for an agent that just checked in, queues
@@ -220,6 +281,14 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 	}
 
 	plan := planKeySync(f, self, state, !seen, commands, keys, now)
+	if len(plan.Restore) > 0 {
+		// a restore that found keys already present holds them off longer
+		// than every check-in reads back; read that far only now
+		if commands, err = s.store.CommandsSince(ctx, self.ID, time.Now().Add(-presentLookback)); err != nil {
+			return nil, err
+		}
+		plan = planKeySync(f, self, state, !seen, commands, keys, now)
+	}
 	if len(plan.Restore) > 0 {
 		if err := s.queue(ctx, self, protocol.CommandKeysRestore, protocol.KeysRestorePayload{Fingerprints: plan.Restore}, now); err != nil {
 			return nil, err

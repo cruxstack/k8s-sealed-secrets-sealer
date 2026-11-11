@@ -67,6 +67,7 @@ agents:
 		Sessions:     sessions,
 		Store:        mem,
 		PollInterval: 10 * time.Millisecond,
+		AdminToken:   adminToken,
 		Now:          sh.clock,
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
@@ -277,6 +278,58 @@ func TestKeySync_EscrowRestoreAndRenewal(t *testing.T) {
 		if !strings.Contains(logs, event) {
 			t.Errorf("%s was not logged", event)
 		}
+	}
+}
+
+// A key that a restore found already in the cluster, held under another
+// label, while the agent still does not report it, is not restored again
+// for an hour, and the fleet says why. The restore is older than what every
+// check-in reads back.
+func TestKeySync_HoldsKeysFoundPresent(t *testing.T) {
+	sh := newSyncHarness(t)
+	ka := newTestKey(t, time.Now().Add(-2*time.Hour))
+	kb := newTestKey(t, time.Now().Add(-time.Hour))
+	sh.checkIn("a", "720h0m0s", ka, kb)
+	for _, k := range []testKey{ka, kb} {
+		if code := sh.upload("a", k); code != http.StatusOK {
+			t.Fatalf("upload = %d", code)
+		}
+	}
+	created := time.Now().Add(-30 * time.Minute)
+	finished := sh.clock().Add(-20 * time.Minute)
+	payload, _ := json.Marshal(protocol.KeysRestorePayload{Fingerprints: []string{ka.Fingerprint}})
+	res, _ := json.Marshal(protocol.KeysRestoreResult{Restored: []string{}, AlreadyPresent: []string{ka.Fingerprint}, Failed: []protocol.KeyFailure{}})
+	if err := sh.store.PutCommand(context.Background(), store.CommandRecord{
+		AgentID: "b", ID: ulid.MustNew(ulid.Timestamp(created), ulid.DefaultEntropy()).String(), Type: protocol.CommandKeysRestore,
+		Status: store.CommandSucceeded, CreatedAt: created, ExpiresAt: created.Add(keyCommandTTL), FinishedAt: &finished,
+		Payload: string(payload), Result: string(res),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sh.checkIn("b", "0s", kb)
+	if cmds := sh.poll("b"); len(cmds) != 0 {
+		t.Fatalf("restored a key found present %s ago: %+v", 20*time.Minute, cmds)
+	}
+	f := decode[fleet.Fleet](t, sh.do(http.MethodGet, "/api/v1/admin/fleet", adminToken, nil))
+	var issues []string
+	for _, a := range f.Agents {
+		if a.ID == "b" {
+			issues = a.Issues
+		}
+	}
+	if !slices.ContainsFunc(issues, func(s string) bool {
+		return strings.Contains(s, ka.Fingerprint) && strings.Contains(s, "already in its cluster")
+	}) {
+		t.Fatalf("b's issues = %q", issues)
+	}
+
+	// an hour after the restore, it is tried again
+	sh.advance(presentHold - 20*time.Minute + time.Second)
+	sh.checkIn("a", "720h0m0s", ka, kb)
+	sh.checkIn("b", "0s", kb)
+	if cmds := sh.poll("b"); len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysRestore {
+		t.Fatalf("b commands after the hold = %+v", cmds)
 	}
 }
 

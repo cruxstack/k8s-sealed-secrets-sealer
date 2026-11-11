@@ -755,10 +755,14 @@ restarts, the agent seals with the keys it reported last.
 Key commands expire after 10 minutes. The control plane does not queue a
 restore for a key that an open restore command already covers, nor for 2
 minutes after one succeeded (until the agent's next inventory shows the key)
-or 5 minutes after one failed. Each decision is about the agent that is
-checking in, and an agent checks in serially, so concurrent check-ins from
-different agents cannot queue duplicate commands. Each check-in plans with
-its own new state and every other agent's latest, read afresh.
+or 5 minutes after one failed. A key that a restore found already in the
+cluster while the agent still does not report it, because it is held under
+another label or the controller has not loaded it, is not restored again
+for an hour, and the fleet view says so in the agent's issues. Each
+decision is about the agent that is checking in, and an agent checks in
+serially, so concurrent check-ins from different agents cannot queue
+duplicate commands. Each check-in plans with its own new state and every
+other agent's latest, read afresh.
 
 ```mermaid
 sequenceDiagram

@@ -29,12 +29,14 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 // fleet serves the env's fleet view: to automation holding the admin token,
 // and to signed-in users who administer the env.
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request) {
-	f, err := s.loadFleet(r.Context(), s.now().UTC())
+	now := s.now().UTC()
+	f, err := s.loadFleet(r.Context(), now)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to read the fleet", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.noteHeldKeys(r.Context(), &f, now)
 	httpserver.WriteJSON(w, http.StatusOK, f)
 }
 
