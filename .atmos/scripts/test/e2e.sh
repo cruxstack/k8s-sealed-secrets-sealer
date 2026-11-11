@@ -369,7 +369,10 @@ check "the session holds one pending change for the three dev documents, without
   || die "the control plane did not log seal.succeeded once"
 [[ -n "$(log_events "${sealer}-sealer" sealer-agent seal.sealed)" ]] || die "agent ${sealer} did not log seal.sealed"
 for deploy in sealer-system/sealer-control-plane $(stack_clusters | sed 's|$|-sealer/sealer-agent|'); do
-  if kubectl --context "$KUBE_CONTEXT" -n "${deploy%%/*}" logs "deploy/${deploy#*/}" 2>/dev/null | grep -qF -- "$value"; then
+  # read the log first: under pipefail, grep -q stopping at a match would
+  # fail the pipeline (SIGPIPE) and hide the very leak it found
+  log="$(kubectl --context "$KUBE_CONTEXT" -n "${deploy%%/*}" logs "deploy/${deploy#*/}" 2>/dev/null || true)"
+  if grep -qF -- "$value" <<<"$log"; then
     die "the value appears in the log of ${deploy}"
   fi
 done
@@ -474,8 +477,8 @@ check "applied to the clusters, the pull request's file unseals to the value in 
 
 [[ "$(log_events sealer-system sealer-control-plane pr.opened | wc -l | tr -d ' ')" == 1 ]] \
   || die "the control plane did not log pr.opened once"
-if kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null \
-  | grep -qF -e "$value" -e "$db_use1" -e "$db_use2"; then
+log="$(kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null || true)"
+if grep -qF -e "$value" -e "$db_use1" -e "$db_use2" <<<"$log"; then
   die "a value appears in the control plane's log"
 fi
 check "the pull request is logged, and the value is not"
@@ -511,16 +514,21 @@ check "every cluster counts its SealedSecrets: the env key seals 3 values in 2 S
 # each certificate as the controller does (SSH SHA-256 of the public key)
 key_fingerprints() {
   local cert
-  for cert in $(kubectl --context "$KUBE_CONTEXT" -n "${1}-sealed-secrets" get secrets     -l sealedsecrets.bitnami.com/sealed-secrets-key -o json | jq -r '.items[].data["tls.crt"]'); do
-    base64 -d <<<"$cert" | openssl x509 -pubkey -noout       | ssh-keygen -i -m PKCS8 -f /dev/stdin | ssh-keygen -lf - | awk '{print $2}'
+  for cert in $(kubectl --context "$KUBE_CONTEXT" -n "${1}-sealed-secrets" get secrets \
+    -l sealedsecrets.bitnami.com/sealed-secrets-key -o json | jq -r '.items[].data["tls.crt"]'); do
+    base64 -d <<<"$cert" | openssl x509 -pubkey -noout \
+      | ssh-keygen -i -m PKCS8 -f /dev/stdin | ssh-keygen -lf - | awk '{print $2}'
   done
 }
 # key_in_every_cluster <fingerprint> <yes|no>: whether every cluster holds
 # it (yes) or none does (no)
 key_in_every_cluster() {
-  local name
+  local name fps
   for name in $(stack_clusters); do
-    if key_fingerprints "$name" | grep -qxF -- "$1"; then
+    # not piped into grep -q: under pipefail, its early exit fails the
+    # pipeline whenever the key is not the last one listed
+    fps="$(key_fingerprints "$name")"
+    if grep -qxF -- "$1" <<<"$fps"; then
       [[ "$2" == yes ]] || return 1
     else
       [[ "$2" == no ]] || return 1
