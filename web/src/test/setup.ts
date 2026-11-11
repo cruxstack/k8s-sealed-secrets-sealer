@@ -4,6 +4,9 @@ import { cleanup } from "@testing-library/react";
 
 afterEach(() => {
   cleanup();
+  // what one test remembers (recent repositories, the theme) never
+  // reaches the next
+  localStorage.clear();
 });
 
 // jsdom lacks APIs that Radix menus and the theme provider use.

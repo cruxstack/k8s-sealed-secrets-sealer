@@ -119,6 +119,18 @@ describe("sealing", () => {
     expect(
       api.calls.filter((c) => JSON.stringify(c.body ?? "").includes("s3cr3t")),
     ).toHaveLength(1);
+    // the browser remembers the repository and file for the Secrets page,
+    // and never the value or the key
+    const remembered = localStorage.getItem("sealer.recent-repos:octocat:dev");
+    expect(JSON.parse(remembered ?? "[]")).toEqual([
+      {
+        repository: "example-org/apps",
+        path: BILLING,
+        sealed_at: expect.any(String),
+      },
+    ]);
+    expect(remembered).not.toContain("s3cr3t");
+    expect(remembered).not.toContain("api-token");
 
     // the pending change appears beside the files, and the file marks the
     // key as new

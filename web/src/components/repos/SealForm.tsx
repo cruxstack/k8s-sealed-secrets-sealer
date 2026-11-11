@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { useRememberSeal } from "@/lib/recent-repos";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
 import { fileHints } from "./hints";
@@ -131,6 +132,7 @@ export function SealForm({
   onRegionsChange,
 }: SealFormProps) {
   const queryClient = useQueryClient();
+  const remember = useRememberSeal();
   const id = useId();
   const keyRef = useRef<HTMLInputElement>(null);
   const valueRef = useRef<HTMLTextAreaElement>(null);
@@ -305,6 +307,8 @@ export function SealForm({
         setSeal(progress);
       }
       if (progress.status === "sealed") {
+        // the Secrets page lists the repositories sealed into lately first
+        remember(`${owner}/${repo}`, file.path);
         setKey("");
         setValue("");
         setShown(false);

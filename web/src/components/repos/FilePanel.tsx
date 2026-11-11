@@ -196,6 +196,13 @@ function Panel({
   actions?: ReactNode;
   children: ReactNode;
 }) {
+  const { title } = fileHints(file);
+  const path = (
+    <>
+      <FilePath path={file.path} />
+      <CopyButton value={file.path} label="file path" />
+    </>
+  );
   return (
     <section
       aria-label={file.path}
@@ -204,10 +211,17 @@ function Panel({
       {/* on a phone the actions go under the path, which needs the width */}
       <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0 space-y-1">
-          <h2 className="flex items-center gap-1 text-[15px] leading-6">
-            <FilePath path={file.path} />
-            <CopyButton value={file.path} label="file path" />
-          </h2>
+          {/* a file's title names it, with its path under it */}
+          {title ? (
+            <>
+              <h2 className="text-[15px] leading-6 font-semibold">{title}</h2>
+              <p className="flex items-center gap-1 text-[13px]">{path}</p>
+            </>
+          ) : (
+            <h2 className="flex items-center gap-1 text-[15px] leading-6">
+              {path}
+            </h2>
+          )}
           {aside}
         </div>
         {actions && <div className="shrink-0">{actions}</div>}

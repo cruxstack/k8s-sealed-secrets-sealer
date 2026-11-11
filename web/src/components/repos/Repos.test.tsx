@@ -19,6 +19,7 @@ import {
   ME,
   REPO_APPS,
   REPO_PLATFORM,
+  SESSION,
   fakeApi,
   listing,
   type FakeApi,
@@ -78,6 +79,118 @@ describe("repositories", () => {
     );
   });
 
+  it("lists the repositories worked in lately first, opening the file last sealed into", async () => {
+    // what this browser remembers for the user in dev: a repository they
+    // can no longer read is left out
+    localStorage.setItem(
+      "sealer.recent-repos:octocat:dev",
+      JSON.stringify([
+        {
+          repository: "example-org/platform",
+          path: "secrets/dev/sealed-secret.yaml",
+          sealed_at: new Date(Date.now() - 3 * 60_000).toISOString(),
+        },
+        {
+          repository: "example-org/gone",
+          path: "x.yaml",
+          sealed_at: new Date(Date.now() - 4 * 60_000).toISOString(),
+        },
+      ]),
+    );
+    renderAt(
+      "/secrets",
+      fakeApi({
+        me: ME,
+        repos: [REPO_APPS, REPO_PLATFORM],
+        sessions: {
+          "example-org/apps": { ...SESSION, pending_changes: 2 },
+        },
+      }),
+    );
+    const recent = await screen.findByRole("region", {
+      name: "Recent repositories",
+    });
+    // pending changes first, then the latest seals
+    await waitFor(() =>
+      expect(within(recent).getAllByRole("link")[0]).toHaveTextContent(
+        "example-org/apps",
+      ),
+    );
+    const [apps] = within(recent).getAllByRole("link");
+    expect(apps).toHaveTextContent("2 pending changes");
+    expect(apps).toHaveAttribute("href", "/dev/secrets/example-org/apps");
+    const platform = within(recent).getAllByRole("link")[1] as HTMLElement;
+    expect(platform).toHaveTextContent("example-org/platform");
+    expect(platform).toHaveTextContent("Sealed 3m ago");
+    expect(platform).toHaveAttribute(
+      "href",
+      "/dev/secrets/example-org/platform?file=secrets%2Fdev%2Fsealed-secret.yaml",
+    );
+    expect(within(recent).getAllByRole("link")).toHaveLength(2);
+    // the full list still follows
+    expect(
+      screen.getByRole("rowheader", { name: "example-org/platform" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no recent repositories before any work", async () => {
+    renderAt(
+      "/secrets",
+      fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
+    );
+    await screen.findByRole("rowheader", { name: "example-org/apps" });
+    expect(
+      screen.queryByRole("region", { name: "Recent repositories" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names a file by its title, over its path, and filters by it", async () => {
+    const base = listing();
+    const [billing, ...rest] = base.files;
+    renderAt(
+      "/secrets/example-org/apps",
+      fakeApi({
+        me: ME,
+        files: {
+          "example-org/apps": listing({
+            files: [
+              {
+                ...billing!,
+                documents: (billing!.documents ?? []).map((d) => ({
+                  ...d,
+                  title: "Billing provider",
+                })),
+              },
+              ...rest,
+            ],
+          }),
+        },
+      }),
+    );
+    const files = await screen.findByRole("list", { name: "Files" });
+    const button = within(files).getAllByRole("button")[0] as HTMLElement;
+    expect(button).toHaveAccessibleName(
+      /^Billing providerdeploy\/billing\/sealed-secret\.yaml/,
+    );
+    expect(within(button).getByText("Billing provider")).toHaveClass(
+      "truncate",
+    );
+    // the header names it too, with its path under it
+    const panel = screen.getByRole("region", {
+      name: "deploy/billing/sealed-secret.yaml",
+    });
+    expect(within(panel).getByRole("heading", { level: 2 })).toHaveTextContent(
+      /^Billing provider$/,
+    );
+    expect(
+      within(panel).getByRole("button", { name: "Copy file path" }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Filter files" }), {
+      target: { value: "provider" },
+    });
+    expect(within(files).getAllByRole("button")).toHaveLength(1);
+  });
+
   it("says when repositories may be missing from the list", async () => {
     renderAt(
       "/secrets",
@@ -120,11 +233,21 @@ describe("repositories", () => {
     // every file, with whether values fit in it
     const files = await screen.findByRole("list", { name: "Files" });
     const buttons = within(files).getAllByRole("button");
-    expect(buttons.map((b) => b.textContent)).toEqual([
+    expect(buttons).toHaveLength(3);
+    // each path on one line, read whole (the page's layout, which jsdom
+    // lacks, puts the lines apart) and whole in its title
+    expect(buttons[0]).toHaveAccessibleName(
       "deploy/billing/sealed-secret.yaml2 documents · use1, use2",
+    );
+    expect(buttons[1]).toHaveAccessibleName(
       "deploy/legacy/sealed-secret.yaml1 document · Can't seal",
+    );
+    expect(buttons[2]).toHaveAccessibleName(
       "deploy/broken/sealed-secret.yamlUnreadable",
-    ]);
+    );
+    expect(
+      within(buttons[0]!).getByTitle("deploy/billing/sealed-secret.yaml"),
+    ).toHaveClass("flex");
 
     // the first file values fit in is open
     const billing = screen.getByRole("region", {

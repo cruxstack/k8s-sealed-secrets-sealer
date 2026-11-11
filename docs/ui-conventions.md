@@ -15,8 +15,13 @@ another one puts the way back in its title as a breadcrumb ("Secrets /
 example-org/apps") rather than on a line of its own. Sealing is what people
 come for, so the home page is Secrets (`/{env}/secrets`): their
 repositories, each opening its workspace at `/{env}/secrets/{owner}/{repo}`.
-The navigation holds what everyone uses, and Fleet for the env's admins; the
-current page's item is marked (`aria-current="page"`).
+The repositories they worked in lately come first, as cards: those with
+pending changes, then those they sealed into from this browser, newest
+first, each opening the file a value last went into. The browser keeps
+these per user and env in its storage, names and times only, and a
+repository no longer in the list is left out; the palette lists them first
+too. The navigation holds what everyone uses, and Fleet for the env's
+admins; the current page's item is marked (`aria-current="page"`).
 
 Every page but signing in is about one env, named first in its path, so a
 link keeps its env. Components read the env from `useEnv()`, never from the
@@ -46,24 +51,28 @@ the env badge, with a summary in its tooltip; when it doesn't, the workspace
 says so above the files, since seals would fail.
 
 Under its agents, the fleet lists the env's keys, newest first: how many
-clusters hold each, its escrowed copies, its references (the values sealed
-with it, as its clusters counted them), and its status as a badge (env key,
-active, revoked, deleted, future-dated). A reference count never shows a
-bare 0 when a cluster did not count: it is "Unknown" or "At least 12
-values", naming the clusters left out, and opens the count per cluster in a
-row under the key. When no agent counts at all, one note above the table
-says why and the column holds dashes. Every key's row has the same three
-actions, as icons: Revoke, Delete and Reinstate, each grayed out with the
-reason when it does not apply (Delete always, unless the control plane says
-the key may go). Each confirms in a dialog that says what it does and does
-not do: revoking and deleting with a destructive confirm, reinstating
-because the key goes back into every cluster and may become the env key. A
-revoked or deleted key's row is muted; a deleted key's status says who
-deleted it, when its escrowed copies are purged, and the clusters it is
-still being removed from. The agents table shows each agent's latest count:
-values and SealedSecrets, when, the namespaces when not all, and values no
-key decrypts in the warning color. A notice under the env key warns when a
-cluster's keys reach half or 80% of the key limit, or go past it. With no
+clusters hold each, its escrowed copies, its references (the values sealed with
+it, as its clusters counted them), and its status as a badge (env key, active,
+revoked, future-dated). Deleted keys have a table of their own under it, so the
+keys in use stand out: who deleted each and when, when its escrowed copies are
+purged, and the clusters it is still being removed from. Nothing refers to a
+deleted key, so that table has no references. A reference count never shows a
+bare 0 when a cluster did not count: it is "Unknown" or "At least 12 values",
+naming the clusters left out, and opens the count per cluster in a row under the
+key. When no agent counts at all, one note above the table says why and the
+column holds dashes. Every row of the keys table has the same three actions, as
+icons: Revoke, Delete and Reinstate, each grayed out with the reason when it
+does not apply (Delete always, unless the control plane says the key may go); a
+deleted key's row has Reinstate alone. Each confirms in a dialog that says what
+it does and does not do: revoking and deleting with a destructive confirm,
+reinstating because the key goes back into every cluster and may become the env
+key. A revoked key's row is muted, and so is the deleted keys table. The agents
+table shows each agent's region and version under its name, and its latest
+count: values and SealedSecrets, when, the namespaces when not all, and values
+no key decrypts in the warning color. An agent's issues are sentences, in a
+warning note in a row under the agent's that spans the table, so the table fits
+a laptop's width without scrolling sideways. A notice under the env key warns
+when a cluster's keys reach half or 80% of the key limit, or go past it. With no
 env key, the banner says why and what happens next: keys out of sync (and
 whether any agent has checked in), or a new key needed when every key the
 clusters share is revoked or not valid yet.
@@ -102,7 +111,8 @@ picked when none is.
 
 The repository page is one. The picked file shows, in order:
 
-1. its path, description and docs link;
+1. its title, when it has one, over its path, then its description and
+   docs link;
 2. its keys, one row each, saying where the key stands across the file's
    documents: in all of them, in some (naming the others), expected but in
    none, or waiting in the pending changes;
@@ -113,6 +123,14 @@ The keys come first because they are what people act on: picking a row fills
 the form's key and moves to the value. The documents come last because they
 rarely change and only need checking. A file nothing can be sealed into says
 why in a warning alert where the form would be.
+
+A file with many keys (12 or more; real ones hold 60) must not push the form
+out of sight. Its keys get a filter and a choice of all of them, those to
+seal (missing somewhere, or sealed with a revoked key) and those pending,
+each with its count, and they scroll in a box of their own, so the form
+stays close under them. The key in the form scrolls into view in that box
+without moving the page. Enter in the filter picks the first match, and a
+filter that names a key the file lacks offers to seal it as a new one.
 
 When a file's documents are in more than one region, each key row also shows
 a chip per region with where the key stands there, and the form gets a
@@ -145,12 +163,20 @@ lasts as long as its change: once the change is removed, discarded or sent
 in a pull request, the line goes. With nothing pending, the cart says what
 will gather there and shows no footer.
 
-Show hints where the decision is made. A file's description sits under its
-path in the list and in its header, its docs are a link in its header, and
-expected keys it lacks are dashed amber: in the list as a count and in the
-key rows. A file's badges in the list always sit on their own row, under its
-summary. Hints warn and never block: a key the file does not expect gets an
-amber note, and the value can still be sealed.
+Show hints where the decision is made. A file's title names it in the list
+and in its header, over its path; its description sits under them, its docs
+are a link in its header, and expected keys it lacks are dashed amber: in
+the list as a count and in the key rows. A file's badges in the list always
+sit on their own row, under its summary. Hints warn and never block: a key
+the file does not expect gets an amber note, and the value can still be
+sealed.
+
+A path in a list (the files, the cart, a recent repository's card) takes one
+line and never wraps: the file name whole, and as much of its directory as
+fits before it, cut at the start with an ellipsis, since the folders nearest
+a file tell it from the others (`PathLine`). The whole path is its `title`
+and what a screen reader reads. A header has room for a path and wraps it
+only after a slash (`FilePath`).
 
 ## Keyboard
 
@@ -161,7 +187,9 @@ People who use this every day use it from the keyboard:
 - `/` focuses the page's filter. Enter in a filter opens the first match,
   and the arrow keys move through the list. Use `FilterInput`: it shows the
   `/` hint while empty and its own clear button once it has text, with the
-  browser's clear button hidden so the two never overlap.
+  browser's clear button hidden so the two never overlap. A second filter
+  on a page (a file's keys) sets `shortcut={false}`, so `/` stays with the
+  first and its hint is not shown twice.
 - In a form, Enter moves to the next field and ⌘/Ctrl+Enter submits. After a
   submit succeeds, the form clears and the first field takes focus for the
   next one; after a failure, what was typed stays.
@@ -254,11 +282,12 @@ different design.
 
 ## Row details
 
-Rows are dense summaries. Detail that does not fit a cell (an agent's full key
-list, its issues) goes in the row's issues column as short sentences, or in a
-detail view reached from the row. A row that opens something shows it on
-hover and has a visible affordance; a row that opens nothing does not look
-pressable.
+Rows are dense summaries. Detail that does not fit a cell goes in a row under it
+that spans the table (an agent's issues, as sentences), or in a detail view
+reached from the row. A table never gets a column of sentences: it squeezes them
+a word a line and widens the table past a laptop's width. A row that opens
+something shows it on hover and has a visible affordance; a row that opens
+nothing does not look pressable.
 
 A breakdown of one cell (a key's references per cluster) is a button in
 that cell, with a chevron and `aria-expanded`, that opens a row under it

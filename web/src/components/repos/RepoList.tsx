@@ -9,6 +9,7 @@ import type { Repository } from "@/api/types";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { RelativeTime } from "@/components/ui/relative-time";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FilterInput } from "@/components/ui/filter-input";
 import { SectionHeading } from "@/components/ui/section-heading";
@@ -21,8 +22,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useEnv } from "@/lib/env";
+import {
+  recentItems,
+  useRecentRepos,
+  type RecentItem,
+} from "@/lib/recent-repos";
 import { useShortcut } from "@/lib/shortcuts";
 import { sentence } from "@/lib/utils";
+import { PathLine } from "./FileList";
 
 /** The user's own permission on a repository, as a neutral badge. */
 export function AccessBadge({ access }: { access: Repository["access"] }) {
@@ -37,51 +44,60 @@ function plural(n: number, one: string, many: string) {
   return n === 1 ? `1 ${one}` : `${n} ${many}`;
 }
 
-/** Repositories with pending changes, to pick up where the user left off. */
-function Continue({
-  repos,
-  pending,
-}: {
-  repos: Repository[];
-  pending: Map<string, number>;
-}) {
+/**
+ * The repositories the user worked in lately, to pick up where they left
+ * off: pending changes waiting for a pull request, and the file a value
+ * last went into, which the card opens.
+ */
+function Recent({ items }: { items: RecentItem[] }) {
   const env = useEnv()?.name ?? "";
-  const open = repos.filter(
-    (r) => (pending.get(r.full_name.toLowerCase()) ?? 0) > 0,
-  );
-  if (open.length === 0) return null;
+  if (items.length === 0) return null;
   return (
-    <section aria-labelledby="continue-heading" className="space-y-3">
-      <SectionHeading
-        id="continue-heading"
-        title="Pick up where you left off"
-      />
-      <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {open.map((r) => {
-          const count = pending.get(r.full_name.toLowerCase()) ?? 0;
-          return (
-            <li key={r.full_name}>
-              <Link
-                to="/$env/secrets/$owner/$repo"
-                params={{ env, owner: r.owner, repo: r.name }}
-                className="group flex items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 shadow-xs transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none dark:shadow-none"
-              >
-                <span className="min-w-0 space-y-1">
-                  <span className="block truncate font-mono text-sm font-medium">
-                    {r.full_name}
-                  </span>
-                  <Badge variant="info">
-                    {plural(count, "pending change", "pending changes")}
-                  </Badge>
+    <section aria-labelledby="recent-heading" className="space-y-3">
+      <SectionHeading id="recent-heading" title="Recent repositories" />
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {items.map(({ repo: r, pending, sealedAt, path }) => (
+          <li key={r.full_name}>
+            <Link
+              to="/$env/secrets/$owner/$repo"
+              params={{ env, owner: r.owner, repo: r.name }}
+              search={path ? { file: path } : {}}
+              className="group flex h-full items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 shadow-xs transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none dark:shadow-none"
+            >
+              <span className="min-w-0 flex-1 space-y-1">
+                <span className="block truncate font-mono text-sm font-medium">
+                  {r.full_name}
                 </span>
-                <ArrowRight
-                  className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
-                  aria-hidden="true"
-                />
-              </Link>
-            </li>
-          );
-        })}
+                {(pending > 0 || sealedAt) && (
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    {pending > 0 && (
+                      <Badge variant="info">
+                        {plural(pending, "pending change", "pending changes")}
+                      </Badge>
+                    )}
+                    {sealedAt && (
+                      <span>
+                        Sealed{" "}
+                        <RelativeTime
+                          iso={sealedAt}
+                          past
+                          describe={(at) =>
+                            `You last sealed a value here ${at}`
+                          }
+                        />
+                      </span>
+                    )}
+                  </span>
+                )}
+                {path && <PathLine path={path} quiet className="text-xs" />}
+              </span>
+              <ArrowRight
+                className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                aria-hidden="true"
+              />
+            </Link>
+          </li>
+        ))}
       </ul>
     </section>
   );
@@ -155,6 +171,7 @@ export function RepoList() {
       s.pending_changes,
     ]),
   );
+  const recent = useRecentRepos();
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
   useShortcut("/", () => filterRef.current?.focus());
@@ -222,7 +239,7 @@ export function RepoList() {
         </EmptyState>
       ) : (
         <>
-          {!needle && <Continue repos={data} pending={pending} />}
+          {!needle && <Recent items={recentItems(data, pending, recent)} />}
           {list?.incomplete && <IncompleteNotice />}
           <section aria-labelledby="all-heading" className="space-y-3">
             <SectionHeading

@@ -36,6 +36,7 @@ import { DialogOverlay } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
 import { useAuth } from "@/lib/auth";
 import { useEnv } from "@/lib/env";
+import { recentItems, useRecentRepos } from "@/lib/recent-repos";
 import { useShortcut } from "@/lib/shortcuts";
 import { useTheme } from "@/lib/theme-provider";
 
@@ -129,6 +130,15 @@ function Palette({ onDone }: { onDone: () => void }) {
       s.pending_changes,
     ]),
   );
+  // the repositories the user worked in lately come first, as on Secrets
+  const recent = useRecentRepos();
+  const first = recentItems(repos.data ?? [], pending, recent).map(
+    (i) => i.repo,
+  );
+  const ordered = [
+    ...first,
+    ...(repos.data ?? []).filter((r) => !first.includes(r)),
+  ];
 
   const run = useCallback(
     (action: () => void) => {
@@ -154,7 +164,7 @@ function Palette({ onDone }: { onDone: () => void }) {
         </CommandEmpty>
         {repos.data && repos.data.length > 0 && (
           <CommandGroup heading="Repositories">
-            {repos.data.map((r) => {
+            {ordered.map((r) => {
               const count = pending.get(r.full_name.toLowerCase());
               return (
                 <Item
