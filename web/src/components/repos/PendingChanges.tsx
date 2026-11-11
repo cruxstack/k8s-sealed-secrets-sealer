@@ -175,7 +175,7 @@ export function PendingChanges({
           Pending changes
         </CardHeading>
       </div>
-      <p className="px-4 py-3 text-sm text-muted-foreground">{NOTHING_YET}</p>
+      <p className="px-4 py-3 text-xs text-muted-foreground">{NOTHING_YET}</p>
     </section>
   );
 }
@@ -279,7 +279,7 @@ function SessionChanges({
         </div>
       )}
       {changes.length === 0 ? (
-        <p className="px-4 py-3 text-sm text-muted-foreground">{NOTHING_YET}</p>
+        <p className="px-4 py-3 text-xs text-muted-foreground">{NOTHING_YET}</p>
       ) : (
         <>
           <ul
