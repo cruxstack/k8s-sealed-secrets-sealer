@@ -15,6 +15,7 @@ import { Route as FleetRouteImport } from './routes/fleet'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as EnvIndexRouteImport } from './routes/$env.index'
 import { Route as EnvFleetRouteImport } from './routes/$env.fleet'
+import { Route as EnvResealRouteImport } from './routes/$env.reseal'
 import { Route as ReposIndexRouteImport } from './routes/repos.index'
 import { Route as SecretsIndexRouteImport } from './routes/secrets.index'
 import { Route as EnvSecretsIndexRouteImport } from './routes/$env.secrets.index'
@@ -50,6 +51,11 @@ const EnvIndexRoute = EnvIndexRouteImport.update({
 const EnvFleetRoute = EnvFleetRouteImport.update({
   id: '/fleet',
   path: '/fleet',
+  getParentRoute: () => EnvRoute,
+} as any)
+const EnvResealRoute = EnvResealRouteImport.update({
+  id: '/reseal',
+  path: '/reseal',
   getParentRoute: () => EnvRoute,
 } as any)
 const ReposIndexRoute = ReposIndexRouteImport.update({
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/$env/fleet': typeof EnvFleetRoute
+  '/$env/reseal': typeof EnvResealRoute
   '/$env/': typeof EnvIndexRoute
   '/repos/': typeof ReposIndexRoute
   '/secrets/': typeof SecretsIndexRoute
@@ -102,6 +109,7 @@ export interface FileRoutesByTo {
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/$env/fleet': typeof EnvFleetRoute
+  '/$env/reseal': typeof EnvResealRoute
   '/$env': typeof EnvIndexRoute
   '/repos': typeof ReposIndexRoute
   '/secrets': typeof SecretsIndexRoute
@@ -117,6 +125,7 @@ export interface FileRoutesById {
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
   '/$env/fleet': typeof EnvFleetRoute
+  '/$env/reseal': typeof EnvResealRoute
   '/$env/': typeof EnvIndexRoute
   '/repos/': typeof ReposIndexRoute
   '/secrets/': typeof SecretsIndexRoute
@@ -133,6 +142,7 @@ export interface FileRouteTypes {
     | '/fleet'
     | '/login'
     | '/$env/fleet'
+    | '/$env/reseal'
     | '/$env/'
     | '/repos/'
     | '/secrets/'
@@ -146,6 +156,7 @@ export interface FileRouteTypes {
     | '/fleet'
     | '/login'
     | '/$env/fleet'
+    | '/$env/reseal'
     | '/$env'
     | '/repos'
     | '/secrets'
@@ -160,6 +171,7 @@ export interface FileRouteTypes {
     | '/fleet'
     | '/login'
     | '/$env/fleet'
+    | '/$env/reseal'
     | '/$env/'
     | '/repos/'
     | '/secrets/'
@@ -224,6 +236,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EnvFleetRouteImport
       parentRoute: typeof EnvRoute
     }
+    '/$env/reseal': {
+      id: '/$env/reseal'
+      path: '/reseal'
+      fullPath: '/$env/reseal'
+      preLoaderRoute: typeof EnvResealRouteImport
+      parentRoute: typeof EnvRoute
+    }
     '/repos/': {
       id: '/repos/'
       path: '/repos'
@@ -271,6 +290,7 @@ declare module '@tanstack/react-router' {
 
 interface EnvRouteChildren {
   EnvFleetRoute: typeof EnvFleetRoute
+  EnvResealRoute: typeof EnvResealRoute
   EnvIndexRoute: typeof EnvIndexRoute
   EnvSecretsIndexRoute: typeof EnvSecretsIndexRoute
   EnvSecretsOwnerRepoRoute: typeof EnvSecretsOwnerRepoRoute
@@ -278,6 +298,7 @@ interface EnvRouteChildren {
 
 const EnvRouteChildren: EnvRouteChildren = {
   EnvFleetRoute: EnvFleetRoute,
+  EnvResealRoute: EnvResealRoute,
   EnvIndexRoute: EnvIndexRoute,
   EnvSecretsIndexRoute: EnvSecretsIndexRoute,
   EnvSecretsOwnerRepoRoute: EnvSecretsOwnerRepoRoute,

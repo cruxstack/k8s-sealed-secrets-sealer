@@ -35,7 +35,13 @@ export interface Request {
 }
 
 /** A point in a dialog's list, led by a short phrase in the text color. */
-function Point({ lead, children }: { lead?: string; children: ReactNode }) {
+export function Point({
+  lead,
+  children,
+}: {
+  lead?: string;
+  children: ReactNode;
+}) {
   return (
     <li>
       {lead && (
@@ -48,7 +54,7 @@ function Point({ lead, children }: { lead?: string; children: ReactNode }) {
   );
 }
 
-function Points({ children }: { children: ReactNode }) {
+export function Points({ children }: { children: ReactNode }) {
   return (
     <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
       {children}
@@ -57,10 +63,11 @@ function Points({ children }: { children: ReactNode }) {
 }
 
 /** The server's refusal, then Cancel and the confirm button. */
-function Confirm({
+export function Confirm({
   request,
   failed,
   label,
+  dismiss = "Cancel",
   destructive = false,
   onConfirm,
 }: {
@@ -68,6 +75,8 @@ function Confirm({
   /** What could not be done: "Could not {failed}: {why}". */
   failed: string;
   label: string;
+  /** The way back, where "Cancel" would read as the action. */
+  dismiss?: string;
   destructive?: boolean;
   onConfirm: () => void;
 }) {
@@ -81,7 +90,7 @@ function Confirm({
       <DialogFooter>
         <DialogClose asChild>
           <Button variant="outline" disabled={request.isPending}>
-            Cancel
+            {dismiss}
           </Button>
         </DialogClose>
         <Button

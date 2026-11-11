@@ -15,6 +15,7 @@ import {
   Layers,
   LogOut,
   Moon,
+  RotateCcwKey,
   Server,
   Sun,
   type LucideIcon,
@@ -220,6 +221,32 @@ function Palette({ onDone }: { onDone: () => void }) {
                     () =>
                       void navigate({
                         to: "/$env/fleet",
+                        params: { env: env.name },
+                      }),
+                  )
+                }
+              />
+            )}
+            {env.admin && (
+              <Item
+                icon={RotateCcwKey}
+                label="Reseal"
+                hint="admin"
+                value="page:reseal"
+                keywords={[
+                  "reseal",
+                  "schedules",
+                  "runs",
+                  "pull requests",
+                  "rotate",
+                  "keys",
+                  "admin",
+                ]}
+                onSelect={() =>
+                  run(
+                    () =>
+                      void navigate({
+                        to: "/$env/reseal",
                         params: { env: env.name },
                       }),
                   )
