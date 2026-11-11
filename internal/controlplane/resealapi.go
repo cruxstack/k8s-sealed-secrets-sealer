@@ -127,11 +127,24 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	toSend := 0
+	for _, g := range plan.groups {
+		toSend += len(g.values)
+	}
+	if toSend > maxFileResealValues {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
+			"this file has %d values to reseal, more than the %d a file reseal takes; a reseal schedule can reseal it", toSend, maxFileResealValues))
+		return
+	}
 	packs, tooLarge := packReseal(plan.groups)
 	for _, g := range tooLarge {
 		for _, v := range g.values {
 			plan.failures = append(plan.failures, store.ResealFailure{Key: v.key, Document: v.doc.Index, Region: v.doc.Region, Error: errTooLargeToReseal})
 		}
+	}
+	failed := len(plan.failures)
+	if len(plan.failures) > maxResealFailures {
+		plan.failures = plan.failures[:maxResealFailures]
 	}
 	reseal := store.FileReseal{
 		SessionID: sess.ID,
@@ -145,6 +158,7 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: sess.EndsAt,
 		Total:     plan.total,
 		Pending:   plan.pending,
+		Failed:    failed,
 		Failures:  withoutPath(plan.failures),
 	}
 	for _, d := range plan.docs {
@@ -219,7 +233,7 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 	s.logger.InfoContext(ctx, "reseal requested",
 		"event", "reseal.requested", "env", s.env, "session_id", sess.ID, "reseal_id", reseal.ID,
 		"user", user.Login, "user_id", user.ID, "repository", sess.Owner+"/"+sess.Repo, "path", file.Path,
-		"values", plan.total, "sent", sent, "pending", plan.pending, "failed", len(plan.failures),
+		"values", plan.total, "sent", sent, "pending", plan.pending, "failed", failed,
 		"commands", len(cmds), "agent_id", agent.ID, "env_key", envKey)
 	v, err := s.viewFileReseal(ctx, reseal, now)
 	if err != nil {
@@ -305,7 +319,7 @@ func (s *Server) viewFileReseal(ctx context.Context, fr store.FileReseal, now ti
 		Path:      fr.Path,
 		Agent:     &agent,
 		CreatedAt: fr.CreatedAt,
-		Values:    resealValuesView{Total: fr.Total, Pending: fr.Pending, Failed: len(fr.Failures)},
+		Values:    resealValuesView{Total: fr.Total, Pending: fr.Pending, Failed: max(fr.Failed, len(fr.Failures))},
 		Failures:  slices.Clone(fr.Failures),
 	}
 	docs := map[int]store.Target{}

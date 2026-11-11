@@ -514,3 +514,51 @@ func TestResealFile_SealWinsInThePullRequest(t *testing.T) {
 		t.Fatalf("document 0 old-token = %q, want the sealed value", got)
 	}
 }
+
+// A file reseal's record stays small: it names at most 50 failures, counts
+// the rest, and a file with more values than it takes is refused.
+func TestResealFile_Bounds(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	ctx := context.Background()
+	doc := func(b *strings.Builder, ns, name string, clusterWide bool, keys int) {
+		fmt.Fprintf(b, "---\napiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: %s\n  namespace: %s\n  annotations:\n    k8s-sealed-secrets-sealer/env: dev\n", name, ns)
+		if clusterWide {
+			b.WriteString("    sealedsecrets.bitnami.com/cluster-wide: \"true\"\n")
+		}
+		b.WriteString("spec:\n  encryptedData:\n")
+		for i := range keys {
+			fmt.Fprintf(b, "    key-%03d: AgBplaceholder\n", i)
+		}
+	}
+	var wide, large strings.Builder
+	doc(&wide, "apps", "wide", true, 60)
+	doc(&wide, "apps", "strict", false, 1)
+	for i := range 21 {
+		doc(&large, "apps", fmt.Sprintf("large-%03d", i), false, 100)
+	}
+	if _, ok := sh.github.Push("example-org", "apps", "main", "mock", map[string]string{
+		"deploy/wide/sealed-secret.yaml": wide.String(), "deploy/large/sealed-secret.yaml": large.String(),
+	}); !ok {
+		t.Fatal("push")
+	}
+	sess := sh.openSession()
+
+	rec := sh.reseal("alice", sess.ID, "deploy/wide/sealed-secret.yaml")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("reseal = %d %s", rec.Code, rec.Body)
+	}
+	got := decode[fileResealView](t, rec)
+	if got.Values.Total != 61 || got.Values.Failed != 60 || len(got.Failures) != maxResealFailures {
+		t.Fatalf("reseal = %+v", got.Values)
+	}
+	stored, _, _ := sh.store.FileReseal(ctx, sess.ID, got.ID)
+	if stored.Failed != 60 || len(stored.Failures) != maxResealFailures {
+		t.Fatalf("stored: %d failed, %d failures named", stored.Failed, len(stored.Failures))
+	}
+
+	rec = sh.reseal("alice", sess.ID, "deploy/large/sealed-secret.yaml")
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "2100 values to reseal") {
+		t.Fatalf("a file of 2100 values = %d %s", rec.Code, rec.Body)
+	}
+}

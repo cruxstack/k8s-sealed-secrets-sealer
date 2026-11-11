@@ -42,6 +42,10 @@ const (
 	// maxResealFailures bounds the failures listed for a file reseal or a
 	// run's repository.
 	maxResealFailures = 50
+	// maxFileResealValues bounds the values one file reseal sends, so its
+	// record (each value's ID, each command's outcome) stays well within
+	// a DynamoDB item.
+	maxFileResealValues = 2000
 	// maxResealCiphertextChars bounds one resealed value, base64: a value
 	// alone fills a command at most.
 	maxResealCiphertextChars = protocol.ResealBudgetBytes
