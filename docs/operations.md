@@ -101,7 +101,8 @@ Alert, too, on these log events, at warn level or above:
 - control plane: `key.sync_failed`, `key.escrow_rejected`,
   `renewal.enable_failed`, `agent.login_rejected`,
   `agent.checkin_rejected`, `seal.invalid_result`,
-  `repo.permission_mismatch`;
+  `repo.permission_mismatch`, `agent.login_throttled`,
+  `registry.reload_failed`, `github.request_failed`;
 - agents: `agent.checkin_failed`, `agent.poll_failed`,
   `controller.read_failed`, `controller.key_unusable`,
   `controller.active_key_unlabeled`, `controller.cert_expired`,
@@ -111,6 +112,10 @@ Alert, too, on these log events, at warn level or above:
 renewal (design section 9); any other deserves a look. The design lists
 the events that make up the audit trail, and how long to keep them
 (section 11).
+
+After `registry.reload_failed` the control plane keeps the registry in
+force, so an agent just removed from it keeps its access. The fleet doesn't
+show this; only the event does.
 
 ## Size limits
 
@@ -174,13 +179,21 @@ polls can then crowd out people's requests, or other functions'.
 ## Upgrades
 
 The control plane and the agents are released together, from one commit,
-and tested together. A control plane supports agents up to one minor
-version behind it: it accepts agent messages with fields it doesn't know,
-and agents name the protocol versions they speak at check-in (design §5).
-An agent newer than its control plane isn't supported, so upgrade the
-control plane first. An agent that is refused stops sealing and key sync
-in its cluster until it is upgraded; decryption does not stop, since
-controllers never need the control plane.
+and tested together. Upgrade the control plane first, then the agents
+(design §5 has the rules):
+
+- A control plane supports agents up to one minor version behind it. It
+  still speaks the protocol version they name at check-in, and sends them
+  only the command types they list.
+- An agent newer than its control plane works only where it added nothing
+  the control plane must understand. A control plane from v0.6.4 on
+  ignores fields it doesn't know in what agents send; an earlier one
+  refuses them. Either refuses a new protocol version, capability or
+  `key_order_priority` value.
+
+An agent that is refused stops sealing and key sync in its cluster until
+the older side is upgraded; decryption does not stop, since controllers
+never need the control plane.
 
 - Read the release notes of every version you cross; breaking changes have
   a section of their own.
@@ -217,6 +230,8 @@ controllers never need the control plane.
 | Commands, sessions, seals and  | Lost: seals in flight fail, and people seal     |
 | pending changes                | their pending changes again. All of it expires  |
 |                                | within hours anyway.                            |
+| Session counts, change places  | Written again by the next session or seal; rate |
+| and rate windows               | windows last a minute. Nothing to do.           |
 | Login replay records           | Short-lived; nothing to do.                     |
 
 So escrow is the only state that cannot be rebuilt, and only for a key that
@@ -355,12 +370,13 @@ App has the organization permission Members (read). The control plane logs
 `user.login_rejected` with the user and the reason.
 
 **Pages answer "GitHub is limiting the sealer's requests for now; try
-again in …" (503), or the repository list says it is incomplete.** The GitHub App's installation
-has used its hourly request budget, which every env and user share, or a
-list ran out of time checking permissions. The control plane logs
-`github.rate_limited`, and `github.rate_limit_low` once the budget falls
-below a tenth. Nothing retries; requests work again when the budget resets.
-An incomplete list fills in on the next load, from what was checked.
+again in …" (503), or the repository list says it is incomplete.** The
+GitHub App's installation has used its hourly request budget, which every
+env and user share, or a list ran out of time checking permissions. The
+control plane logs `github.rate_limited`, and `github.rate_limit_low` once
+the budget falls below a tenth. Nothing retries; requests work again when
+the budget resets. An incomplete list fills in on the next load, from what
+was checked.
 
 **A person is told they "may not use the prod env".** Their session does
 not grant it. Teams are checked at sign-in, so after joining a team they

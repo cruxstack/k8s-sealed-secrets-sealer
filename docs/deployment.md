@@ -414,8 +414,13 @@ parameter's ARN when the list grows.
 
 Its role needs:
 
-- `dynamodb:GetItem`, `BatchGetItem`, `Query`, `PutItem`, `UpdateItem` and
-  `DeleteItem` on `sealer-dev` and `sealer-prod`;
+- `dynamodb:GetItem`, `BatchGetItem`, `Query`, `PutItem`, `UpdateItem`,
+  `DeleteItem` and `ConditionCheckItem` on `sealer-dev` and `sealer-prod`.
+  Some writes are transactions (`TransactWriteItems`), which IAM checks
+  part by part: a put, update or delete as that action, and a condition
+  check as `ConditionCheckItem`;
+- `kms:Decrypt` on each table's KMS key, which DynamoDB uses on the role's
+  behalf to read the table;
 - `kms:GenerateDataKey` on each env's transit key (the replica in
   `us-east-2`);
 - `ssm:GetParameter` on its parameters, and `kms:Decrypt` for those that are

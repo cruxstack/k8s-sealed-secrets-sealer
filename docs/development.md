@@ -37,7 +37,7 @@ flowchart LR
       reg["sealer-registry ConfigMap<br/>agents, k3d issuer JWKS"]
       cp --> ddb
       cp --> kms
-      cp -.->|reads at startup| reg
+      cp -.->|reads about once a minute| reg
     end
     subgraph blue["simulated cluster dev-use1-blue"]
       ab["agent<br/>dev-use1-blue-sealer"] -->|API service proxy| cb["controller and keys<br/>dev-use1-blue-sealed-secrets"]
@@ -68,10 +68,11 @@ and an `escrow` key (`dev/local-kms/seed.yaml`; throwaway key material, local
 use only). The control plane and the agents use the transit key through
 `alias/sealer-transit` (prod, whose cluster doesn't run, has its own,
 `alias/sealer-transit-prod`, since envs cannot share one), and agents the
-escrow key through `alias/sealer-escrow`. local-kms does not enforce key policies, so "the
-control plane cannot decrypt" and "an agent can decrypt only its own seals"
-are left to the Terraform module (not released yet), not tested here; the
-control plane's transit client has no decrypt method either way.
+escrow key through `alias/sealer-escrow`. local-kms does not enforce key
+policies, so "the control plane cannot decrypt" and "an agent can decrypt
+only its own seals" are left to the Terraform module (not released yet),
+not tested here; the control plane's transit client has no decrypt method
+either way.
 
 Every simulated controller starts with its own key and with key renewal off
 (`--key-renew-period 0`). Within a minute or so of `atmos dev up`, the agents
