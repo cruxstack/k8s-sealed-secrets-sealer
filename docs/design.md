@@ -289,14 +289,15 @@ envs sends the call to that env, whose registry must know the agent; it
 answers `400` to a call that names no env and `404` to an env it does not
 serve. One serving a single env also accepts a call without the header.
 
-A check-in carries the agent version, the protocol versions and command types
-it supports, its capabilities, its controller's settings (namespace, key renew
-period, key order priority) and its key set: fingerprint, `NotBefore`,
-`NotAfter` and certificate for every key. The agent's check-in interval
-(15 seconds by default, 5 seconds to 5 minutes) comes in the
-`X-K8s-Sealed-Secrets-Sealer-Check-In-Interval` header, in whole seconds. It
-is a header so that control planes that predate it, which refuse unknown
-fields in a check-in, still accept the check-in.
+A check-in carries the agent version, the protocol version it speaks, the
+command types it supports, its capabilities, its controller's settings
+(namespace, key renew period, key order priority) and its key set:
+fingerprint, `NotBefore`, `NotAfter` and certificate for every key. The
+agent's check-in interval (15 seconds by default, 5 seconds to 5 minutes)
+comes in the `X-K8s-Sealed-Secrets-Sealer-Check-In-Interval` header, in
+whole seconds. It is a header because control planes before v0.6.4 refuse a
+check-in with a field they do not know, but ignore a header; one that
+predates the header takes the agent to check in every 15 seconds.
 
 Commands are typed and versioned: `seal.v1`, `keys.restore.v1`,
 `renewal.enable.v1`. Each has an ID (a ULID), the target agent ID, the env,
@@ -361,7 +362,8 @@ v1 has no command that deletes or disables anything.
 
 - The control plane ignores fields it does not know in what agents send
   (logins, check-ins, results, escrow uploads), and agents ignore them in
-  responses. Either side can add a field.
+  responses. Either side can add a field the other can do without. Control
+  planes before v0.6.4 refuse a field they do not know in what agents send.
 - Command payloads are strict: an agent refuses a payload with a field it
   does not know. A changed payload is a new command type, such as `seal.v2`.
   The control plane sends a type only to agents whose check-in lists it, so
@@ -372,9 +374,16 @@ v1 has no command that deletes or disables anything.
   speak, and refuses a check-in with none.
 
 **Upgrades.** Upgrade the control plane first, then the agents, cluster by
-cluster. A control plane supports agents up to one minor version behind it.
-Agents newer than their control plane are not supported: they may rely on
-what it does not know yet.
+cluster. Across versions:
+
+- **Older agents.** A control plane supports agents up to one minor version
+  behind it: it still speaks their protocol version, and sends them only the
+  command types their check-ins list.
+- **Newer agents** work with an older control plane only where they added
+  nothing it must understand, such as a field or header it can ignore. A
+  new protocol version, capability or `key_order_priority` value is
+  refused, a command type the control plane does not know is never sent,
+  and a control plane before v0.6.4 refuses any field it does not know.
 
 ## 6. Seal flow
 
@@ -382,7 +391,7 @@ what it does not know yet.
    session is based on the head of the default branch the user is looking
    at: if the branch has moved since the page loaded, opening is refused and
    the page reloads. A user has at most one open session per repository and
-   at most 10 in all.
+   at most 10 in each env.
 2. The user picks a file and submits a key and a value. The control plane
    re-checks the user's write permission on the repository, reads the file
    through the GitHub App at the session's base commit, and finds every
@@ -425,8 +434,8 @@ what it does not know yet.
    sealing the same key into the same file for the same regions again
    replaces it, and a seal that finishes late never replaces a newer one.
    Changes of one key for different regions can overlap; the newest wins for
-   each document, and a change one newer change covers entirely is removed. The UI
-   shows which agent and key sealed it. Users never see ciphertext.
+   each document, and a change one newer change covers entirely is removed.
+   The UI shows which agent and key sealed it. Users never see ciphertext.
 9. When the user opens a pull request, the control plane locks the session,
    so nothing is sealed into it or removed from it meanwhile and it opens one
    pull request at most. It refuses while one of the session's seals is still
@@ -824,10 +833,13 @@ level or above:
 | `controller.restarted`      | An agent restarted its controller.              |
 | `controller.restart_failed` | An agent could not restart its controller.      |
 
-Every event names the env and what it is about: the agent and cluster, the
-fingerprint, the user. Events about a check-in (`key.order_mismatch`,
-`key.future_dated`, `keys.near_limit`, `keys.truncated`) are logged once,
-at the check-in where the condition first shows for that agent.
+The control plane's events name the env and what they are about: the agent
+and cluster, the fingerprint, the user. An agent's events name its
+controller and what they are about, such as the fingerprint, but not the
+agent or its cluster: tell those apart by where the logs come from.
+Events about a check-in (`key.order_mismatch`, `key.future_dated`,
+`keys.near_limit`, `keys.truncated`) are logged once, at the check-in where
+the condition first shows for that agent.
 
 **Backups.** The table has point-in-time recovery and a scheduled AWS Backup
 plan. The escrow key is a multi-Region KMS key with a replica in another
@@ -1094,7 +1106,9 @@ shows creating one.
   stored apart from the targets so listings leave them out; they are
   never returned to clients. Never plaintext. Discarding a session leaves
   its seals and changes to expire unreachable.
-
+- **Login replay:** a hash of an aws-sts login's signature, written once STS
+  has accepted the login, so each signed request logs an agent in only once.
+  It is kept 35 minutes, longer than STS accepts the signature.
 - **Rate window:** how many requests of one kind a user (or session) made in
   one fixed minute (section 12). A request over the limit is not counted.
 
@@ -1114,8 +1128,10 @@ fingerprint), never values or ciphertexts:
 |              | `change.removed`, `pr.opened`, `pr.failed`; `seal.sealed`    |
 |              | from the agent                                               |
 | Repositories | `repo.permission_mismatch`                                   |
+| Rate limits  | `request.rate_limited`                                       |
 | Agents       | `agent.login`, `agent.login_rejected`,                       |
-|              | `agent.checkin_rejected`, `agent.capability_ignored`,        |
+|              | `agent.login_throttled`, `agent.checkin_rejected`,           |
+|              | `agent.capability_ignored`,                                  |
 |              | `command.leased`, `command.finished`; `command.started`,     |
 |              | `command.succeeded`, `command.failed`, `command.expired`     |
 |              | from the agent                                               |
@@ -1153,9 +1169,10 @@ one. The pull requests are a second, lasting record: each commit's
   it, and a token for one session is useless with another.
 - **Browser hardening.** Every response carries a strict Content Security
   Policy (same-origin scripts only and never inline, inline styles allowed
-  for UI components, images also from GitHub avatars), `X-Frame-Options: DENY`, `nosniff`, a same-origin
-  referrer and opener policy, and HSTS over https. The UI is built into
-  the binary and needs no third-party origin at runtime.
+  for UI components, images also from GitHub avatars),
+  `X-Frame-Options: DENY`, `nosniff`, a same-origin referrer and opener
+  policy, and HSTS over https. The UI is built into the binary and needs no
+  third-party origin at runtime.
 - **Repository access** goes through the GitHub App's installation token, but
   every operation is first checked against the signed-in user's own permission
   on that repository: read to list and discover, write to create a session,
@@ -1177,12 +1194,12 @@ one. The pull requests are a second, lasting record: each commit's
 - **Least-privilege tokens.** The control plane mints each installation
   token with only the permissions its use needs: `contents: read` and
   `metadata: read` to list repositories, read files and look up permissions;
-  `contents: write` and `pull_requests: write` only to open a pull request. The App itself needs
-  repository permissions Contents (read and write), Metadata (read) and Pull
-  requests (read and write), and, when it also signs users in, organization
-  permission Members (read). One GitHub App can provide both: its client ID
-  and secret sign users in, and its App ID and private key read
-  repositories.
+  `contents: write` and `pull_requests: write` only to open a pull request.
+  The App itself needs repository permissions Contents (read and write),
+  Metadata (read) and Pull requests (read and write), and, when it also
+  signs users in, organization permission Members (read). One GitHub App can
+  provide both: its client ID and secret sign users in, and its App ID and
+  private key read repositories.
 - **Env allowlist.** An env can require membership in one or more GitHub
   teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
   is checked at sign-in; removing someone from the team takes effect when
@@ -1209,14 +1226,15 @@ one. The pull requests are a second, lasting record: each commit's
 - **Rate limits** use API Gateway throttling and WAF rate-based rules per
   client. In-memory limiters do not hold across Lambda instances, so limits
   that matter (sessions per user, and the per-user limits below) are
-  enforced with DynamoDB. Each call that costs GitHub requests, KMS or agent
-  work has a fixed one-minute window per user, generous for a person using
-  the UI and tight for a script. A request over a limit gets 429 with
-  `Retry-After` and logs `request.rate_limited`; a request that fails still
-  counts. When the count cannot be written the request goes through: the
-  limits guard the service and must not stop it.
+  enforced with DynamoDB, in each env's own table: they are per user and
+  env, so someone who uses two envs has each env's allowance. Each call that
+  costs GitHub requests, KMS or agent work has a fixed one-minute window,
+  generous for a person using the UI and tight for a script. A request over
+  a limit gets 429 with `Retry-After` and logs `request.rate_limited`; a
+  request that fails still counts. When the count cannot be written the
+  request goes through: the limits guard the service and must not stop it.
 
-  | Call                      | Requests a minute           |
+  | Call                      | Requests a minute, per env  |
   | ------------------------- | --------------------------- |
   | List repositories         | 10 per user                 |
   | List a repository's files | 30 per user                 |
@@ -1287,10 +1305,10 @@ metadata:
 The UI shows the description in the file list and the file's header, links
 the docs, lists the expected keys first among the file's keys and marks the
 ones some document lacks, suggests them first in the seal form and warns,
-without refusing, when a new key is not among them. Invalid values are dropped: a key that cannot
-name a Secret value, a link that is not absolute http(s) or carries
-credentials. They come from the documents themselves, so they are reviewed
-with the file like any other change.
+without refusing, when a new key is not among them. Invalid values are
+dropped: a key that cannot name a Secret value, a link that is not absolute
+http(s) or carries credentials. They come from the documents themselves, so
+they are reviewed with the file like any other change.
 
 **Discovery.** A repository's SealedSecret files are found on the head of its
 default branch: the commit's tree is listed once, files whose name matches

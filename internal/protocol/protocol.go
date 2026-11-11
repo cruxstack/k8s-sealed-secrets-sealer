@@ -3,9 +3,9 @@
 // protocol change; see docs/design.md, section 5.
 //
 // Messages change compatibly: the control plane ignores fields it does not
-// know in what agents send, so a field can be added without breaking agents
-// or control planes of the previous version. A command payload is strict
-// instead: changing one is a new command type, such as seal.v2.
+// know in what agents send, and agents ignore them in responses, so either
+// side can add a field the other can do without. A command payload is
+// strict instead: changing one is a new command type, such as seal.v2.
 package protocol
 
 import (
@@ -81,9 +81,9 @@ const EnvHeader = "X-K8s-Sealed-Secrets-Sealer-Env"
 // CheckInIntervalHeader carries an agent's check-in interval, in whole
 // seconds, on each check-in. The control plane counts the agent healthy
 // for three intervals after a check-in. It is a header rather than a field
-// of CheckIn because control planes refuse check-ins with fields they do
-// not know, and those that predate it ignore the header; without it, the
-// agent is taken to check in every 15 seconds.
+// of CheckIn because earlier control planes refuse a check-in with a field
+// they do not know, but ignore a header; one that predates the header takes
+// the agent to check in every 15 seconds.
 const CheckInIntervalHeader = "X-K8s-Sealed-Secrets-Sealer-Check-In-Interval"
 
 // Check-in timing, shared by agents and the control plane.
