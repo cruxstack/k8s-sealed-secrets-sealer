@@ -22,27 +22,54 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
-// fakeServer is a minimal control plane: it issues numbered sessions and can
-// be told to reject the next check-in's session.
+// fakeServer is a minimal control plane: it issues numbered sessions,
+// renews them, and can be told to reject the next check-in's session.
 type fakeServer struct {
 	logins      atomic.Int32
+	renewals    atomic.Int32
 	checkins    atomic.Int32
 	rejectNext  atomic.Bool
 	lastToken   atomic.Value
 	expiresIn   atomic.Int64 // nanoseconds
 	lastSession atomic.Value
+	// renewStatus, when set, answers renewals with that status, as a
+	// control plane that predates them (400) or is failing does;
+	// loginStatus does the same for logins
+	renewStatus atomic.Int32
+	loginStatus atomic.Int32
 }
 
 func (f *fakeServer) handler(t *testing.T) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /agent/v1/session", func(w http.ResponseWriter, r *http.Request) {
 		var req protocol.SessionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Method != protocol.MethodK8sOIDC {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}
-		f.lastToken.Store(req.Token)
-		n := f.logins.Add(1)
+		var n int32
+		switch {
+		case req.Method == protocol.MethodRenew && f.renewStatus.Load() != 0:
+			w.WriteHeader(int(f.renewStatus.Load()))
+			_, _ = w.Write([]byte(`{"error":"unsupported login method"}`))
+			return
+		case req.Method == protocol.MethodRenew:
+			if r.Header.Get("Authorization") != "Bearer "+f.lastSession.Load().(string) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			n = 100 + f.renewals.Add(1)
+		case req.Method == protocol.MethodK8sOIDC && f.loginStatus.Load() != 0:
+			w.WriteHeader(int(f.loginStatus.Load()))
+			_, _ = w.Write([]byte(`{"error":"too many logins; try again shortly"}`))
+			return
+		case req.Method == protocol.MethodK8sOIDC:
+			f.lastToken.Store(req.Token)
+			n = f.logins.Add(1)
+		default:
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
 		session := "session-" + strconv.Itoa(int(n))
 		f.lastSession.Store(session)
 		_ = json.NewEncoder(w).Encode(protocol.SessionResponse{Token: session, ExpiresAt: time.Now().Add(time.Duration(f.expiresIn.Load())), AgentID: "use1-blue", Env: "dev"})
@@ -94,7 +121,7 @@ func TestClient_LogsInOnceAndReusesSession(t *testing.T) {
 	}
 }
 
-func TestClient_LogsInAgainWhenSessionRejectedOrExpiring(t *testing.T) {
+func TestClient_LogsInAgainWhenSessionRejected(t *testing.T) {
 	f := &fakeServer{}
 	f.expiresIn.Store(int64(15 * time.Minute))
 	srv := httptest.NewServer(f.handler(t))
@@ -108,20 +135,100 @@ func TestClient_LogsInAgainWhenSessionRejectedOrExpiring(t *testing.T) {
 	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
 		t.Fatalf("check-in after a rejected session: %v", err)
 	}
-	if f.logins.Load() != 2 {
-		t.Fatalf("logins = %d, want 2", f.logins.Load())
+	if f.logins.Load() != 2 || f.renewals.Load() != 0 {
+		t.Fatalf("logins = %d, renewals = %d; want 2 logins", f.logins.Load(), f.renewals.Load())
 	}
+}
 
-	// a session about to expire is renewed before use
+// A session about to expire is renewed with itself: an aws-sts login costs
+// the control plane a call to STS, which anyone can make it spend.
+func TestClient_RenewsASessionAboutToExpire(t *testing.T) {
+	f := &fakeServer{}
 	f.expiresIn.Store(int64(30 * time.Second))
-	c.dropSession(c.session)
-	for range 2 {
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	c := newClient(t, srv, "projected-token")
+
+	for range 3 {
 		if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if f.logins.Load() != 4 {
-		t.Fatalf("logins = %d, want 4", f.logins.Load())
+	// a login, then each check-in finds the session within a minute of its
+	// end and renews it
+	if f.logins.Load() != 1 || f.renewals.Load() != 2 || f.checkins.Load() != 3 {
+		t.Fatalf("logins = %d, renewals = %d, check-ins = %d", f.logins.Load(), f.renewals.Load(), f.checkins.Load())
+	}
+}
+
+// The control plane refuses to renew once the agent's last login is too
+// old; if logins are throttled just then, the session works while it lasts
+// and the agent logs in on a later call.
+func TestClient_KeepsASessionItCannotRenewWhileLoginsFail(t *testing.T) {
+	f := &fakeServer{}
+	f.expiresIn.Store(int64(30 * time.Second))
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	c := newClient(t, srv, "projected-token")
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatal(err)
+	}
+	f.renewStatus.Store(http.StatusUnauthorized)
+	f.loginStatus.Store(http.StatusTooManyRequests)
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatalf("check-in while logins are throttled: %v", err)
+	}
+	f.loginStatus.Store(0)
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+		t.Fatalf("check-in once logins work: %v", err)
+	}
+	if f.logins.Load() != 2 || f.checkins.Load() != 3 {
+		t.Fatalf("logins = %d, check-ins = %d", f.logins.Load(), f.checkins.Load())
+	}
+
+	// with no session left, a failed login fails the call
+	f.loginStatus.Store(http.StatusForbidden)
+	c.now = func() time.Time { return time.Now().Add(time.Minute) }
+	if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err == nil {
+		t.Fatal("check-in without a session succeeded")
+	}
+}
+
+func TestClient_LogsInWhenItCannotRenew(t *testing.T) {
+	cases := map[string]struct {
+		status int
+		// expired lets the session lapse before the check-in
+		expired bool
+		logins  int32
+	}{
+		"control plane that predates renewal": {status: http.StatusBadRequest, logins: 2},
+		"session refused":                     {status: http.StatusUnauthorized, logins: 2},
+		"session lapsed":                      {expired: true, logins: 2},
+		// the session still works, and the next call renews it
+		"control plane failing": {status: http.StatusServiceUnavailable, logins: 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeServer{}
+			f.expiresIn.Store(int64(30 * time.Second))
+			srv := httptest.NewServer(f.handler(t))
+			defer srv.Close()
+			c := newClient(t, srv, "projected-token")
+			if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+				t.Fatal(err)
+			}
+			f.renewStatus.Store(int32(tc.status))
+			if tc.expired {
+				c.now = func() time.Time { return time.Now().Add(time.Minute) }
+			}
+			if _, err := c.CheckIn(context.Background(), protocol.CheckIn{}); err != nil {
+				t.Fatalf("check-in: %v", err)
+			}
+			if f.logins.Load() != tc.logins || f.renewals.Load() != 0 || f.checkins.Load() != 2 {
+				t.Fatalf("logins = %d, renewals = %d, check-ins = %d; want %d logins",
+					f.logins.Load(), f.renewals.Load(), f.checkins.Load(), tc.logins)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,7 @@ package agentauth
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -89,7 +90,7 @@ func newAWSHarness(t *testing.T, roleID string) *awsHarness {
 	return newLimitedAWSHarness(t, roleID, nil)
 }
 
-func newLimitedAWSHarness(t *testing.T, roleID string, limit *rate.Limiter) *awsHarness {
+func newLimitedAWSHarness(t *testing.T, roleID string, limit *STSLimiter) *awsHarness {
 	t.Helper()
 	sts := &fakeSTS{creds: agentCreds, arn: roleARN, userID: roleUserID}
 	srv := httptest.NewTLSServer(sts)
@@ -219,7 +220,7 @@ func copyLogin(req protocol.SessionRequest) protocol.SessionRequest {
 
 func TestAWSVerifier_LimitsSTSCalls(t *testing.T) {
 	// two calls, and none more until tokens are added
-	h := newLimitedAWSHarness(t, "", rate.NewLimiter(0, 2))
+	h := newLimitedAWSHarness(t, "", newSTSLimiter(rate.NewLimiter(0, 2), time.Hour, 10))
 	ctx := context.Background()
 	for i := range 2 {
 		if _, err := h.verifier.VerifyLogin(ctx, h.signed(t, awsAudience, time.Now().Add(-time.Duration(i)*time.Second), agentCreds)); err != nil {
@@ -236,6 +237,128 @@ func TestAWSVerifier_LimitsSTSCalls(t *testing.T) {
 	}
 	if n := h.sts.calls.Load(); n != 2 {
 		t.Errorf("STS calls = %d, want 2", n)
+	}
+}
+
+// forged builds a login that passes every local check with no AWS
+// credentials: the public audience, a fresh date and a random signature.
+func forged(t *testing.T, h *awsHarness, now time.Time) protocol.SessionRequest {
+	t.Helper()
+	sig := make([]byte, 32)
+	_, _ = rand.Read(sig)
+	return protocol.SessionRequest{
+		Method: protocol.MethodAWSSTS,
+		AWS: &protocol.SignedRequest{
+			URL:  "https://" + h.srv.Listener.Addr().String() + "/",
+			Body: protocol.AWSGetCallerIdentityBody,
+			Headers: map[string]string{
+				"Authorization": "AWS4-HMAC-SHA256 Credential=AKIAFORGED/" + now.UTC().Format("20060102") +
+					"/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;" +
+					"x-k8s-sealed-secrets-sealer-audience, Signature=" + hex.EncodeToString(sig),
+				"X-Amz-Date":               now.UTC().Format("20060102T150405Z"),
+				"Content-Type":             "application/x-www-form-urlencoded; charset=utf-8",
+				protocol.AWSAudienceHeader: awsAudience,
+			},
+		},
+	}
+}
+
+// Anyone can send a login that STS must check. One source sending them
+// must not use up the calls the agents need, and an agent's own logins
+// must not use up its address's.
+func TestAWSVerifier_LimitsSTSCallsPerSource(t *testing.T) {
+	h := newLimitedAWSHarness(t, "", NewSTSLimiter())
+	attacker := WithSource(context.Background(), "198.51.100.7:40000")
+	agentAddr := WithSource(context.Background(), "203.0.113.9:50000")
+
+	// the attacker's forged logins: refused by STS, then before it
+	refused := 0
+	for range 200 {
+		_, err := h.verifier.VerifyLogin(attacker, forged(t, h, time.Now()))
+		if errors.Is(err, ErrTooManyLogins) {
+			refused++
+		}
+	}
+	if calls := h.sts.calls.Load(); calls != sourceSTSBurst || refused != 200-sourceSTSBurst {
+		t.Fatalf("STS calls = %d, refused = %d; want %d calls", calls, refused, sourceSTSBurst)
+	}
+	// the agent, from its own address, still logs in, again and again
+	signedAt := time.Now()
+	for i := range 2 * sourceSTSBurst {
+		if _, err := h.verifier.VerifyLogin(agentAddr, h.signed(t, awsAudience, signedAt.Add(-time.Duration(i)*time.Second), agentCreds)); err != nil {
+			t.Fatalf("agent login %d: %v", i, err)
+		}
+	}
+	// an IPv6 attacker is one source for its whole /64
+	for i := range 2 * sourceSTSBurst {
+		ctx := WithSource(context.Background(), fmt.Sprintf("[2001:db8:1:2::%x]:443", i+1))
+		_, _ = h.verifier.VerifyLogin(ctx, forged(t, h, time.Now()))
+	}
+	if calls := h.sts.calls.Load(); calls != 2*sourceSTSBurst+2*sourceSTSBurst {
+		t.Fatalf("STS calls = %d after the IPv6 /64's forged logins", calls)
+	}
+}
+
+func TestSource(t *testing.T) {
+	cases := map[string]string{
+		"192.0.2.1:1234":               "192.0.2.1",
+		"192.0.2.1":                    "192.0.2.1",
+		"[::ffff:192.0.2.1]:80":        "192.0.2.1",
+		"[2001:db8:1:2:3:4:5:6]:443":   "2001:db8:1:2::/64",
+		"[2001:db8:1:2:ffff::1]:65535": "2001:db8:1:2::/64",
+		"":                             "",
+		"not an address":               "",
+		// a proxy's, most likely, which every agent would share
+		"10.0.3.7:5000":      "",
+		"172.16.0.1:5000":    "",
+		"192.168.1.1:5000":   "",
+		"127.0.0.1:5000":     "",
+		"[::1]:5000":         "",
+		"[fd00::1]:5000":     "",
+		"[fe80::1%eth0]:443": "",
+	}
+	for in, want := range cases {
+		if got := source(in); got != want {
+			t.Errorf("source(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSTSLimiter_ForgetsSourcesWithEveryCallLeft(t *testing.T) {
+	l := newSTSLimiter(rate.NewLimiter(rate.Inf, 0), time.Second, 2)
+	now := time.Now()
+	for i := range maxSTSSources - 1 {
+		if err := l.take(fmt.Sprintf("198.18.%d.%d", i/256, i%256), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	busy := "192.0.2.1"
+	for range 2 {
+		if err := l.take(busy, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a second on, the others have every call back and are forgotten; the
+	// busy source has one of its two back and is kept
+	later := now.Add(time.Second)
+	if err := l.take("192.0.2.2", later); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(l.sources); n != 2 {
+		t.Fatalf("sources = %d, want the two still counting", n)
+	}
+	if err := l.take(busy, later); err != nil {
+		t.Fatalf("busy source's call back = %v", err)
+	}
+	if err := l.take(busy, later); !errors.Is(err, ErrTooManyLogins) {
+		t.Fatalf("busy source = %v, want ErrTooManyLogins", err)
+	}
+	// with none to forget, every source is
+	for i := range maxSTSSources {
+		_ = l.take(fmt.Sprintf("198.19.%d.%d", i/256, i%256), later)
+	}
+	if n := len(l.sources); n > maxSTSSources {
+		t.Fatalf("sources = %d, past the bound", n)
 	}
 }
 

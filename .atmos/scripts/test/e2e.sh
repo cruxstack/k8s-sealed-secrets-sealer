@@ -174,7 +174,10 @@ check "dave (not an admin) signs in, cannot read the fleet, and sees whether sea
 status="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/prod/status")"
 jq -e '.env == "prod" and .sealing == "unavailable" and .clusters.total == 1' <<<"$status" >/dev/null \
   || die "prod's status for alice: ${status}"
-prod_files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/prod/repos/example-org/apps/files")"
+# calls that cost GitHub requests must come from the UI's scripts, which
+# send X-Requested-With
+page=(-H 'X-Requested-With: XMLHttpRequest')
+prod_files="$(curl -sS "${page[@]}" -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/prod/repos/example-org/apps/files")"
 jq -e '
   (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/reports/sealed-secret.yaml"]
   and (.files[0].documents | map(.namespace)) == ["billing"]
@@ -182,12 +185,12 @@ jq -e '
 check "prod is for its team only, lists prod's SealedSecrets, and has no agent to seal with here"
 
 # --- repositories, through the GitHub App, limited to alice's own access ---
-repos="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos")"
+repos="$(curl -sS "${page[@]}" -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos")"
 [[ "$(jq -c '[.repositories[] | .full_name + ":" + .access]' <<<"$repos")" == '["example-org/apps:write","example-org/platform:read"]' ]] \
   || die "alice's repositories: ${repos}"
 check "alice sees only the repositories she can read, with her access"
 
-files="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/apps/files")"
+files="$(curl -sS "${page[@]}" -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/apps/files")"
 jq -e '
   (.files | map(.path)) == ["deploy/billing/sealed-secret.yaml", "deploy/legacy/sealed-secret.yaml", "deploy/search/sealed-secret.yaml", "deploy/worker/sealed-secret.yaml"]
   and (.files[0].documents | map(.namespace)) == ["dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"]
@@ -195,7 +198,7 @@ jq -e '
 ' <<<"$files" >/dev/null || die "SealedSecret discovery in example-org/apps: ${files}"
 check "discovery finds the dev SealedSecrets in example-org/apps, and flags cluster-wide scope"
 
-restricted="$(curl -sS -o /dev/null -w '%{http_code}' -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/restricted/files")"
+restricted="$(curl -sS -o /dev/null -w '%{http_code}' "${page[@]}" -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/repos/example-org/restricted/files")"
 [[ "$restricted" == 404 ]] || die "alice read a repository she has no access to: ${restricted}"
 check "a repository alice cannot read is not found"
 
@@ -326,7 +329,7 @@ csrf="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/auth/me" | 
 # as_alice <method> <path> [json body]: prints "<status> <body>"
 as_alice() {
   local args=(-sS -o "${work}/body" -w '%{http_code}' -X "$1" -b "${work}/cookies-alice"
-    -H 'Content-Type: application/json' -H "X-CSRF-Token: ${csrf}")
+    -H 'Content-Type: application/json' -H "X-CSRF-Token: ${csrf}" "${page[@]}")
   [[ -n "${3:-}" ]] && args+=(--data "$3")
   printf '%s %s' "$(curl "${args[@]}" "${control_plane}$2")" "$(/bin/cat "${work}/body")"
 }

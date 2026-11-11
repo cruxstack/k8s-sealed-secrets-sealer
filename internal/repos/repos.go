@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
@@ -183,6 +184,9 @@ type RepoList struct {
 	// Incomplete is set when some repositories are left out because their
 	// permission could not be checked in time, or GitHub failed.
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Lookups counts the permission lookups the list made on GitHub, for
+	// rate limits: those the cache answered cost nothing.
+	Lookups int `json:"-"`
 }
 
 // List returns the repositories the App is installed on that the user can
@@ -193,7 +197,8 @@ type RepoList struct {
 // only for what was not checked lately. Checks start only while a quarter
 // of the time ctx allows is left, so the list goes out in time; a
 // repository not checked by then, or whose check failed, is left out and
-// the list marked incomplete, and a later list checks it.
+// the list marked incomplete, and a later list checks it. Lookups is set
+// even when the list fails.
 func (s *Service) List(ctx context.Context, user *userauth.User) (RepoList, error) {
 	if user == nil || user.ID == 0 || user.Login == "" {
 		return RepoList{}, errors.New("failed to list repositories: no signed-in user")
@@ -223,10 +228,12 @@ func (s *Service) List(ctx context.Context, user *userauth.User) (RepoList, erro
 	access := make([]Access, len(candidates))
 	errs := make([]error, len(candidates))
 	checked := make([]bool, len(candidates))
+	var lookups atomic.Int32
 	forEach(starting, len(candidates), func(i int) {
-		access[i], errs[i] = s.access(ctx, user, candidates[i].Owner, candidates[i].Name, s.listPermissionTTL())
+		access[i], errs[i] = s.access(ctx, user, candidates[i].Owner, candidates[i].Name, s.listPermissionTTL(), &lookups)
 		checked[i] = true
 	})
+	out.Lookups = int(lookups.Load())
 
 	var failure error
 	unchecked := 0
@@ -252,7 +259,7 @@ func (s *Service) List(ctx context.Context, user *userauth.User) (RepoList, erro
 	}
 	// nothing to show, and GitHub failing is why: say so instead
 	if len(out.Repositories) == 0 && failure != nil {
-		return RepoList{}, fmt.Errorf("failed to check repository permissions: %w", failure)
+		return RepoList{Lookups: out.Lookups}, fmt.Errorf("failed to check repository permissions: %w", failure)
 	}
 	sort.Slice(out.Repositories, func(i, j int) bool { return out.Repositories[i].FullName < out.Repositories[j].FullName })
 	return out, nil
@@ -274,13 +281,17 @@ func (s *Service) installed(ctx context.Context) ([]githubapp.Repository, error)
 		repos []githubapp.Repository
 		err   error
 	}
-	l, _ := once(s.cache, "installed", func() (listing, error) {
+	l, err := once(ctx, s.cache, "installed", func(ctx context.Context) (listing, error) {
 		all, err := s.gh.Repositories(ctx)
 		if err == nil {
 			s.cache.installed.put("", all, s.now().Add(installedTTL))
 		}
 		return listing{all, err}, nil
 	})
+	if err != nil {
+		// the caller's time ran out before the list came
+		return nil, err
+	}
 	return l.repos, l.err
 }
 
@@ -302,7 +313,7 @@ func (s *Service) Require(ctx context.Context, user *userauth.User, owner, name 
 	if !githubapp.ValidName(owner) || !githubapp.ValidName(name) {
 		return Access{}, ErrNotFound
 	}
-	a, err := s.access(ctx, user, owner, name, s.permissionTTL)
+	a, err := s.access(ctx, user, owner, name, s.permissionTTL, nil)
 	if err != nil {
 		return Access{}, err
 	}
@@ -317,8 +328,9 @@ func (s *Service) Require(ctx context.Context, user *userauth.User, owner, name 
 
 // access returns the user's access, from the cache when GitHub said it
 // within maxAge. The answer must be for the same GitHub user ID: logins can
-// change hands.
-func (s *Service) access(ctx context.Context, user *userauth.User, owner, name string, maxAge time.Duration) (Access, error) {
+// change hands. A lookup on GitHub is counted in lookups, when given,
+// unless another caller's was shared.
+func (s *Service) access(ctx context.Context, user *userauth.User, owner, name string, maxAge time.Duration, lookups *atomic.Int32) (Access, error) {
 	if user == nil || user.ID == 0 || user.Login == "" {
 		return Access{}, errors.New("failed to check repository permission: no signed-in user")
 	}
@@ -327,7 +339,10 @@ func (s *Service) access(ctx context.Context, user *userauth.User, owner, name s
 	if p, ok := s.cache.permissions.get(key, now); ok && now.Sub(p.checked) < maxAge {
 		return p.access, nil
 	}
-	return once(s.cache, "permission|"+key, func() (Access, error) {
+	return once(ctx, s.cache, "permission|"+key, func(ctx context.Context) (Access, error) {
+		if lookups != nil {
+			lookups.Add(1)
+		}
 		p, err := s.gh.Permission(ctx, owner, name, user.Login)
 		if errors.Is(err, githubapp.ErrNotFound) {
 			// the App cannot see the repository
@@ -498,7 +513,7 @@ func (s *Service) details(ctx context.Context, owner, name string) (githubapp.Re
 	if r, ok := s.cache.repos.get(key, s.now()); ok {
 		return r, nil
 	}
-	return once(s.cache, "repository|"+key, func() (githubapp.Repository, error) {
+	return once(ctx, s.cache, "repository|"+key, func(ctx context.Context) (githubapp.Repository, error) {
 		r, err := s.gh.Repository(ctx, owner, name)
 		if err == nil {
 			s.cache.repos.put(key, r, s.now().Add(repositoryTTL))
@@ -518,7 +533,11 @@ func (s *Service) snapshot(ctx context.Context, r githubapp.Repository, commit s
 	if snap, ok := s.cache.snapshots.get(key, s.now()); ok {
 		return snap, nil
 	}
-	return once(s.cache, "snapshot|"+key, func() (snapshot, error) {
+	return once(ctx, s.cache, "snapshot|"+key, func(ctx context.Context) (snapshot, error) {
+		// a call that ended just before this one started may have cached it
+		if snap, ok := s.cache.snapshots.get(key, s.now()); ok {
+			return snap, nil
+		}
 		tree, err := s.gh.Tree(ctx, r.Owner, r.Name, commit)
 		if errors.Is(err, githubapp.ErrNotFound) {
 			return snapshot{}, ErrCommitNotFound
@@ -580,7 +599,11 @@ func (s *Service) parse(ctx context.Context, owner, name, blob string) ([]manife
 	if p, ok := s.cache.parsed.get(key, s.now()); ok {
 		return p.docs, p.err
 	}
-	p, err := once(s.cache, "blob|"+key, func() (parsedBlob, error) {
+	p, err := once(ctx, s.cache, "blob|"+key, func(ctx context.Context) (parsedBlob, error) {
+		// a call that ended just before this one started may have cached it
+		if p, ok := s.cache.parsed.get(key, s.now()); ok {
+			return p, nil
+		}
 		content, err := s.gh.Blob(ctx, owner, name, blob)
 		if err != nil {
 			// not cached: a fetch can succeed next time

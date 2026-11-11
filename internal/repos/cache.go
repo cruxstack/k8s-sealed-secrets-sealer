@@ -2,6 +2,7 @@ package repos
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 
@@ -55,12 +56,31 @@ func NewCache() *Cache {
 	}
 }
 
+// sharedCallTimeout bounds a GitHub call that callers share: longer than
+// any request waits for one, so it outlives the caller that started it, but
+// not for ever.
+const sharedCallTimeout = 30 * time.Second
+
 // once runs fn for the first of concurrent callers with the same key; the
-// others wait for its result. fn runs with the first caller's context.
-func once[T any](c *Cache, key string, fn func() (T, error)) (T, error) {
-	v, err, _ := c.calls.Do(key, func() (any, error) { return fn() })
-	out, _ := v.(T)
-	return out, err
+// others wait for its result. fn runs apart from the callers' contexts (with
+// their values), under its own time limit, so one caller giving up or
+// running out of time does not fail the others. Each caller waits only as
+// long as its own context lets it.
+func once[T any](ctx context.Context, c *Cache, key string, fn func(context.Context) (T, error)) (T, error) {
+	shared := context.WithoutCancel(ctx)
+	results := c.calls.DoChan(key, func() (any, error) {
+		ctx, cancel := context.WithTimeout(shared, sharedCallTimeout)
+		defer cancel()
+		return fn(ctx)
+	})
+	select {
+	case res := <-results:
+		out, _ := res.Val.(T)
+		return out, res.Err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
 }
 
 // lru is a map of at most max entries that drops the least recently used

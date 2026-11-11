@@ -43,6 +43,20 @@ func (f fakeVerifier) VerifyLogin(_ context.Context, req protocol.SessionRequest
 	return nil, agentauth.ErrUnauthorized
 }
 
+// agentSession issues a session to a registered agent, as a login would.
+func agentSession(t *testing.T, sessions *agentauth.Sessions, reg *registry.Registry, id string) string {
+	t.Helper()
+	a, ok := reg.Agent(id)
+	if !ok {
+		t.Fatalf("no agent %q", id)
+	}
+	token, _, err := sessions.Issue(id, reg.Binding(a), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
 type harness struct {
 	t     *testing.T
 	h     http.Handler
@@ -202,6 +216,132 @@ func TestSession_Throttled(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "event=agent.login_throttled") {
 		t.Fatalf("logs:\n%s", logs)
+	}
+}
+
+// sourceVerifier records the source a login came from.
+type sourceVerifier struct{ seen *string }
+
+func (v sourceVerifier) VerifyLogin(ctx context.Context, _ protocol.SessionRequest) (*registry.Agent, error) {
+	*v.seen = agentauth.SourceFrom(ctx)
+	return nil, agentauth.ErrUnauthorized
+}
+
+// The STS call limit counts per source, so logins carry their address.
+func TestSession_PassesItsSourceToTheVerifier(t *testing.T) {
+	sessions, _ := agentauth.NewSessions([]byte("0123456789abcdef0123456789abcdef"), "https://sealer.dev.example.com", "dev", nil)
+	var seen string
+	srv := New(Options{
+		Env: "dev", Registry: &registry.Registry{}, Sessions: sessions, Store: store.NewMemory(),
+		Logins: map[string]LoginVerifier{protocol.MethodAWSSTS: sourceVerifier{seen: &seen}},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/agent/v1/session", strings.NewReader(`{"method":"aws-sts","aws":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.7:40000"
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	if seen != "198.51.100.7" {
+		t.Fatalf("source = %q", seen)
+	}
+}
+
+// An agent renews its session with the session itself, before it expires,
+// so it needs its identity (and, for aws-sts, a call to STS) only when it
+// starts or its session lapsed.
+func TestSession_Renews(t *testing.T) {
+	rh := newReloadHarness(t, parseRegistry(t, use1Agent+use2Agent))
+	session, _ := rh.login("use1-blue")
+	rh.advance(10 * time.Minute)
+	renewed, code := rh.renew(session)
+	if code != http.StatusOK || renewed == "" || renewed == session {
+		t.Fatalf("renew = %d %q", code, renewed)
+	}
+	if !strings.Contains(rh.logs.String(), "event=agent.session_renewed") {
+		t.Errorf("the renewal was not logged:\n%s", rh.logs)
+	}
+	// the renewed session lasts its own 15 minutes
+	rh.advance(10 * time.Minute)
+	if code := rh.checkIn(renewed); code != http.StatusOK {
+		t.Fatalf("check-in with the renewed session = %d", code)
+	}
+	if code := rh.checkIn(session); code != http.StatusUnauthorized {
+		t.Fatalf("check-in with the old session, expired = %d", code)
+	}
+
+	// a session that lapsed, none at all, or one of another env cannot be
+	// renewed; neither can a removed agent's
+	if _, code := rh.renew(session); code != http.StatusUnauthorized {
+		t.Fatalf("renewing an expired session = %d", code)
+	}
+	if _, code := rh.renew(""); code != http.StatusUnauthorized {
+		t.Fatalf("renewing without a session = %d", code)
+	}
+	if _, code := rh.renew(otherEnvSession(t)); code != http.StatusUnauthorized {
+		t.Fatalf("renewing another env's session = %d", code)
+	}
+	other, _ := rh.login("use2-blue")
+	rh.next = parseRegistry(t, use1Agent)
+	rh.advance(RegistryReloadInterval)
+	rh.checkIn(renewed)
+	rh.settle()
+	if _, code := rh.renew(other); code != http.StatusUnauthorized {
+		t.Fatalf("renewing a removed agent's session = %d", code)
+	}
+}
+
+// Renewal carries the time the agent last logged in with its identity: a
+// session taken from an agent cannot be renewed for ever, and the agent
+// proves its identity again once that is agentauth.RenewalLimit old.
+func TestSession_RenewsForALimitedTimeAfterALogin(t *testing.T) {
+	rh := newReloadHarness(t, parseRegistry(t, use1Agent))
+	session, _ := rh.login("use1-blue")
+	loggedIn := rh.now()
+	// renewed a minute before each session ends, as agents do
+	renewals := 0
+	for rh.now().Add(agentauth.SessionTTL).Sub(loggedIn) < agentauth.RenewalLimit {
+		rh.advance(agentauth.SessionTTL - time.Minute)
+		renewed, code := rh.renew(session)
+		if code != http.StatusOK {
+			t.Fatalf("renewal %d, %s after the login = %d", renewals, rh.now().Sub(loggedIn), code)
+		}
+		session = renewed
+		renewals++
+	}
+	rh.advance(agentauth.SessionTTL - time.Minute)
+	if _, code := rh.renew(session); code != http.StatusUnauthorized {
+		t.Fatalf("renewal %s after the login = %d, want 401", rh.now().Sub(loggedIn), code)
+	}
+	// the session itself still works until it ends, and a login starts
+	// afresh
+	if code := rh.checkIn(session); code != http.StatusOK {
+		t.Fatalf("check-in with the last session = %d", code)
+	}
+	fresh, code := rh.login("use1-blue")
+	if code != http.StatusOK {
+		t.Fatalf("login = %d", code)
+	}
+	rh.advance(agentauth.SessionTTL - time.Minute)
+	if _, code := rh.renew(fresh); code != http.StatusOK {
+		t.Fatalf("renewing the new login's session = %d", code)
+	}
+	if renewals < 40 {
+		t.Fatalf("only %d renewals before the limit", renewals)
+	}
+}
+
+// Sessions issued before they carried the agent's binding are refused, so
+// agents log in again once after the upgrade.
+func TestSession_RefusesSessionsWithoutABinding(t *testing.T) {
+	rh := newReloadHarness(t, parseRegistry(t, use1Agent))
+	legacy, _, err := rh.srv.sessions.Issue("use1-blue", "", rh.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rh.checkIn(legacy); code != http.StatusUnauthorized {
+		t.Fatalf("check-in = %d, want 401", code)
+	}
+	if _, code := rh.renew(legacy); code != http.StatusUnauthorized {
+		t.Fatalf("renew = %d, want 401", code)
 	}
 }
 
@@ -375,7 +515,7 @@ func otherEnvSession(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := s.Issue("use1-blue")
+	token, _, err := s.Issue("use1-blue", "", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +617,7 @@ agents:
 	if rec := get("/api/v1/fleet", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("fleet without a session = %d", rec.Code)
 	}
-	agentSession, _, _ := agentSessions.Issue("use1-blue")
+	agentSession, _, _ := agentSessions.Issue("use1-blue", "", time.Now())
 	if rec := get("/api/v1/fleet", agentSession); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("fleet with an agent session as cookie = %d", rec.Code)
 	}

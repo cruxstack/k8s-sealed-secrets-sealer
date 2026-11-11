@@ -323,17 +323,17 @@ func (d *Dynamo) PutReplayIfAbsent(ctx context.Context, key string, expires time
 	return true, nil
 }
 
-func (d *Dynamo) CountRequest(ctx context.Context, key string, limit int, windowEnd time.Time) (bool, error) {
+func (d *Dynamo) CountRequest(ctx context.Context, key string, n, limit int, windowEnd time.Time) (bool, error) {
 	end := strconv.FormatInt(windowEnd.Unix(), 10)
 	// one item per window; "count" is a reserved word
 	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                &d.table,
 		Key:                      itemKey(ratePrefix+key+"#"+end, skRate),
-		UpdateExpression:         aws.String("ADD #n :one SET " + attrExpiresAt + " = :ttl"),
+		UpdateExpression:         aws.String("ADD #n :n SET " + attrExpiresAt + " = :ttl"),
 		ConditionExpression:      aws.String("attribute_not_exists(#n) OR #n < :limit"),
 		ExpressionAttributeNames: map[string]string{"#n": "requests"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":one":   &types.AttributeValueMemberN{Value: "1"},
+			":n":     &types.AttributeValueMemberN{Value: strconv.Itoa(n)},
 			":limit": &types.AttributeValueMemberN{Value: strconv.Itoa(limit)},
 			":ttl":   &types.AttributeValueMemberN{Value: end},
 		},

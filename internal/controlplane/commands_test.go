@@ -90,10 +90,7 @@ agents:
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := sessions.Issue("a")
-	if err != nil {
-		t.Fatal(err)
-	}
+	token := agentSession(t, sessions, reg, "a")
 	ph := &pollHarness{
 		t: t, store: &watchedStore{Memory: store.NewMemory()}, token: token, logs: &bytes.Buffer{},
 		entropy: ulid.Monotonic(rand.Reader, 0),

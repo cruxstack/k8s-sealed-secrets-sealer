@@ -5,6 +5,8 @@
 package registry
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -301,6 +303,32 @@ func (r *Registry) Identities() map[string]string {
 		}
 	}
 	return out
+}
+
+// Binding identifies what an agent's sessions are issued for: its ID, its
+// identity (an IAM role, or an issuer's URL and a service account) and its
+// capabilities. Sessions carry it, so a registry change that gives the ID
+// another identity or other capabilities ends the sessions issued before.
+func (r *Registry) Binding(a *Agent) string {
+	parts := []string{a.ID}
+	switch {
+	case a.Identity.AWS != nil:
+		role, _ := ParseRoleARN(a.Identity.AWS.RoleARN)
+		parts = append(parts, "aws", role.Partition, role.Account, role.Name, a.Identity.AWS.RoleID)
+	case a.Identity.K8s != nil:
+		issuer := ""
+		for _, is := range r.Issuers {
+			if is.Name == a.Identity.K8s.Issuer {
+				issuer = is.URL
+			}
+		}
+		parts = append(parts, "k8s", issuer, a.Identity.K8s.Subject)
+	}
+	capabilities := slices.Clone(a.Capabilities)
+	slices.Sort(capabilities)
+	parts = append(parts, strings.Join(capabilities, ","))
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:16])
 }
 
 // SharedIdentities describes each identity that both registries register,

@@ -75,6 +75,7 @@ func getAs(t *testing.T, h http.Handler, userSessions *userauth.Sessions) func(s
 	return func(path string, u *userauth.User) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		if u != nil {
 			token, _, _ := userSessions.Issue(*u, userauth.Grants{"dev": false})
 			req.AddCookie(&http.Cookie{Name: "sealer_session", Value: token})

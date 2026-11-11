@@ -41,7 +41,10 @@ func body(t *testing.T, resp events.APIGatewayV2HTTPResponse) []byte {
 func TestInvoke_PassesTheRequestAndResponseThrough(t *testing.T) {
 	type request struct {
 		Method, Path, RawPath, Query, Host, Remote, CSRF, Cookie, Body string
-		Length                                                         int64
+		// the control plane limits GitHub calls per source address and
+		// per user, and refuses GETs another site started
+		FetchSite, RequestedWith string
+		Length                   int64
 	}
 	var seen request
 	h := &handler{logger: slog.New(slog.DiscardHandler), next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +52,7 @@ func TestInvoke_PassesTheRequestAndResponseThrough(t *testing.T) {
 		seen.Method, seen.Path, seen.RawPath, seen.Query = r.Method, r.URL.Path, r.URL.RawPath, r.URL.RawQuery
 		seen.Host, seen.Remote, seen.CSRF = r.Host, r.RemoteAddr, r.Header.Get("X-CSRF-Token")
 		seen.Cookie, seen.Body, seen.Length = r.Header.Get("Cookie"), string(b), r.ContentLength
+		seen.FetchSite, seen.RequestedWith = r.Header.Get("Sec-Fetch-Site"), r.Header.Get("X-Requested-With")
 		http.SetCookie(w, &http.Cookie{Name: "a", Value: "1"})
 		http.SetCookie(w, &http.Cookie{Name: "b", Value: "2"})
 		w.Header().Add("Vary", "Cookie")
@@ -60,7 +64,10 @@ func TestInvoke_PassesTheRequestAndResponseThrough(t *testing.T) {
 
 	e := event(http.MethodPost, "/api/v1/repos/example-org/apps/files%2Fx")
 	e.RawQueryString = "commit=abc&x=1"
-	e.Headers = map[string]string{"host": "sealer.example.com", "x-csrf-token": "token", "content-type": "application/json"}
+	e.Headers = map[string]string{
+		"host": "sealer.example.com", "x-csrf-token": "token", "content-type": "application/json",
+		"sec-fetch-site": "same-origin", "x-requested-with": "XMLHttpRequest",
+	}
 	e.Cookies = []string{"sealer_session=s", "other=o"}
 	e.Body = base64.StdEncoding.EncodeToString([]byte(`{"value":"é"}`))
 	e.IsBase64Encoded = true
@@ -73,6 +80,7 @@ func TestInvoke_PassesTheRequestAndResponseThrough(t *testing.T) {
 		Method: http.MethodPost, Path: "/api/v1/repos/example-org/apps/files/x", RawPath: "/api/v1/repos/example-org/apps/files%2Fx",
 		Query: "commit=abc&x=1", Host: "sealer.example.com", Remote: "203.0.113.7:0", CSRF: "token",
 		Cookie: "sealer_session=s; other=o", Body: `{"value":"é"}`, Length: 14,
+		FetchSite: "same-origin", RequestedWith: "XMLHttpRequest",
 	}
 	if seen != want {
 		t.Fatalf("request seen:\n%+v\nwant:\n%+v", seen, want)

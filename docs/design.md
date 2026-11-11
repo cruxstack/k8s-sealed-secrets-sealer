@@ -203,10 +203,18 @@ plane:
    the record outlives the signature's validity window.
 
 Anyone can send a request that passes the first two steps, so calls to STS
-are limited per env and process: a burst of 100, then one a second. That
-lets a whole fleet log in at once after a restart, while each agent logs in
-only every 14 minutes. Past the limit a login gets 429, logged as
-`agent.login_throttled`, and the agent tries again later.
+are limited per env and process. Each source address (an IPv6 address by
+its /64) may make 20, then one every 5 seconds, so one source cannot use up
+the calls; a login that succeeds gives its source's call back, so agents
+behind one NAT gateway do not use up theirs. Overall there is a burst of
+100, then one a second, which lets a whole fleet log in at once after a
+restart. Agents renew their sessions without STS (below), so they call it
+when they start or their session lapsed, and twice a day. Past a limit a
+login gets 429, logged as `agent.login_throttled`, and the agent tries
+again later. The address is the one the control plane sees: on Lambda, API
+Gateway's source IP, which is CloudFront's when CloudFront is in front. A
+private address, such as a load balancer's in front of a container, is one
+every agent would share, so it has only the overall limit.
 
 STS reports an assumed role without the role's path, so a role is matched by
 partition, account and name, which IAM keeps unique per account. A registry
@@ -230,17 +238,37 @@ unknown key. This mode is used locally and by anyone running outside AWS.
 [docs/deployment.md](deployment.md) shows the registry for both modes.
 
 **Registry changes.** A registry in a file or an SSM parameter is read
-again about once a minute, on a request rather than a timer (a Lambda
-instance is frozen between requests). A change takes effect for logins,
-sessions and the fleet at once, so removing an agent revokes it within
-about a minute, without a restart. A registry that cannot be read or is
-invalid is ignored: the one in force stays, and `registry.reload_failed` is
-logged. A registry given inline in an environment variable changes only
-with a restart.
+again about once a minute, with the JWKS and CA files it names: a change
+to any of them is a change of the registry. The read starts on a request
+rather than a timer (a Lambda instance is frozen between requests) and
+runs beside it, never in a request's time, which stays the handler's own;
+requests use the registry in force until the read is done, within 5
+seconds. On Lambda, a read still running when its request ends is frozen
+with the instance and goes on with its next request; one thawed after its
+time ran out is started again. A change takes effect for logins, sessions
+and the fleet at once, so removing an agent revokes it within about a
+minute, without a restart. A registry that cannot be read or is invalid is
+ignored: the one in force stays, and `registry.reload_failed` is logged. A
+registry given inline in an environment variable changes only with a
+restart.
 
 In both modes a successful login returns a short-lived agent session token
-(15 minutes), scoped to the agent API and bound to the agent ID. Every other
-agent call carries it.
+(15 minutes), scoped to the agent API and bound to the agent as the
+registry has it: its ID, its identity and its capabilities, as a hash.
+Every other agent call carries it, and is refused once the registry no
+longer has the agent that way, so a registry change that gives an ID
+another identity or more capabilities ends its sessions. A minute before
+its session ends, the agent renews it with itself
+(`POST /agent/v1/session` with method `renew` and the session as its bearer
+token): no identity is sent and nothing is asked of STS or an issuer. A
+session also carries when the agent last logged in with its identity, and
+renewal carries that over; once it is 12 hours old, renewal is refused. So
+a session taken from an agent lasts 12 hours at most, and each agent proves
+its identity twice a day: for aws-sts two STS calls, far inside the limits
+above, and few moments for someone emptying them to catch it at. The agent
+logs in with its identity when it starts, when its session lapsed, or when
+the control plane refuses to renew it, as one that predates renewal does.
+If that login is throttled, it goes on with the session while it lasts.
 
 ```mermaid
 sequenceDiagram
@@ -268,6 +296,10 @@ sequenceDiagram
     A->>CP: POST /agent/v1/checkin (session token, key set)
     CP-->>A: 200
   end
+  loop every 14 minutes
+    A->>CP: POST /agent/v1/session (renew, session token)
+    CP-->>A: new agent session token (15 minutes)
+  end
 ```
 
 ## 5. Command protocol
@@ -276,7 +308,7 @@ The control plane never connects to an agent. Agents call:
 
 | Call                                   | Purpose                             |
 | -------------------------------------- | ----------------------------------- |
-| `POST /agent/v1/session`               | Log in (section 4).                 |
+| `POST /agent/v1/session`               | Log in, or renew (section 4).       |
 | `POST /agent/v1/checkin`               | Report state on an interval.        |
 | `GET  /agent/v1/commands?wait=20`      | Long-poll for queued commands.      |
 | `POST /agent/v1/commands/{id}/result`  | Report a command's outcome.         |
@@ -389,6 +421,8 @@ cluster. Across versions:
   new protocol version, capability or `key_order_priority` value is
   refused, a command type the control plane does not know is never sent,
   and a control plane before v0.6.4 refuses any field it does not know.
+  A control plane that predates session renewal answers `400` to it, and
+  the agent logs in with its identity instead, as it did before.
 
 ## 6. Seal flow
 
@@ -422,7 +456,7 @@ cluster. Across versions:
    fingerprint) with an expiry of 2 minutes, storing the encrypted value
    beside the payload rather than in it, and returns `202` with the command
    ID. The UI polls the seal's status every second: queued, sealing, sealed,
-   failed or expired, or superseded when a newer seal of the key replaced
+   failed or expired, or superseded when newer seals of the key replaced
    the value in the session.
 7. The agent leases the command. Leasing removes the encrypted value from the
    stored command, so it reaches the agent once. The agent re-validates the
@@ -463,7 +497,11 @@ cluster. Across versions:
     can fail part way, or GitHub can act and its answer be lost; trying
     again keeps the branch when it holds the same files and moves it to the
     new commit otherwise, and returns the pull request already open from
-    it, with its title and description brought up to date. The App makes
+    it, with its title and description brought up to date. It moves the
+    branch only from the App's own commit on the base commit: when someone
+    else has pushed to it, a reviewer say, it is left alone and the user is
+    told to change the pull request on GitHub or start a new session. The
+    App makes
     the commit without an author, so GitHub signs it. The commit (a
     `Requested-by:` trailer) and the pull request (a mention) record who
     requested it; they name files, keys and documents, never values or
@@ -1141,10 +1179,16 @@ shows creating one.
   the query. Of two sessions opened at once, one is written and the other
   counts again.
 - **Change places:** a version, and the changes that seals still running
-  will make, each held until its seal's command expires and a minute more.
-  A seal counts the session's pending changes and these places, and adds its
-  own on condition the version has not moved, so seals still running count
-  toward the 50. A seal that fails keeps its place until it lapses.
+  will make, by change and seal, each held until its seal's command expires
+  and a minute more. A seal counts the session's pending changes and these
+  places, and adds its own on condition the version has not moved, so
+  seals still running count toward the 50. A seal gives its place up when
+  its result comes in: its change then counts itself, and removing the
+  change frees the place at once. A seal that never reports keeps its
+  place until it lapses. Every stored change counts, including one that
+  newer changes of the key cover between them, which the session does not
+  show (removing one of those brings it back); a seal refused at the cap
+  names those.
 - **Seal:** the command carrying a requested seal and the agent it went to,
   with the file, key, regions, targets and requesting user, so the UI can
   follow its progress.
@@ -1163,7 +1207,8 @@ shows creating one.
   has accepted the login, so each signed request logs an agent in only once.
   It is kept 35 minutes, longer than STS accepts the signature.
 - **Rate window:** how many requests of one kind a user (or session) made in
-  one fixed minute (section 12). A request over the limit is not counted.
+  one fixed minute, or how many permission lookups their repository lists
+  made in ten (section 12). A request over the limit is not counted.
 
 **Audit trail.** The table keeps no audit records: commands and sessions
 expire, and agent state is replaced on every check-in. The audit trail is
@@ -1182,9 +1227,9 @@ fingerprint), never values or ciphertexts:
 |              | from the agent                                               |
 | Repositories | `repo.permission_mismatch`                                   |
 | Rate limits  | `request.rate_limited`                                       |
-| Agents       | `agent.login`, `agent.login_rejected`,                       |
-|              | `agent.login_throttled`, `agent.checkin_rejected`,           |
-|              | `agent.capability_ignored`,                                  |
+| Agents       | `agent.login`, `agent.session_renewed`,                      |
+|              | `agent.login_rejected`, `agent.login_throttled`,             |
+|              | `agent.checkin_rejected`, `agent.capability_ignored`,        |
 |              | `command.leased`, `command.finished`; `command.started`,     |
 |              | `command.succeeded`, `command.failed`, `command.expired`     |
 |              | from the agent                                               |
@@ -1231,7 +1276,8 @@ one. The pull requests are a second, lasting record: each commit's
   every operation is first checked against the signed-in user's own permission
   on that repository: read to list and discover, write to create a session,
   seal and open a pull request. Write access is re-checked on every seal and
-  PR. The permission comes from
+  PR. Reading one's own session asks GitHub nothing: its seals and pull
+  request check again. The permission comes from
   `GET /repos/{owner}/{repo}/collaborators/{login}/permission`, and the answer
   must name the signed-in user's GitHub ID (logins can change hands). Results
   are cached for 2 minutes per Lambda instance. A repository the user cannot
@@ -1284,10 +1330,18 @@ one. The pull requests are a second, lasting record: each commit's
   enforced with DynamoDB, in each env's own table: they are per user and
   env, so someone who uses two envs has each env's allowance. Each call that
   costs GitHub requests, KMS or agent work has a fixed one-minute window,
-  generous for a person using the UI and tight for a script. A request over
-  a limit gets 429 with `Retry-After` and logs `request.rate_limited`; a
-  request that fails still counts. When the count cannot be written the
-  request goes through: the limits guard the service and must not stop it.
+  generous for a person using the UI and tight for a script. A repository
+  list costs a permission lookup per repository the instance has not
+  checked lately, so the lookups lists make are limited as well: 1,000 per
+  user and env in each ten minutes, which a list may finish past. A request
+  over a limit gets 429 with `Retry-After` and logs `request.rate_limited`;
+  a request that fails still counts. When the count cannot be written, as
+  when DynamoDB throttles a busy counter, the instance counts the request
+  itself: the limits must not lift when the store struggles. A limited
+  `GET` must come from the UI's own scripts (`Sec-Fetch-Site: same-origin`,
+  or the `X-Requested-With` header the UI sends), so another site's page
+  cannot spend a user's limits with links; a proxy in front must pass one
+  of them on.
 
   | Call                      | Requests a minute, per env  |
   | ------------------------- | --------------------------- |
@@ -1301,7 +1355,11 @@ one. The pull requests are a second, lasting record: each commit's
   serves: the installation's repositories for 5 minutes, a repository's
   details for 1 minute, permissions for 2 (10 for the list), and commits'
   discovered files and parsed blobs, which never change, until it needs
-  the room. Lookups of the same thing at once make one call. The control
+  the room. Lookups of the same thing at once make one call, which runs
+  apart from the requests waiting for it, for up to 30 seconds: a request
+  that gives up stops waiting, and the others still get the answer. The UI
+  fetches a listing of a session's commit once, and the repository list
+  again only when it is stale, not when the tab regains focus. The control
   plane never retries a GitHub call. When GitHub refuses one for the rate
   limit, the user gets `503` with `Retry-After` and when to try again, and
   `github.rate_limited` is logged. `github.rate_limit_low` warns, once per

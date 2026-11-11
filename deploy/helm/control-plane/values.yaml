@@ -43,8 +43,8 @@ agentAudience: ""
 # JWKS or CA files it references, mounted at /etc/k8s-sealed-secrets-sealer
 # (required): registry.yaml with env, or registry-<name>.yaml for each of
 # envs that sets neither registryFile nor registry. The control plane reads
-# the registry again about once a minute, so a change to it needs no restart
-# once the kubelet has updated the mounted file.
+# the registry and those files again about once a minute, so a change to any
+# of them needs no restart once the kubelet has updated the mounted files.
 registry:
   configMapName: ""
 

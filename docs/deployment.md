@@ -282,9 +282,10 @@ well. A role, or a service account of an issuer, can be in only one env's
 registry: envs on one URL would otherwise both accept its logins.
 
 The control plane reads a registry in an SSM parameter or a file again
-about once a minute, so adding or removing an agent needs no restart. If
-the new registry can't be read or is invalid, it keeps the old one and logs
-`registry.reload_failed`.
+about once a minute, with the JWKS and CA files it names, so adding or
+removing an agent, or changing one of those files, needs no restart. If
+the new registry or a file it names can't be read, or it is invalid, it
+keeps the old one and logs `registry.reload_failed`.
 
 A cluster that runs only at times, like `prod-use2-blue`, stays in the
 registry. While it is down, it keeps its last known keys: the env key, which
@@ -370,9 +371,10 @@ agents:
   `kubectl get --raw /.well-known/openid-configuration`, and its keys are
   `kubectl get --raw /openid/v1/jwks`.
 - `jwksURL` is fetched and cached; give `caFile` when its certificate is not
-  publicly trusted. A `jwksFile` is read at start and does not follow key
-  rotation: when the cluster's signing keys change, update it and restart
-  the control plane.
+  publicly trusted. A `jwksFile` does not follow key rotation: when the
+  cluster's signing keys change, update it. A changed `jwksFile` or
+  `caFile` is read again with the registry, about once a minute, without a
+  restart; one named in a registry given inline needs a restart.
 - Relative `jwksFile` and `caFile` paths are relative to the registry
   file's directory; the chart's registry ConfigMap can hold the files. In a
   registry given inline or from SSM, use absolute paths.

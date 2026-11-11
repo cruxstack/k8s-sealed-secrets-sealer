@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -386,12 +388,70 @@ func TestPullRequest_UpdatesThePullRequestAnEarlierAttemptOpened(t *testing.T) {
 	}
 }
 
+// A pull request an earlier attempt opened may have a reviewer's commits by
+// the time the user tries again: they are kept, and the user told why.
+func TestPullRequest_LeavesAPullRequestOthersPushedTo(t *testing.T) {
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	sh.sealNow(sess.ID, billing, "api-token", "v")
+	sh.github.FailNext(http.MethodPost, "/pulls", mockgithub.LoseAnswer)
+	if code := sh.openPullRequest(sess.ID); code != http.StatusBadGateway {
+		t.Fatalf("first attempt = %d", code)
+	}
+	branch := pullRequestBranch("dev", "alice", sess.ID)
+	reviewed, _ := sh.github.Push("example-org", "apps", branch, "reviewer", map[string]string{"README.md": "fixed\n"})
+	sh.sealNow(sess.ID, search, "index-token", "w")
+	rec := sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sess.ID+"/pull-request", nil, true)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "someone else has pushed") {
+		t.Fatalf("retry = %d %s", rec.Code, rec.Body)
+	}
+	if view, _ := sh.github.PullRequest("example-org", "apps", 1); len(view.Commits) != 2 || view.Commits[0] != reviewed {
+		t.Fatalf("pull request = %+v", view)
+	}
+	// the session stays, unlocked
+	if rec := sh.seal(sess.ID, billing, "another", "x"); rec.Code != http.StatusAccepted {
+		t.Fatalf("seal after = %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestPullRequest_FitsTheRequestTimeLimit(t *testing.T) {
 	// API Gateway, a Lambda function and the HTTP server all end a request
 	// at 30 seconds; the pull request is made, and the session ended or
 	// unlocked, well before
 	if budget := pullRequestTimeout + pullRequestFinish; budget > 25*time.Second {
 		t.Fatalf("a pull request may take %s", budget)
+	}
+
+	// reading the registry again takes none of that time: a read that does
+	// not finish, as when SSM is slow, does not hold the pull request up
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	sh.sealNow(sess.ID, billing, "api-token", "v")
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	sh.mu.Lock()
+	sh.reload = func(ctx context.Context) (*registry.Registry, map[string]LoginVerifier, error) {
+		close(reading)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil, ctx.Err()
+	}
+	sh.mu.Unlock()
+	sh.advance(RegistryReloadInterval)
+	start := time.Now()
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+	select {
+	case <-reading:
+	default:
+		t.Fatal("the pull request did not start reading the registry")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the pull request took %s, waiting on the registry", took)
 	}
 }
 
@@ -470,6 +530,99 @@ func TestSeal_CapCountsSealsInFlight(t *testing.T) {
 	}
 	if rec := sh.seal(sess.ID, billing, "one-more", "v"); rec.Code != http.StatusAccepted {
 		t.Fatalf("seal after the last expired = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// fillSession stores n pending changes of other keys in alice's session.
+func (sh *sealHarness) fillSession(sessionID string, n int) {
+	sh.t.Helper()
+	ctx := context.Background()
+	stored, _, _ := sh.store.Session(ctx, testUsers["alice"].ID, store.RepoKey("example-org", "apps"), sh.clock())
+	for i := range n {
+		k := fmt.Sprintf("key-%d", i)
+		_, err := sh.store.PutChange(ctx, store.Change{
+			SessionID: sessionID, ID: changeID(billing, k, nil), Path: billing, Key: k, CommandID: "01J0000000000000000000000" + string(rune('A'+i%26)),
+			Targets: []store.Target{{Namespace: "billing", Name: "billing", Scope: "strict"}}, ExpiresAt: stored.EndsAt,
+		})
+		if err != nil {
+			sh.t.Fatal(err)
+		}
+	}
+}
+
+// A seal gives its place up once its change lands, so removing the change
+// frees the place at once, not when the seal's place would have lapsed.
+func TestSeal_RemovingAChangeFreesItsPlace(t *testing.T) {
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	sh.fillSession(sess.ID, maxChangesPerSession-1)
+	sh.sealNow(sess.ID, billing, "last", "v")
+	if rec := sh.seal(sess.ID, billing, "one-more", "v"); rec.Code != http.StatusConflict {
+		t.Fatalf("seal past the cap = %d %s", rec.Code, rec.Body)
+	}
+	path := "/api/v1/repos/example-org/apps/session/" + sess.ID + "/changes/" + changeID(billing, "last", nil)
+	if rec := sh.do("alice", http.MethodDelete, path, nil, true); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove = %d %s", rec.Code, rec.Body)
+	}
+	if rec := sh.seal(sess.ID, billing, "one-more", "v"); rec.Code != http.StatusAccepted {
+		t.Fatalf("seal after removing a change = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A change newer seals of the same key cover between them is not shown,
+// yet counts toward the cap, since removing one of those brings it back.
+// Its seal says it was replaced, and a refusal at the cap names it.
+func TestSeal_CapNamesTheChangesItDoesNotShow(t *testing.T) {
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	hidden := sh.sealNow(sess.ID, billing, "token", "everywhere")
+	sh.sealNowIn(sess.ID, billing, "token", "in use1", "use1")
+	sh.sealNowIn(sess.ID, billing, "token", "in use2", "use2")
+	if got := sh.sealStatus(sess.ID, hidden.ID); got.Status != sealSuperseded || got.ChangeID != "" {
+		t.Fatalf("hidden seal = %+v, want superseded", got)
+	}
+	shown := decode[sessionResponse](t, sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/session", nil, false))
+	if shown.Session.PendingChanges != 2 {
+		t.Fatalf("session shows %d changes, want 2", shown.Session.PendingChanges)
+	}
+
+	sh.fillSession(sess.ID, maxChangesPerSession-3)
+	rec := sh.seal(sess.ID, billing, "one-more", "v")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "1 change not shown") ||
+		!strings.Contains(rec.Body.String(), billing+": token") {
+		t.Fatalf("seal past the cap = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSessionFull(t *testing.T) {
+	changes := make([]store.Change, maxChangesPerSession-2)
+	for i := range changes {
+		changes[i] = store.Change{ID: strconv.Itoa(i), Path: billing, Key: strconv.Itoa(i), CommandID: strconv.Itoa(i),
+			Targets: []store.Target{{Namespace: "a", Name: "b"}}}
+	}
+	got := sessionFull(changes)
+	if !strings.HasPrefix(got, "this session holds 50 pending changes, the most it can, and 2 seals still running;") ||
+		strings.Contains(got, "not shown") {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+// A session is the user's own: reading it asks GitHub nothing, so it costs
+// no GitHub call (its seals and pull request check access again).
+func TestGetSession_AsksGitHubNothing(t *testing.T) {
+	sh := newSealHarness(t)
+	// the next permission lookup fails: whoever makes it gets a 502
+	sh.github.FailNext(http.MethodGet, "/permission", mockgithub.ServerError)
+	path := "/api/v1/repos/example-org/apps/session"
+	rec := sh.do("bob", http.MethodGet, path, nil, false)
+	if rec.Code != http.StatusOK || decode[sessionResponse](t, rec).Session != nil {
+		t.Fatalf("bob's session = %d %s", rec.Code, rec.Body)
+	}
+	if rec := sh.do("bob", http.MethodGet, "/api/v1/repos/example-org/apps/files", nil, false); rec.Code != http.StatusBadGateway {
+		t.Fatalf("files after = %d %s; the lookup failure was not left for it", rec.Code, rec.Body)
+	}
+	if rec := sh.do("bob", http.MethodGet, "/api/v1/repos/example-org/no%20such/session", nil, false); rec.Code != http.StatusNotFound {
+		t.Fatalf("an invalid repository name = %d %s", rec.Code, rec.Body)
 	}
 }
 

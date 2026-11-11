@@ -21,6 +21,7 @@ type twoEnvs struct {
 	h             http.Handler
 	users         *userauth.Sessions
 	agentSessions map[string]*agentauth.Sessions
+	registries    map[string]*registry.Registry
 }
 
 func newTwoEnvs(t *testing.T) *twoEnvs {
@@ -34,7 +35,7 @@ func newTwoEnvs(t *testing.T) *twoEnvs {
 		Envs:   []userauth.EnvPolicy{{Name: "dev"}, {Name: "prod"}},
 		Logger: slog.New(slog.DiscardHandler),
 	})
-	te := &twoEnvs{users: users, agentSessions: map[string]*agentauth.Sessions{}}
+	te := &twoEnvs{users: users, agentSessions: map[string]*agentauth.Sessions{}, registries: map[string]*registry.Registry{}}
 	var envs []*Server
 	for _, env := range []string{"dev", "prod"} {
 		reg, err := registry.Parse([]byte(`
@@ -51,6 +52,7 @@ agents:
 			t.Fatal(err)
 		}
 		te.agentSessions[env] = s
+		te.registries[env] = reg
 		envs = append(envs, New(Options{
 			Env: env, Registry: reg, Sessions: s, Store: store.NewMemory(),
 			Users: auth.Env(env), Logger: slog.New(slog.DiscardHandler),
@@ -127,7 +129,7 @@ func TestHost_AgentsByEnv(t *testing.T) {
 		te.h.ServeHTTP(rec, req)
 		return rec
 	}
-	devToken, _, _ := te.agentSessions["dev"].Issue("dev-use1-blue")
+	devToken := agentSession(t, te.agentSessions["dev"], te.registries["dev"], "dev-use1-blue")
 
 	// past authentication, an empty check-in is invalid: the token was good
 	if rec := checkIn("dev", devToken); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid check-in") {

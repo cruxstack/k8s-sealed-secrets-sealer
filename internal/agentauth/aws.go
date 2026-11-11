@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/time/rate"
-
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 )
@@ -30,25 +28,9 @@ const (
 	maxSTSResponse   = 64 << 10
 )
 
-// Default limit on calls to STS, per env and process. A login that passes
-// every local check costs one STS call, and anyone can make one, so the calls
-// are limited. The burst lets an env's whole fleet, up to 100 agents, log in
-// at once after a restart. The rate is far above steady use: each agent logs
-// in every 14 minutes (15-minute sessions, renewed a minute early), so 100
-// agents need about 0.12 calls a second.
-const (
-	DefaultSTSCallsPerSecond = 1
-	DefaultSTSBurst          = 100
-)
-
 // ErrTooManyLogins is returned, instead of calling STS, while logins exceed
-// the STS call limit.
+// the STS call limits (STSLimiter).
 var ErrTooManyLogins = errors.New("too many logins")
-
-// NewSTSLimiter returns a limiter with the default STS call limit.
-func NewSTSLimiter() *rate.Limiter {
-	return rate.NewLimiter(DefaultSTSCallsPerSecond, DefaultSTSBurst)
-}
 
 // headers an agent may send with its signed request; anything else is
 // refused rather than forwarded
@@ -97,7 +79,7 @@ type AWSVerifier struct {
 	endpoints map[string]string
 	http      *http.Client
 	replays   ReplayStore
-	stsLimit  *rate.Limiter
+	stsLimit  *STSLimiter
 	now       func() time.Time
 }
 
@@ -117,7 +99,7 @@ type AWSOptions struct {
 	// STSLimiter limits calls to STS. Pass the same one to every verifier
 	// built for an env, so a registry change does not reset it. Nil uses
 	// NewSTSLimiter.
-	STSLimiter *rate.Limiter
+	STSLimiter *STSLimiter
 	Now        func() time.Time
 }
 
@@ -170,7 +152,8 @@ func NewAWSVerifier(opts AWSOptions) (*AWSVerifier, error) {
 
 // VerifyLogin checks a signed request, has STS confirm it, and returns the
 // agent registered for the role STS reports. Each signed request logs in at
-// most once.
+// most once. Calls to STS are limited per source, the address ctx carries
+// (WithSource), and overall.
 func (v *AWSVerifier) VerifyLogin(ctx context.Context, req protocol.SessionRequest) (*registry.Agent, error) {
 	sr := req.AWS
 	if sr == nil || req.Token != "" {
@@ -190,10 +173,20 @@ func (v *AWSVerifier) VerifyLogin(ctx context.Context, req protocol.SessionReque
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
-	if !v.stsLimit.AllowN(v.now(), 1) {
-		return nil, fmt.Errorf("%w: sts call limit reached", ErrTooManyLogins)
+	source := SourceFrom(ctx)
+	if err := v.stsLimit.take(source, v.now()); err != nil {
+		return nil, err
 	}
+	agent, err := v.confirm(ctx, target, headers, signature, signedAt)
+	if err == nil {
+		v.stsLimit.giveBack(source)
+	}
+	return agent, err
+}
 
+// confirm has STS confirm a signed request, and returns the agent registered
+// for the role it reports.
+func (v *AWSVerifier) confirm(ctx context.Context, target string, headers http.Header, signature string, signedAt time.Time) (*registry.Agent, error) {
 	identity, err := v.callSTS(ctx, target, headers)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)

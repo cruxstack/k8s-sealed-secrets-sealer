@@ -300,16 +300,28 @@ func TestStore_CountRequest(t *testing.T) {
 			key := "seals#" + name + "-" + time.Now().Format("150405.000000")
 			end := time.Now().Add(time.Minute).Truncate(time.Minute)
 			for i, want := range []bool{true, true, false, false} {
-				if ok, err := s.CountRequest(ctx, key, 2, end); err != nil || ok != want {
+				if ok, err := s.CountRequest(ctx, key, 1, 2, end); err != nil || ok != want {
 					t.Fatalf("request %d: ok=%v err=%v, want %v", i, ok, err, want)
 				}
 			}
 			// the next window, and another key, count afresh
-			if ok, err := s.CountRequest(ctx, key, 2, end.Add(time.Minute)); err != nil || !ok {
+			if ok, err := s.CountRequest(ctx, key, 1, 2, end.Add(time.Minute)); err != nil || !ok {
 				t.Fatalf("next window: ok=%v err=%v", ok, err)
 			}
-			if ok, err := s.CountRequest(ctx, key+"-other", 2, end); err != nil || !ok {
+			if ok, err := s.CountRequest(ctx, key+"-other", 1, 2, end); err != nil || !ok {
 				t.Fatalf("other key: ok=%v err=%v", ok, err)
+			}
+
+			// calls counted by weight: one under the limit counts whole, and
+			// a check (0) only says whether the limit is reached
+			weighed := key + "-weighed"
+			for i, step := range []struct {
+				n    int
+				want bool
+			}{{0, true}, {9, true}, {0, true}, {5, true}, {0, false}, {1, false}} {
+				if ok, err := s.CountRequest(ctx, weighed, step.n, 10, end); err != nil || ok != step.want {
+					t.Fatalf("weighed step %d (%d): ok=%v err=%v, want %v", i, step.n, ok, err, step.want)
+				}
 			}
 		})
 	}

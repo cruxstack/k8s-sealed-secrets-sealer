@@ -3,14 +3,15 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
-
-	"golang.org/x/time/rate"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
@@ -67,7 +68,7 @@ type envLogins struct {
 	audience string
 	stsHosts []string
 	replays  agentauth.ReplayStore
-	stsLimit *rate.Limiter
+	stsLimit *agentauth.STSLimiter
 	k8s      *agentauth.K8sVerifier
 }
 
@@ -102,8 +103,9 @@ type envRegistry struct {
 	all    *envRegistries
 	// read reads an SSM parameter; made on first use
 	read config.ParameterReader
-	// last is the registry in force, as read
-	last []byte
+	// last is the content of the registry in force and the files it
+	// references, hashed (contentHash)
+	last [sha256.Size]byte
 }
 
 // reloadable reports whether the registry can change while the control
@@ -123,21 +125,74 @@ func (r *envRegistry) start(ctx context.Context) (*registry.Registry, map[string
 			return nil, nil, err
 		}
 	}
-	return r.use(data, baseDir)
+	reg, sum, err := r.parse(data, baseDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return r.use(reg, sum)
 }
 
 // reload reads the registry again, for controlplane.Options.ReloadRegistry.
-// It returns a nil registry when it has not changed.
+// It returns a nil registry when neither it nor a JWKS or CA file it
+// references has changed.
 func (r *envRegistry) reload(ctx context.Context) (*registry.Registry, map[string]controlplane.LoginVerifier, error) {
 	data, baseDir, err := r.source(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	// the configuration trims the registry it read at start
-	if bytes.Equal(bytes.TrimSpace(data), bytes.TrimSpace(r.last)) {
+	reg, sum, err := r.parse(data, baseDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sum == r.last {
 		return nil, nil, nil
 	}
-	return r.use(data, baseDir)
+	return r.use(reg, sum)
+}
+
+// parse validates a registry and hashes it with the files it references.
+func (r *envRegistry) parse(data []byte, baseDir string) (*registry.Registry, [sha256.Size]byte, error) {
+	reg, err := registry.Parse(data, baseDir)
+	if err != nil {
+		return nil, [sha256.Size]byte{}, fmt.Errorf("invalid agent registry %s: %w", r.name(), err)
+	}
+	sum, err := contentHash(data, reg)
+	if err != nil {
+		return nil, [sha256.Size]byte{}, fmt.Errorf("invalid agent registry %s: %w", r.name(), err)
+	}
+	return reg, sum, nil
+}
+
+// contentHash hashes a registry with the JWKS and CA files it references,
+// so a change to any of them is a change of the registry: the verifiers
+// built for it hold what the files held when they were built.
+func contentHash(data []byte, reg *registry.Registry) ([sha256.Size]byte, error) {
+	h := sha256.New()
+	// the configuration trims the registry it read at start
+	writeField(h, bytes.TrimSpace(data))
+	for _, is := range reg.Issuers {
+		for _, path := range []string{is.JWKSFile, is.CAFile} {
+			if path == "" {
+				continue
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return [sha256.Size]byte{}, fmt.Errorf("failed to read issuer %s's file: %w", is.Name, err)
+			}
+			writeField(h, []byte(path))
+			writeField(h, content)
+		}
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	return sum, nil
+}
+
+// writeField writes b with its length, so no two lists of fields hash the
+// same.
+func writeField(h hash.Hash, b []byte) {
+	_ = binary.Write(h, binary.BigEndian, uint64(len(b)))
+	h.Write(b)
 }
 
 // source reads the registry from its file or SSM parameter, or returns it
@@ -168,12 +223,9 @@ func (r *envRegistry) source(ctx context.Context) ([]byte, string, error) {
 	}
 }
 
-// use validates a registry and builds its login verifiers.
-func (r *envRegistry) use(data []byte, baseDir string) (*registry.Registry, map[string]controlplane.LoginVerifier, error) {
-	reg, err := registry.Parse(data, baseDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid agent registry %s: %w", r.name(), err)
-	}
+// use makes a registry the env's, unless another env registers one of its
+// identities, and builds its login verifiers. sum is its contentHash.
+func (r *envRegistry) use(reg *registry.Registry, sum [sha256.Size]byte) (*registry.Registry, map[string]controlplane.LoginVerifier, error) {
 	var logins map[string]controlplane.LoginVerifier
 	if err := r.all.set(r.env, reg, func() error {
 		var buildErr error
@@ -182,7 +234,7 @@ func (r *envRegistry) use(data []byte, baseDir string) (*registry.Registry, map[
 	}); err != nil {
 		return nil, nil, err
 	}
-	r.last = data
+	r.last = sum
 	return reg, logins, nil
 }
 

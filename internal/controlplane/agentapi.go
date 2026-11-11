@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,12 +38,17 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeAgentJSON(w, r, maxSessionBody, &req) {
 		return
 	}
-	verifier, ok := s.agents.Load().logins[req.Method]
+	if req.Method == protocol.MethodRenew {
+		s.renewSession(w, r)
+		return
+	}
+	access := s.agents.Load()
+	verifier, ok := access.logins[req.Method]
 	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported login method")
 		return
 	}
-	agent, err := verifier.VerifyLogin(r.Context(), req)
+	agent, err := verifier.VerifyLogin(agentauth.WithSource(r.Context(), r.RemoteAddr), req)
 	if errors.Is(err, agentauth.ErrTooManyLogins) {
 		s.logger.WarnContext(r.Context(), "agent login throttled",
 			"event", "agent.login_throttled", "env", s.env, "method", req.Method, "error", err)
@@ -56,31 +62,78 @@ func (s *Server) agentSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	token, exp, err := s.sessions.Issue(agent.ID)
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to issue agent session", "agent_id", agent.ID, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+	if !s.issueSession(w, r, access.reg, agent, s.now()) {
 		return
 	}
 	s.logger.InfoContext(r.Context(), "agent logged in",
 		"event", "agent.login", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "method", req.Method)
+}
+
+// renewSession issues a new session to an agent whose session has not
+// expired yet, so it logs in with its identity only when it starts, its
+// session lapsed, or its last login is agentauth.RenewalLimit old: an
+// aws-sts login costs a call to STS, which anyone can make the control
+// plane spend. The new session is bound to the agent as the registry has
+// it, as the old one was, and keeps the old one's login time.
+func (s *Server) renewSession(w http.ResponseWriter, r *http.Request) {
+	reg, agent, sess, ok := s.sessionAgent(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.sessions.Renewable(sess) {
+		// the agent logs in with its identity again
+		s.logger.InfoContext(r.Context(), "agent session not renewed: the agent last logged in too long ago",
+			"env", s.env, "agent_id", agent.ID, "logged_in_at", sess.LoggedInAt)
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.issueSession(w, r, reg, agent, sess.LoggedInAt) {
+		return
+	}
+	s.logger.InfoContext(r.Context(), "agent session renewed",
+		"event", "agent.session_renewed", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster)
+}
+
+// issueSession answers with a new session for agent, as reg registers it,
+// which last logged in with its identity at loggedInAt.
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, reg *registry.Registry, agent *registry.Agent, loggedInAt time.Time) bool {
+	token, exp, err := s.sessions.Issue(agent.ID, reg.Binding(agent), loggedInAt)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to issue agent session", "agent_id", agent.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return false
+	}
 	httpserver.WriteJSON(w, http.StatusOK, protocol.SessionResponse{
 		Token: token, ExpiresAt: exp, AgentID: agent.ID, Env: s.env,
 	})
+	return true
+}
+
+// sessionAgent authenticates the request's agent session token and returns
+// the registry in force, the agent it registers for the session, and the
+// session.
+func (s *Server) sessionAgent(r *http.Request) (*registry.Registry, *registry.Agent, agentauth.Session, bool) {
+	sess, err := s.sessions.Verify(bearer(r))
+	if err != nil {
+		return nil, nil, agentauth.Session{}, false
+	}
+	// an agent removed from the registry loses access with its session,
+	// or when the registry is next read (Options.ReloadRegistry); so does
+	// one the registry gives another identity or other capabilities
+	reg := s.currentRegistry()
+	agent, ok := reg.Agent(sess.AgentID)
+	if !ok || subtle.ConstantTimeCompare([]byte(reg.Binding(agent)), []byte(sess.Binding)) != 1 {
+		return nil, nil, agentauth.Session{}, false
+	}
+	return reg, agent, sess, true
 }
 
 // requireAgent authenticates an agent session token and passes the
 // registered agent to next.
 func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *registry.Agent)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, err := s.sessions.Verify(bearer(r))
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		// an agent removed from the registry loses access with its session,
-		// or when the registry is next read (Options.ReloadRegistry)
-		agent, ok := s.currentRegistry().Agent(id)
+		_, agent, _, ok := s.sessionAgent(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return

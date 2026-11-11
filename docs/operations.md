@@ -318,7 +318,8 @@ never need the control plane.
 | pending changes                | their pending changes again. All of it expires  |
 |                                | within hours anyway.                            |
 | Session counts, change places  | Written again by the next session or seal; rate |
-| and rate windows               | windows last a minute. Nothing to do.           |
+| and rate windows               | windows last a minute, or ten for the lookups   |
+|                                | repository lists make. Nothing to do.           |
 | Login replay records           | Short-lived; nothing to do.                     |
 
 So two kinds of state cannot be rebuilt. Escrow, for a key that no running
@@ -509,6 +510,14 @@ control plane logs `github.rate_limited`, and `github.rate_limit_low` once
 the budget falls below a tenth. Nothing retries; requests work again when
 the budget resets. An incomplete list fills in on the next load, from what
 was checked.
+
+**The repository list or a file listing answers "this request must come
+from the sealer's own pages" (403).** These calls cost GitHub requests,
+so they are refused unless the browser says the UI's own page sent them
+(`Sec-Fetch-Site: same-origin`) or the UI's `X-Requested-With` header is
+there. A proxy in front of the control plane, such as CloudFront with an
+origin request policy that lists headers, must pass at least one of them
+on.
 
 **A person is told they "may not use the prod env".** Their session does
 not grant it. Teams are checked at sign-in, so after joining a team they

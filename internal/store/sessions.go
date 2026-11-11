@@ -45,25 +45,54 @@ type Session struct {
 }
 
 // reserveChange decides a ReserveChange for both stores. reserved maps the
-// change IDs seals hold places for to when each place lapses (epoch
-// milliseconds). It returns the places to keep, changeID's among them.
-func reserveChange(reserved map[string]int64, changeID string, existing []string, limit int, until, now time.Time) (map[string]int64, error) {
+// places seals hold (placeKey) to when each lapses (epoch milliseconds). It
+// returns the places to keep, the seal's among them.
+func reserveChange(reserved map[string]int64, changeID, sealID string, existing []string, limit int, until, now time.Time) (map[string]int64, error) {
 	held := map[string]bool{}
 	for _, id := range existing {
 		held[id] = true
 	}
-	kept := map[string]int64{}
-	for id, lapses := range reserved {
-		if lapses > now.UnixMilli() {
-			kept[id] = lapses
-			held[id] = true
-		}
+	kept := livePlaces(reserved, now)
+	for place := range kept {
+		held[placeChange(place)] = true
 	}
 	if !held[changeID] && len(held) >= limit {
 		return nil, ErrTooManyChanges
 	}
-	kept[changeID] = max(kept[changeID], until.UnixMilli())
+	place := placeKey(changeID, sealID)
+	kept[place] = max(kept[place], until.UnixMilli())
 	return kept, nil
+}
+
+// releaseChange decides a ReleaseChange for both stores: the places to
+// keep, without the seal's, and whether it held one.
+func releaseChange(reserved map[string]int64, changeID, sealID string, now time.Time) (map[string]int64, bool) {
+	kept := livePlaces(reserved, now)
+	place := placeKey(changeID, sealID)
+	_, held := kept[place]
+	delete(kept, place)
+	return kept, held
+}
+
+func livePlaces(reserved map[string]int64, now time.Time) map[string]int64 {
+	kept := map[string]int64{}
+	for place, lapses := range reserved {
+		if lapses > now.UnixMilli() {
+			kept[place] = lapses
+		}
+	}
+	return kept
+}
+
+// placeKey names the place one seal holds for its change, so a seal can
+// release its own and not another's of the same change.
+func placeKey(changeID, sealID string) string { return changeID + "/" + sealID }
+
+// placeChange is the change a place is held for. Places held before seals
+// were named in them are the change ID alone.
+func placeChange(place string) string {
+	id, _, _ := strings.Cut(place, "/")
+	return id
 }
 
 // Live reports whether the session is still open at now.

@@ -6,6 +6,7 @@ package agentauth
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -41,8 +42,12 @@ type K8sVerifier struct {
 	remote map[jwksSource]*remoteKeySet
 }
 
-// jwksSource is where a remote key set comes from.
-type jwksSource struct{ url, caFile string }
+// jwksSource is where a remote key set comes from: its URL, and the CA
+// bundle that serves it, by content, so a bundle changed in place is used.
+type jwksSource struct {
+	url string
+	ca  [sha256.Size]byte
+}
 
 // K8sOptions configures a K8sVerifier.
 type K8sOptions struct {
@@ -50,7 +55,7 @@ type K8sOptions struct {
 	// Audience is the aud claim tokens must carry: this control plane's URL.
 	Audience string
 	// Previous is the verifier this one replaces, for a changed registry.
-	// Its remote key sets are kept for issuers whose JWKS URL and CA file
+	// Its remote key sets are kept for issuers whose JWKS URL and CA bundle
 	// are unchanged, so keys are not fetched again and the refetch floor
 	// holds across the change.
 	Previous *K8sVerifier
@@ -59,7 +64,7 @@ type K8sOptions struct {
 }
 
 // NewK8sVerifier builds a verifier for every issuer in the registry. It reads
-// JWKS files now; remote JWKS are fetched on first use and cached.
+// JWKS and CA files now; remote JWKS are fetched on first use and cached.
 func NewK8sVerifier(opts K8sOptions) (*K8sVerifier, error) {
 	if opts.Audience == "" {
 		return nil, errors.New("failed to create token verifier: audience is required")
@@ -79,13 +84,20 @@ func NewK8sVerifier(opts K8sOptions) (*K8sVerifier, error) {
 			}
 			keySet = ks
 		} else {
-			src := jwksSource{url: is.JWKSURL, caFile: is.CAFile}
+			var ca []byte
+			if is.CAFile != "" {
+				var err error
+				if ca, err = os.ReadFile(is.CAFile); err != nil {
+					return nil, fmt.Errorf("failed to read ca bundle for issuer %s: %w", is.Name, err)
+				}
+			}
+			src := jwksSource{url: is.JWKSURL, ca: sha256.Sum256(ca)}
 			ks := v.remote[src]
 			if ks == nil && opts.Previous != nil {
 				ks = opts.Previous.remote[src]
 			}
 			if ks == nil {
-				client, err := jwksClient(is)
+				client, err := jwksClient(is.Name, ca)
 				if err != nil {
 					return nil, err
 				}
@@ -183,17 +195,14 @@ func fileKeySet(is registry.Issuer) (oidc.KeySet, error) {
 	return &oidc.StaticKeySet{PublicKeys: pub}, nil
 }
 
-// jwksClient returns the client that fetches an issuer's remote JWKS.
-func jwksClient(is registry.Issuer) (*http.Client, error) {
+// jwksClient returns the client that fetches an issuer's remote JWKS,
+// trusting only the CA bundle ca when there is one.
+func jwksClient(issuer string, ca []byte) (*http.Client, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	if is.CAFile != "" {
-		pem, err := os.ReadFile(is.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read ca bundle for issuer %s: %w", is.Name, err)
-		}
+	if len(ca) > 0 {
 		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("failed to parse ca bundle for issuer %s", is.Name)
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, fmt.Errorf("failed to parse ca bundle for issuer %s", issuer)
 		}
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	}

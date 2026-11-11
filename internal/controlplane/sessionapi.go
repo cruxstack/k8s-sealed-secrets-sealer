@@ -13,6 +13,7 @@ import (
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -177,14 +178,15 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // getSession serves the user's open session for a repository, with its
-// pending changes, or null when there is none.
+// pending changes, or null when there is none. It asks GitHub nothing: the
+// session is the user's own, which listSessions serves as well, and its
+// seals and pull request check the user's access again.
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), sessionRequestTimeout)
-	defer cancel()
+	ctx := r.Context()
 	user := userauth.UserFrom(ctx)
 	owner, name := r.PathValue("owner"), r.PathValue("repo")
-	if _, err := s.repos.Require(ctx, user, owner, name, false); err != nil {
-		s.repoError(w, r, err)
+	if !githubapp.ValidName(owner) || !githubapp.ValidName(name) {
+		s.repoError(w, r, repos.ErrNotFound)
 		return
 	}
 	sess, ok, err := s.store.Session(ctx, user.ID, store.RepoKey(owner, name), s.now().UTC())
