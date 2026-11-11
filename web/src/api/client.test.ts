@@ -94,6 +94,18 @@ describe("extractApiError", () => {
     ).toBe("The service is temporarily unavailable — please try again");
   });
 
+  it("keeps how long a 429 or 503 asks to wait, and nothing else", () => {
+    const limited = makeAxiosError(429, { error: "too many requests" });
+    limited.response!.headers = new AxiosHeaders({ "Retry-After": "30" });
+    expect(toApiError(limited)).toMatchObject({ status: 429, retryAfter: 30 });
+    const plain = makeAxiosError(503, { error: "starting" });
+    plain.response!.headers = { "retry-after": "5" } as never;
+    expect(toApiError(plain).retryAfter).toBe(5);
+    expect(toApiError(makeAxiosError(500)).retryAfter).toBeUndefined();
+    // a copy keeps it
+    expect(toApiError(toApiError(limited)).retryAfter).toBe(30);
+  });
+
   it("falls back to a status message for non-JSON bodies", () => {
     expect(
       extractApiError(makeAxiosError(502, "<html>Bad Gateway</html>")),

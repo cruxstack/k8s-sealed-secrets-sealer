@@ -4,7 +4,6 @@ import type {
   RepositoryFile,
   SealSession,
   SealedSecretDocument,
-  SealingStatus,
 } from "@/api/types";
 import { CopyButton } from "@/components/fleet/CopyButton";
 import { cn, sentence } from "@/lib/utils";
@@ -234,7 +233,6 @@ export function FilePanel({
   onBusyChange,
   focusForm = false,
   round = 0,
-  sealingStatus,
   resealer,
 }: {
   owner: string;
@@ -250,8 +248,6 @@ export function FilePanel({
   focusForm?: boolean;
   /** Changes when the session ends, to start the seal form afresh. */
   round?: number;
-  /** Whether values can be sealed and resealed in the env. */
-  sealingStatus?: SealingStatus;
   /** "Reseal all", for the env's admins; absent for everyone else. */
   resealer?: FileResealer;
 }) {
@@ -338,7 +334,6 @@ export function FilePanel({
                 commit={commit}
                 canWrite={canWrite}
                 sealing={busy}
-                status={sealingStatus}
                 resealer={resealer}
               />
             )}

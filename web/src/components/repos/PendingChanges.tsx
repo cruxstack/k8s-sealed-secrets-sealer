@@ -98,8 +98,12 @@ function KeyChip({ change }: { change: PendingChange }) {
 
 /** "2 sealed values and 3 resealed values": what a pull request writes. */
 function valuesText(changes: PendingChange[]): string {
-  const resealed = changes.filter(isReseal).length;
-  const sealed = changes.length - resealed;
+  // as the pull request's title counts them: a sealed value per change,
+  // and a resealed value per document, since each document's was its own
+  const resealed = changes
+    .filter(isReseal)
+    .reduce((n, c) => n + c.targets.length, 0);
+  const sealed = changes.filter((c) => !isReseal(c)).length;
   if (resealed === 0) return plural(sealed, "sealed value", "sealed values");
   const moved = plural(resealed, "resealed value", "resealed values");
   return sealed === 0
@@ -200,6 +204,8 @@ interface ChangesProps {
   session: SealSession;
   /** A seal is in progress on the page; its change is not listed yet. */
   sealing?: boolean;
+  /** A file is being resealed; its changes are not listed yet. */
+  resealing?: boolean;
   onOpened: (pr: PullRequest) => void;
   onSelectFile: (path: string) => void;
 }
@@ -234,6 +240,7 @@ function SessionChanges({
   repo,
   session,
   sealing = false,
+  resealing = false,
   onOpened,
   onSelectFile,
 }: ChangesProps) {
@@ -294,9 +301,11 @@ function SessionChanges({
   });
   const openBlocked = sealing
     ? "Wait for the seal in progress to finish."
-    : changes.some((c) => c.key_revoked)
-      ? "Seal again, or remove, the values sealed with a revoked key."
-      : null;
+    : resealing
+      ? "Wait for the reseal in progress to finish."
+      : changes.some((c) => c.key_revoked)
+        ? "Seal again, or remove, the values sealed with a revoked key."
+        : null;
 
   return (
     <section

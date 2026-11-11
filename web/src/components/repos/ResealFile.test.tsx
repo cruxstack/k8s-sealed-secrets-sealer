@@ -1,11 +1,13 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
+import { AxiosError, type AxiosAdapter } from "axios";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -33,7 +35,7 @@ import {
 import { sealPolling } from "./SealForm";
 import { resealPolling } from "./ResealFile";
 
-function renderAt(path: string, api: FakeApi) {
+function renderAt(path: string, api: Pick<FakeApi, "adapter">) {
   apiClient.defaults.adapter = api.adapter;
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -50,6 +52,7 @@ function renderAt(path: string, api: FakeApi) {
       </QueryClientProvider>
     </ThemeProvider>,
   );
+  return router;
 }
 
 const PAGE = "/dev/secrets/example-org/apps";
@@ -142,6 +145,7 @@ describe("Reseal all", () => {
   beforeEach(() => {
     sealPolling.intervalMs = 5;
     resealPolling.intervalMs = 5;
+    resealPolling.maxBackoffMs = 20;
   });
   afterEach(() => {
     apiClient.defaults.adapter = originalAdapter;
@@ -249,14 +253,15 @@ describe("Reseal all", () => {
     expect(
       within(keys).getByRole("button", { name: /^api-key/ }),
     ).toHaveTextContent("Resealed, in your pending changes");
-    // and the pull request says what it writes
+    // and the pull request says what it writes, counting values as its
+    // title does: one per document a key was resealed in
     fireEvent.click(
       within(pending).getByRole("button", { name: "Open pull request" }),
     );
     expect(
       await screen.findByRole("dialog", { name: "Open a pull request?" }),
     ).toHaveTextContent(
-      "writes 1 sealed value and 1 resealed value into 1 file",
+      "writes 1 sealed value and 2 resealed values into 1 file",
     );
   });
 
@@ -538,5 +543,283 @@ describe("Reseal all", () => {
     expect(
       within(file).queryByRole("button", { name: /Reseal all/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/** Answers the nth GET of a file reseal's progress with `fail` instead. */
+function failingPoll(
+  api: FakeApi,
+  nth: number,
+  fail: (config: Parameters<AxiosAdapter>[0]) => Error,
+): AxiosAdapter {
+  let polls = 0;
+  return async (config) => {
+    if (
+      (config.method ?? "get").toLowerCase() === "get" &&
+      /\/reseals\/[^/]+$/.test(config.url ?? "")
+    ) {
+      polls++;
+      if (polls === nth) throw fail(config);
+    }
+    return api.adapter(config);
+  };
+}
+
+/** An error response from the control plane, as axios raises it. */
+function httpError(
+  config: Parameters<AxiosAdapter>[0],
+  status: number,
+  error: string,
+  headers: Record<string, string> = {},
+): AxiosError {
+  return new AxiosError("error", "ERR_BAD_RESPONSE", config, undefined, {
+    status,
+    statusText: "",
+    data: { error },
+    headers,
+    config,
+  } as never);
+}
+
+/** Starts "Reseal all" on the billing file. */
+async function startReseal() {
+  const file = await panel();
+  fireEvent.click(within(file).getByRole("button", { name: /Reseal all/ }));
+  fireEvent.click(
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Reseal all",
+    }),
+  );
+  return file;
+}
+
+describe("Reseal all, when something goes wrong", () => {
+  const originalAdapter = apiClient.defaults.adapter;
+  beforeEach(() => {
+    sealPolling.intervalMs = 5;
+    resealPolling.intervalMs = 5;
+    resealPolling.maxBackoffMs = 20;
+  });
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter;
+  });
+
+  const reseals = (api: FakeApi) =>
+    api.calls.filter((c) => c.method === "POST" && c.url.endsWith("/reseals"));
+
+  it("keeps following a reseal through a failed check, and never asks again", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+      sessions: { "example-org/apps": { ...SESSION, changes: [] } },
+      fileReseals: [
+        fileReseal({ status: "resealing" }),
+        fileReseal({ status: "resealing" }),
+        fileReseal({ status: "done" }),
+      ],
+    });
+    // the second check is lost on the way, as on a flaky network
+    renderAt(PAGE, {
+      adapter: failingPoll(
+        api,
+        2,
+        (config) => new AxiosError("Network Error", "ERR_NETWORK", config),
+      ),
+    });
+    await startReseal();
+    expect(
+      await screen.findByRole("dialog", { name: "Resealed 1 value" }),
+    ).toBeVisible();
+    expect(reseals(api)).toHaveLength(1);
+  });
+
+  it("says it is trying again while checks fail, and waits as a 429 asks", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+      sessions: { "example-org/apps": { ...SESSION, changes: [] } },
+      fileReseals: [
+        fileReseal({ status: "resealing" }),
+        fileReseal({ status: "done" }),
+      ],
+    });
+    resealPolling.maxBackoffMs = 60_000;
+    let polls = 0;
+    const started = Date.now();
+    let retried = 0;
+    renderAt(PAGE, {
+      adapter: async (config) => {
+        if (/\/reseals\/[^/]+$/.test(config.url ?? "")) {
+          polls++;
+          if (polls === 1) {
+            throw httpError(config, 429, "too many requests", {
+              "retry-after": "1",
+            });
+          }
+          if (polls === 2) retried = Date.now() - started;
+        }
+        return api.adapter(config);
+      },
+    });
+    await startReseal();
+    const running = await screen.findByRole("dialog", { name: "Resealing…" });
+    expect(
+      await within(running).findByText(
+        /Couldn't check its progress: Too many requests.*Trying again/,
+      ),
+    ).toBeVisible();
+    await screen.findByRole(
+      "dialog",
+      { name: "Resealed 1 value" },
+      {
+        timeout: 3000,
+      },
+    );
+    // a second later, as Retry-After said, not 5ms
+    expect(retried).toBeGreaterThanOrEqual(900);
+    expect(reseals(api)).toHaveLength(1);
+  });
+
+  it("stops following when it may not, and says the changes may still come", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+      sessions: { "example-org/apps": { ...SESSION, changes: [] } },
+      fileReseals: [fileReseal({ status: "resealing" })],
+    });
+    renderAt(PAGE, {
+      adapter: failingPoll(api, 2, (config) =>
+        httpError(config, 403, "you need write access to example-org/apps"),
+      ),
+    });
+    await startReseal();
+    const ask = await screen.findByRole("dialog", {
+      name: "Reseal all values in this file?",
+    });
+    expect(within(ask).getByRole("alert")).toHaveTextContent(
+      "Lost track of the reseal: You need write access to example-org/apps. If it finishes, its changes join your pending changes.",
+    );
+    expect(reseals(api)).toHaveLength(1);
+  });
+
+  it("says when the session ended, and starts a new one when tried again", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+      sessions: { "example-org/apps": { ...SESSION, changes: [] } },
+      fileReseals: [fileReseal({ status: "resealing" })],
+      // it expires as the reseal runs
+      endSessionAfterResealPolls: 1,
+    });
+    renderAt(PAGE, api);
+    await startReseal();
+    const ask = await screen.findByRole("dialog", {
+      name: "Reseal all values in this file?",
+    });
+    expect(await within(ask).findByRole("alert")).toHaveTextContent(
+      "Your session ended: it expired, or its changes were discarded or sent in a pull request. Reseal the file again to start a new one.",
+    );
+    // the workspace takes the session as gone
+    expect(
+      screen.getByRole("region", { name: /pending changes/i, hidden: true }),
+    ).toHaveTextContent(/Nothing sealed yet/);
+    fireEvent.click(within(ask).getByRole("button", { name: "Reseal all" }));
+    await waitFor(() => expect(reseals(api)).toHaveLength(2));
+    expect(
+      api.calls.filter((c) => c.method === "POST").map((c) => c.url),
+    ).toEqual([
+      `${APPS}/session/${SESSION.id}/reseals`,
+      `${APPS}/session`,
+      `${APPS}/session/${SESSION.id}/reseals`,
+    ]);
+  });
+
+  it("holds the pull request back until the reseal finishes, and says why", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 1,
+          changes: [SEALED],
+        },
+      },
+      fileReseals: [fileReseal({ status: "resealing" })],
+    });
+    renderAt(PAGE, api);
+    await startReseal();
+    const running = await screen.findByRole("dialog", { name: "Resealing…" });
+    fireEvent.click(within(running).getByText("Close", { selector: "button" }));
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    const open = within(pending).getByRole("button", {
+      name: "Open pull request",
+    });
+    expect(open).toBeDisabled();
+    expect(open).toHaveAccessibleDescription(
+      "Wait for the reseal in progress to finish.",
+    );
+  });
+
+  it("keeps a repository's reseal to that repository", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: {
+        "example-org/apps": billing(),
+        "example-org/platform": billing({
+          repository: { ...REPO_PLATFORM, access: "write" },
+        }),
+      },
+      sessions: { "example-org/apps": { ...SESSION, changes: [] } },
+      fileReseals: [fileReseal({ status: "resealing" })],
+    });
+    const router = renderAt(PAGE, api);
+    await startReseal();
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "Resealing…" }),
+      ).getByText("Close", { selector: "button" }),
+    );
+    await act(async () => {
+      await router.navigate({
+        to: "/$env/secrets/$owner/$repo",
+        params: { env: "dev", owner: "example-org", repo: "platform" },
+      });
+    });
+    await screen.findByRole("heading", {
+      level: 1,
+      name: "example-org/platform",
+    });
+    // the other repository's file at the same path is not resealing
+    const file = await panel();
+    expect(
+      within(file).getByRole("button", { name: "Reseal all" }),
+    ).toBeVisible();
+    expect(
+      within(file).queryByRole("button", { name: /Resealing/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says when the status can't be read, rather than checking for good", async () => {
+    const api = fakeApi({
+      me: ADMIN,
+      files: { "example-org/apps": billing() },
+    });
+    renderAt(PAGE, {
+      adapter: async (config) => {
+        if ((config.url ?? "").endsWith("/status")) {
+          throw httpError(config, 503, "the control plane is starting");
+        }
+        return api.adapter(config);
+      },
+    });
+    const file = await panel();
+    await waitFor(() =>
+      expect(
+        availability(within(file).getByRole("button", { name: /Reseal all/ })),
+      ).toBe(
+        "Couldn't check whether values can be resealed: The control plane is starting. Trying again.",
+      ),
+    );
   });
 });

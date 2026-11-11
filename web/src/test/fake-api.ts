@@ -71,6 +71,12 @@ export interface Recorded {
 export interface FakeApi {
   adapter: AxiosAdapter;
   calls: Recorded[];
+  /** The resealing state the routes serve and change; tests may change it. */
+  reseal: {
+    schedules: ResealSchedule[];
+    runs: ResealRunSummary[];
+    pullRequests: ResealPullRequest[];
+  };
 }
 
 /**
@@ -107,6 +113,11 @@ export function fakeApi(opts: {
   fileResealError?: { status: number; error: string };
   /** The pending changes a file reseal adds once it is done. */
   resealChanges?: PendingChange[];
+  /**
+   * Ends the session (as if it expired) once a file reseal's progress was
+   * read this many times: later calls about it answer 404.
+   */
+  endSessionAfterResealPolls?: number;
 }): FakeApi {
   const calls: Recorded[] = [];
   // copies, so the routes never change the caller's fixtures
@@ -118,6 +129,10 @@ export function fakeApi(opts: {
   );
   let polls = 0;
   let resealPolls = 0;
+  // as the control plane, a pull request waits for seals and reseals in
+  // flight, and a reseal for seals
+  let sealRunning = false;
+  let resealRunning = false;
   const reseal = resealState(opts.reseal);
   const adapter: AxiosAdapter = async (config) => {
     // calls about an env come under /envs/{env}
@@ -234,7 +249,9 @@ export function fakeApi(opts: {
         return reply(current ? 200 : 201, { session: created });
       }
       if (!current || current.id !== id) {
-        return reply(404, { error: "session not found" });
+        return reply(404, {
+          error: "session not found; it may have expired or been discarded",
+        });
       }
       if (method === "DELETE" && rest === "") {
         delete sessions[key];
@@ -242,6 +259,7 @@ export function fakeApi(opts: {
       }
       if (method === "POST" && rest === "/seals") {
         polls = 0;
+        sealRunning = true;
         return reply(202, {
           ...sealOf(body as SealRequest),
           status: "queued",
@@ -255,6 +273,7 @@ export function fakeApi(opts: {
         const last = calls.filter((c) => c.url.endsWith("/seals")).at(-1)
           ?.body as SealRequest;
         const seal: Seal = { ...sealOf(last), status };
+        sealRunning = status === "queued" || status === "sealing";
         if (status === "sealed") {
           const change = changeFor(seal);
           current.changes = [
@@ -269,6 +288,12 @@ export function fakeApi(opts: {
         return reply(200, seal);
       }
       if (method === "POST" && rest === "/pull-request") {
+        if (sealRunning || resealRunning) {
+          return reply(409, {
+            error:
+              "a seal or reseal is still running; open the pull request once it finishes",
+          });
+        }
         if (opts.pullRequestError) {
           return reply(opts.pullRequestError.status, {
             error: opts.pullRequestError.error,
@@ -288,12 +313,22 @@ export function fakeApi(opts: {
         });
       }
       if (method === "POST" && rest === "/reseals") {
+        if (!opts.me?.envs.find((e) => e.name === env)?.admin) {
+          return reply(403, { error: "only admins can do this" });
+        }
+        if (sealRunning) {
+          return reply(409, {
+            error:
+              "a seal is still running in this session; reseal once it finishes",
+          });
+        }
         if (opts.fileResealError) {
           return reply(opts.fileResealError.status, {
             error: opts.fileResealError.error,
           });
         }
         resealPolls = 0;
+        resealRunning = true;
         return reply(202, {
           ...fileReseal({ path: (body as { path: string }).path }),
           status: "queued",
@@ -301,8 +336,16 @@ export function fakeApi(opts: {
       }
       const resealPoll = /^\/reseals\/([^/]+)$/.exec(rest);
       if (method === "GET" && resealPoll) {
+        if (resealPolls >= (opts.endSessionAfterResealPolls ?? Infinity)) {
+          delete sessions[key];
+          resealRunning = false;
+          return reply(404, {
+            error: "session not found; it may have expired or been discarded",
+          });
+        }
         const steps = opts.fileReseals ?? [fileReseal({ status: "done" })];
         const step = steps[Math.min(resealPolls++, steps.length - 1)]!;
+        resealRunning = step.status === "queued" || step.status === "resealing";
         const path = (
           calls.filter((c) => c.url.endsWith("/reseals")).at(-1)?.body as {
             path: string;
@@ -344,7 +387,7 @@ export function fakeApi(opts: {
     }
     return reply(404, { error: "not found" });
   };
-  return { adapter, calls };
+  return { adapter, calls, reseal };
 }
 
 export function emptyFleet(): Fleet {
@@ -718,6 +761,12 @@ function resealRoute(
       return ok(started, 202);
     }
     if (method === "DELETE") {
+      // as the control plane, deleting a schedule cancels its active run
+      const active = state.runs.find((r) => r.id === schedule.active_run_id);
+      if (active) {
+        active.status = "cancelled";
+        active.finished_at = new Date().toISOString();
+      }
       state.schedules.splice(at, 1);
       return { status: 204, body: "" };
     }

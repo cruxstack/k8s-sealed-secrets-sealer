@@ -323,6 +323,7 @@ export function RepoWorkspace({
                     repo={repo}
                     session={session}
                     sealing={sealBusy}
+                    resealing={resealer.state.phase === "running"}
                     onSelectFile={pick}
                     onOpened={(pr) => {
                       setOpened(pr);
@@ -351,7 +352,6 @@ export function RepoWorkspace({
                     onBusyChange={setSealBusy}
                     focusForm={picked}
                     round={round}
-                    sealingStatus={status}
                     resealer={envAccess?.admin ? resealer : undefined}
                   />
                 )}

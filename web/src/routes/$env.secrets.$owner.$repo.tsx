@@ -25,7 +25,10 @@ function RepoPage() {
   const navigate = Route.useNavigate();
   return (
     <SignedInPage>
+      {/* a repository starts afresh: nothing of another's, such as a
+          reseal it is running, carries over */}
       <RepoWorkspace
+        key={`${owner}/${repo}`}
         owner={owner}
         repo={repo}
         selected={file}

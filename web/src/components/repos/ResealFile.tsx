@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, RotateCcwKey } from "lucide-react";
 import { toast } from "sonner";
-import { extractApiError } from "@/api/client";
+import { ApiError, toApiError } from "@/api/client";
 import {
   getReseal,
   openSession,
   requestReseal,
   sessionQueryKey,
 } from "@/api/queries/sessions";
+import { statusQueryOptions } from "@/api/queries/status";
 import type {
   FileReseal,
   RepositoryFile,
@@ -17,7 +18,7 @@ import type {
 } from "@/api/types";
 import { Point, Points } from "@/components/fleet/KeyDialogs";
 import { plural } from "@/components/fleet/references";
-import { resealBlocked } from "@/components/reseal/format";
+import { resealReason } from "@/components/reseal/format";
 import { Progress } from "@/components/reseal/status";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -35,10 +36,47 @@ import { RegionTag } from "@/components/ui/region-tag";
 import { sentence } from "@/lib/utils";
 import { isPending, pendingDocs } from "./keys";
 
-/** How often a file reseal's progress is checked; tests shorten it. */
-export const resealPolling = { intervalMs: 1000 };
+/**
+ * How often a file reseal's progress is checked, the longest wait between
+ * checks after failed ones, and how long to keep checking at all (its
+ * commands expire after 10 minutes); tests shorten them.
+ */
+export const resealPolling = {
+  intervalMs: 1000,
+  maxBackoffMs: 30_000,
+  giveUpMs: 15 * 60_000,
+};
 
 const FINISHED = new Set<FileReseal["status"]>(["done", "failed", "expired"]);
+
+/**
+ * Whether a failed check is worth trying again: the server keeps
+ * resealing whether or not it was asked, so a dropped connection, a
+ * gateway's error or a rate limit says nothing about the reseal.
+ */
+function transient(e: ApiError): boolean {
+  return (
+    e.status === undefined ||
+    e.status === 408 ||
+    e.status === 429 ||
+    e.status >= 500
+  );
+}
+
+/** How long to wait before the next check after `failures` in a row. */
+function backoff(failures: number, e: ApiError): number {
+  if (e.retryAfter !== undefined) {
+    return Math.max(e.retryAfter * 1000, resealPolling.intervalMs);
+  }
+  return Math.min(
+    resealPolling.intervalMs * 2 ** failures,
+    resealPolling.maxBackoffMs,
+  );
+}
+
+/** What a 404 means here: the session ended, and the reseal with it. */
+export const SESSION_ENDED =
+  "Your session ended: it expired, or its changes were discarded or sent in a pull request. Reseal the file again to start a new one.";
 
 /** Where "Reseal all" stands in a repository's workspace. */
 export interface FileResealState {
@@ -49,6 +87,8 @@ export interface FileResealState {
   progress: FileReseal | null;
   /** Why the reseal could not start or finish. */
   error: string | null;
+  /** While running: why the last check failed, as it is tried again. */
+  retrying: string | null;
   /** Whether its dialog shows. */
   open: boolean;
 }
@@ -58,6 +98,7 @@ const IDLE: FileResealState = {
   phase: "confirm",
   progress: null,
   error: null,
+  retrying: null,
   open: false,
 };
 
@@ -108,10 +149,38 @@ export function useFileReseal(owner: string, repo: string): FileResealer {
     (session: SealSession | null, commit: string) => {
       const path = state.path;
       if (!path || state.phase === "running") return;
-      update({ phase: "running", progress: null, error: null });
+      update({ phase: "running", progress: null, error: null, retrying: null });
+      const refreshSession = () =>
+        Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: sessionQueryKey(owner, repo),
+          }),
+          queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+        ]);
+      // back to asking, with why, where it can be tried again; it is
+      // never asked again on its own
+      const stop = (err: unknown, started: boolean) => {
+        const e = toApiError(err);
+        const why =
+          e.status === 404
+            ? SESSION_ENDED
+            : started
+              ? `Lost track of the reseal: ${sentence(e.message)} If it finishes, its changes join your pending changes.`
+              : `Could not reseal the file: ${sentence(e.message)}`;
+        update({ phase: "confirm", error: why, retrying: null, open: true });
+        // a session that ended reads as none at once, so trying again
+        // opens a new one (the server hands back the open one if it
+        // was only the reseal that was not found)
+        if (e.status === 404) {
+          queryClient.setQueryData(sessionQueryKey(owner, repo), null);
+        }
+        void refreshSession();
+      };
+
       void (async () => {
+        let current = session;
+        let progress: FileReseal;
         try {
-          let current = session;
           if (!current) {
             // the first change opens a session where the page is, as a
             // seal does
@@ -121,34 +190,50 @@ export function useFileReseal(owner: string, repo: string): FileResealer {
               changes: current.changes ?? [],
             });
           }
-          let progress = await requestReseal(owner, repo, current.id, path);
-          update({ progress });
-          while (!FINISHED.has(progress.status)) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, resealPolling.intervalMs),
-            );
-            if (!alive.current) return;
-            progress = await getReseal(owner, repo, current.id, progress.id);
-            update({ progress });
-          }
-          update({ phase: "done" });
-          void queryClient.invalidateQueries({
-            queryKey: sessionQueryKey(owner, repo),
-          });
-          void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          if (!open.current && alive.current) {
-            const { title, tone } = summaryTitle(progress);
-            toast[tone](title, {
-              description: (
-                <code className="font-mono text-xs [overflow-wrap:anywhere]">
-                  {path}
-                </code>
-              ),
-            });
-          }
+          progress = await requestReseal(owner, repo, current.id, path);
         } catch (err) {
-          // back to asking, with why, where it can be tried again
-          update({ phase: "confirm", error: extractApiError(err), open: true });
+          stop(err, false);
+          return;
+        }
+        update({ progress });
+
+        // the server reseals whether or not it is asked how far it got:
+        // a check that fails for a moment is tried again, with less
+        // haste each time
+        const giveUpAt = Date.now() + resealPolling.giveUpMs;
+        let failures = 0;
+        let wait = resealPolling.intervalMs;
+        while (!FINISHED.has(progress.status)) {
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          if (!alive.current) return;
+          try {
+            progress = await getReseal(owner, repo, current.id, progress.id);
+          } catch (err) {
+            const e = toApiError(err);
+            if (!transient(e) || Date.now() >= giveUpAt) {
+              stop(e, true);
+              return;
+            }
+            failures++;
+            wait = backoff(failures, e);
+            update({ retrying: sentence(e.message) });
+            continue;
+          }
+          failures = 0;
+          wait = resealPolling.intervalMs;
+          update({ progress, retrying: null });
+        }
+        update({ phase: "done" });
+        void refreshSession();
+        if (!open.current && alive.current) {
+          const { title, tone } = summaryTitle(progress);
+          toast[tone](title, {
+            description: (
+              <code className="font-mono text-xs [overflow-wrap:anywhere]">
+                {path}
+              </code>
+            ),
+          });
         }
       })();
     },
@@ -198,6 +283,7 @@ export function resealAllReason({
   canWrite,
   sealing,
   status,
+  statusError,
   values,
 }: {
   file: RepositoryFile;
@@ -205,13 +291,14 @@ export function resealAllReason({
   canWrite: boolean;
   sealing: boolean;
   status: SealingStatus | undefined;
+  /** Why the status could not be read, while it is not known. */
+  statusError?: unknown;
   values: number;
 }): string | undefined {
   if (!canWrite) {
     return "Resealing needs write access to this repository on GitHub.";
   }
-  if (!status) return "Checking whether values can be resealed…";
-  const blocked = resealBlocked(status);
+  const blocked = resealReason(status, statusError);
   if (blocked) return blocked;
   if ((file.documents ?? []).length === 0) {
     return `This file has no SealedSecret for the ${env} env.`;
@@ -269,7 +356,7 @@ function ConfirmStep({
       </Points>
       {error && (
         <p role="alert" className="text-sm text-destructive">
-          Could not reseal the file: {sentence(error)}
+          {error}
         </p>
       )}
       <DialogFooter>
@@ -291,7 +378,14 @@ function agentName(r: FileReseal | null): string | null {
 }
 
 /** How far the reseal has got. */
-function RunningStep({ progress }: { progress: FileReseal | null }) {
+function RunningStep({
+  progress,
+  retrying,
+}: {
+  progress: FileReseal | null;
+  /** Why the last check failed, as it is tried again. */
+  retrying: string | null;
+}) {
   const agent = agentName(progress);
   const v = progress?.values;
   const todo = v ? v.total - v.pending : 0;
@@ -322,6 +416,12 @@ function RunningStep({ progress }: { progress: FileReseal | null }) {
         </p>
         {progress && todo > 0 && (
           <Progress done={done} total={todo} label="Values checked" />
+        )}
+        {retrying && (
+          <p className="text-xs text-warning">
+            Couldn't check its progress: {retrying} Trying again; the server
+            goes on resealing.
+          </p>
         )}
       </div>
       <p className="text-xs text-muted-foreground">
@@ -428,7 +528,6 @@ export function ResealAll({
   commit,
   canWrite,
   sealing,
-  status,
   resealer,
 }: {
   file: RepositoryFile;
@@ -439,9 +538,9 @@ export function ResealAll({
   canWrite: boolean;
   /** A seal is in progress on the page. */
   sealing: boolean;
-  status: SealingStatus | undefined;
   resealer: FileResealer;
 }) {
+  const { data: status, error: statusError } = useQuery(statusQueryOptions);
   const { state } = resealer;
   const here = state.path === file.path;
   const running = state.phase === "running";
@@ -457,6 +556,7 @@ export function ResealAll({
             canWrite,
             sealing,
             status,
+            statusError,
             values: values.total,
           });
   return (
@@ -490,7 +590,7 @@ export function ResealAll({
             />
           )}
           {state.phase === "running" && (
-            <RunningStep progress={state.progress} />
+            <RunningStep progress={state.progress} retrying={state.retrying} />
           )}
           {state.phase === "done" && state.progress && (
             <DoneStep progress={state.progress} />

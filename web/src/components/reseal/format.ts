@@ -1,4 +1,5 @@
 import type { ResealScheduleInput, SealingStatus } from "@/api/types";
+import { extractApiError } from "@/api/client";
 import { sentence } from "@/lib/utils";
 
 const DAY_MS = 86_400_000;
@@ -162,4 +163,21 @@ export function resealBlocked(
   return sentence(
     status.reseal_blocked ?? "This control plane cannot reseal values.",
   );
+}
+
+/**
+ * Why nothing can be resealed now, for an action that would: what the
+ * status says, that it could not be read (it is read again every 30
+ * seconds), or that it is being read. Undefined when values can be
+ * resealed.
+ */
+export function resealReason(
+  status: SealingStatus | undefined,
+  error: unknown,
+): string | undefined {
+  if (status) return resealBlocked(status);
+  if (error) {
+    return `Couldn't check whether values can be resealed: ${sentence(extractApiError(error))} Trying again.`;
+  }
+  return "Checking whether values can be resealed…";
 }
