@@ -238,6 +238,58 @@ func TestKeyDelete_FromRevocationToRemoval(t *testing.T) {
 	}
 }
 
+// A deleted key every cluster removed comes back to every cluster when it
+// is reinstated, from escrow: restores otherwise spread only keys some
+// cluster holds.
+func TestKeyDelete_ReinstatedKeyHeldByNoneIsRestored(t *testing.T) {
+	kh := newKeyHarnessWith(t, cleanupRegistry)
+	old := newTestKey(t, time.Now().Add(-48*time.Hour))
+	env := newTestKey(t, time.Now().Add(-time.Hour))
+	for _, id := range []string{"a", "b"} {
+		kh.cleanupCheckIn(id, nil, old, env)
+	}
+	for _, k := range []testKey{old, env} {
+		if code := kh.upload("a", k); code != http.StatusOK {
+			t.Fatalf("upload = %d", code)
+		}
+	}
+	if rec := kh.setStatus(old.Fingerprint, "revoke"); rec.Code != http.StatusOK {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	kh.advance(time.Minute)
+	for _, id := range []string{"a", "b"} {
+		kh.cleanupCheckIn(id, counts(kh.clock(), map[string]int{env.Fingerprint: 1}), old, env)
+	}
+	if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body)
+	}
+	// both clusters remove it
+	for _, id := range []string{"a", "b"} {
+		kh.cleanupCheckIn(id, counts(kh.clock(), map[string]int{env.Fingerprint: 1}), old, env)
+		if cmds := kh.poll(id); len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysDelete {
+			t.Fatalf("%s commands = %+v", id, cmds)
+		}
+		kh.cleanupCheckIn(id, counts(kh.clock(), map[string]int{env.Fingerprint: 1}), env)
+	}
+	if k := fleetKey(t, kh.fleet(), old.Fingerprint); len(k.Holders) != 0 {
+		t.Fatalf("holders after the removals = %v", k.Holders)
+	}
+
+	if rec := kh.setStatus(old.Fingerprint, "reinstate"); rec.Code != http.StatusOK {
+		t.Fatalf("reinstate = %d", rec.Code)
+	}
+	if k := fleetKey(t, kh.fleet(), old.Fingerprint); k.Status != store.KeyActive || len(k.Holders) != 0 {
+		t.Fatalf("reinstated key = %+v", k)
+	}
+	for _, id := range []string{"a", "b"} {
+		kh.cleanupCheckIn(id, counts(kh.clock(), map[string]int{env.Fingerprint: 1}), env)
+		cmds := kh.poll(id)
+		if len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysRestore || !strings.Contains(string(cmds[0].Payload), old.Fingerprint) {
+			t.Fatalf("%s commands after reinstating = %+v", id, cmds)
+		}
+	}
+}
+
 // After its escrowed copies are purged, a deleted key cannot come back,
 // and once no cluster holds it, it leaves the fleet view.
 func TestKeyDelete_PurgedKeyCannotBeReinstated(t *testing.T) {

@@ -40,9 +40,11 @@ const (
 	// (skEscrow), one per uploading agent.
 	escrowCopyPrefix = skEscrow + "#"
 	// revokedPK holds one item per revoked key (revokedPrefix and its
-	// fingerprint), so every check-in reads them all with one query.
-	revokedPK     = "KEYS"
-	revokedPrefix = "REVOKED#"
+	// fingerprint) and per reinstated one (reinstatedPrefix), so every
+	// check-in reads them all with one query.
+	revokedPK        = "KEYS"
+	revokedPrefix    = "REVOKED#"
+	reinstatedPrefix = "REINSTATED#"
 
 	// attrExpiresAt is the table's TTL attribute (epoch seconds). TTL only
 	// cleans up; code never trusts an item to be gone after it expires.
@@ -242,8 +244,13 @@ func (d *Dynamo) SetKeyStatus(ctx context.Context, k KeyRecord) (bool, error) {
 		}
 		index = types.TransactWriteItem{Put: &types.Put{TableName: &d.table, Item: item}}
 	}
+	// a key revoked again is no longer to be restored everywhere
+	reinstated := types.TransactWriteItem{Delete: &types.Delete{
+		TableName: &d.table,
+		Key:       itemKey(revokedPK, reinstatedPrefix+k.Fingerprint),
+	}}
 	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{update, index},
+		TransactItems: []types.TransactWriteItem{update, index, reinstated},
 	})
 	switch {
 	case conditionFailed(err):
@@ -327,7 +334,15 @@ func (d *Dynamo) ReinstateDeletedKey(ctx context.Context, k KeyRecord) error {
 	if err != nil {
 		return err
 	}
+	listed, err := attributevalue.MarshalMap(reinstatedItem{
+		PK: revokedPK, SK: reinstatedPrefix + k.Fingerprint, ReinstatedKey: reinstatedKey(k),
+		ExpiresAt: reinstatedKey(k).At.Add(ReinstatedRestoreWindow).Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to encode reinstated key %s: %w", k.Fingerprint, err)
+	}
 	items := []types.TransactWriteItem{
+		{Put: &types.Put{TableName: &d.table, Item: listed}},
 		{Update: &types.Update{
 			TableName:                &d.table,
 			Key:                      itemKey(keyPrefix+k.Fingerprint, skMeta),
@@ -433,27 +448,53 @@ func escrowExpiry(table, fingerprint string, sks []string, copies int, update st
 }
 
 func (d *Dynamo) RevokedKeys(ctx context.Context) (map[string]RevokedKey, error) {
-	out := map[string]RevokedKey{}
+	lists, err := d.KeyLists(ctx)
+	return lists.Revoked, err
+}
+
+type reinstatedItem struct {
+	PK string `dynamodbav:"pk"`
+	SK string `dynamodbav:"sk"`
+	ReinstatedKey
+	ExpiresAt int64 `dynamodbav:"expires_at"`
+}
+
+func (d *Dynamo) KeyLists(ctx context.Context) (KeyLists, error) {
+	out := KeyLists{Revoked: map[string]RevokedKey{}, Reinstated: map[string]ReinstatedKey{}}
 	in := &dynamodb.QueryInput{
 		TableName:              &d.table,
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :revoked)"),
+		KeyConditionExpression: aws.String("pk = :pk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk":      &types.AttributeValueMemberS{Value: revokedPK},
-			":revoked": &types.AttributeValueMemberS{Value: revokedPrefix},
+			":pk": &types.AttributeValueMemberS{Value: revokedPK},
 		},
 		ConsistentRead: aws.Bool(true),
 	}
+	now := time.Now()
 	for {
 		res, err := d.api.Query(ctx, in)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read revoked keys: %w", err)
+			return KeyLists{}, fmt.Errorf("failed to read revoked keys: %w", err)
 		}
 		for _, raw := range res.Items {
-			var item revokedItem
-			if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
-				return nil, fmt.Errorf("failed to decode revoked key: %w", err)
+			sk, _ := raw[attrSK].(*types.AttributeValueMemberS)
+			switch {
+			case sk == nil:
+			case strings.HasPrefix(sk.Value, revokedPrefix):
+				var item revokedItem
+				if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
+					return KeyLists{}, fmt.Errorf("failed to decode revoked key: %w", err)
+				}
+				out.Revoked[item.Fingerprint] = item.RevokedKey
+			case strings.HasPrefix(sk.Value, reinstatedPrefix):
+				var item reinstatedItem
+				if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
+					return KeyLists{}, fmt.Errorf("failed to decode reinstated key: %w", err)
+				}
+				// past its TTL, whether or not DynamoDB has removed it
+				if now.Unix() < item.ExpiresAt {
+					out.Reinstated[item.Fingerprint] = item.ReinstatedKey
+				}
 			}
-			out[item.Fingerprint] = item.RevokedKey
 		}
 		if len(res.LastEvaluatedKey) == 0 {
 			return out, nil

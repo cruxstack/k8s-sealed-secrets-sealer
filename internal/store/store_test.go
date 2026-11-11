@@ -544,8 +544,12 @@ func TestStore_DeleteKey(t *testing.T) {
 			if got.Status != KeyActive || got.StatusBy != "carol" || got.PurgeAt != nil {
 				t.Fatalf("reinstated key: %+v", got)
 			}
-			if revoked, _ := s.RevokedKeys(ctx); len(revoked) != 0 {
-				t.Fatalf("a reinstated key is still listed: %v", revoked)
+			lists, err := s.KeyLists(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := lists.Reinstated[fp]; len(lists.Revoked) != 0 || r.By != "carol" || !r.At.Equal(later) || !r.NotBefore.Equal(k.NotBefore) {
+				t.Fatalf("lists after reinstating = %+v", lists)
 			}
 			// its copies no longer expire, so new ones may be added again
 			if stored, _, err := s.PutEscrow(ctx, extra, 3); err != nil || !stored {
@@ -557,6 +561,10 @@ func TestStore_DeleteKey(t *testing.T) {
 			past := now.Add(-time.Second)
 			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
 				t.Fatalf("revoke again: ok=%v err=%v", ok, err)
+			}
+			// revoked, it is no longer to be restored everywhere
+			if lists, err := s.KeyLists(ctx); err != nil || len(lists.Reinstated) != 0 || len(lists.Revoked) != 1 {
+				t.Fatalf("lists after revoking again = %+v, %v", lists, err)
 			}
 			del.PurgeAt = &past
 			if err := s.DeleteKey(ctx, del); err != nil {

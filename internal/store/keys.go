@@ -59,6 +59,41 @@ func revokedKey(k KeyRecord) RevokedKey {
 	return r
 }
 
+// ReinstatedRestoreWindow is how long a deleted key an admin reinstated is
+// listed as reinstated (ReinstatedKey): key sync restores it to every
+// cluster meanwhile, although no cluster may hold it any more.
+const ReinstatedRestoreWindow = 7 * 24 * time.Hour
+
+// ReinstatedKey is a deleted key an admin reinstated. Its clusters may
+// all have removed it, and key sync restores only keys a cluster holds, so
+// it is listed for ReinstatedRestoreWindow: until then every cluster
+// without it is missing it.
+type ReinstatedKey struct {
+	Fingerprint string    `dynamodbav:"fingerprint" json:"fingerprint"`
+	NotBefore   time.Time `dynamodbav:"not_before" json:"not_before"`
+	NotAfter    time.Time `dynamodbav:"not_after" json:"not_after"`
+	By          string    `dynamodbav:"reinstated_by" json:"reinstated_by"`
+	At          time.Time `dynamodbav:"reinstated_at" json:"reinstated_at"`
+}
+
+// reinstatedKey is the record ReinstateDeletedKey lists for k.
+func reinstatedKey(k KeyRecord) ReinstatedKey {
+	r := ReinstatedKey{Fingerprint: k.Fingerprint, NotBefore: k.NotBefore, NotAfter: k.NotAfter, By: k.StatusBy}
+	if k.StatusAt != nil {
+		r.At = *k.StatusAt
+	}
+	return r
+}
+
+// KeyLists are the env's lists of keys, read together.
+type KeyLists struct {
+	// Revoked are the revoked keys, deleted ones included.
+	Revoked map[string]RevokedKey
+	// Reinstated are the deleted keys reinstated within
+	// ReinstatedRestoreWindow.
+	Reinstated map[string]ReinstatedKey
+}
+
 // KeyUsage is an agent's latest count of key references, as the control
 // plane received it.
 type KeyUsage struct {

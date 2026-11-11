@@ -61,6 +61,10 @@ type Keys struct {
 	// Escrow lists, by fingerprint, the agents that escrowed a copy of
 	// each key; a key with no escrowed copy is absent.
 	Escrow map[string][]string
+	// Reinstated are the deleted keys an admin reinstated lately, by
+	// fingerprint: every in-scope cluster without one is missing it, though
+	// no cluster may hold it any more.
+	Reinstated map[string]store.ReinstatedKey
 	// Usage holds each agent's latest count of key references, by agent
 	// ID. It is nil where it was not read: check-ins plan without it, and
 	// every key then counts as uncounted.
@@ -302,7 +306,7 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 	markJoining(f.Agents, keys, usable, now)
 	f.EnvKey = envKey(f.Agents, func(a *Agent) bool { return a.Joining }, usable)
 	f.KeysInSync = f.EnvKey != nil
-	markMissing(f.Agents, usable)
+	markMissing(f.Agents, keys.Reinstated, usable)
 	f.NoUsableKey = f.EnvKey == nil && noUsableKey(f.Agents)
 	explainHoldups(f.Agents, f.EnvKey, usable, now)
 	f.Keys = keyList(f.Agents, f.EnvKey, keys, now)
@@ -398,10 +402,16 @@ func markJoining(agents []Agent, keys Keys, usable func(store.KeyRef) bool, now 
 }
 
 // markMissing lists, for each in-scope agent, the usable keys other
-// in-scope clusters hold that it does not, leaving out keys that may be
-// among those dropped from its report over the key limit.
-func markMissing(agents []Agent, usable func(store.KeyRef) bool) {
+// in-scope clusters hold, and the reinstated keys, that it does not,
+// leaving out keys that may be among those dropped from its report over
+// the key limit.
+func markMissing(agents []Agent, reinstated map[string]store.ReinstatedKey, usable func(store.KeyRef) bool) {
 	held := map[string]store.KeyRef{}
+	for fp, r := range reinstated {
+		if k := (store.KeyRef{Fingerprint: fp, NotBefore: r.NotBefore, NotAfter: r.NotAfter}); usable(k) {
+			held[fp] = k
+		}
+	}
 	for _, a := range agents {
 		if !a.InScope {
 			continue
@@ -482,8 +492,9 @@ func keyIssues(a Agent, now time.Time) []string {
 	return out
 }
 
-// keyList lists every key a checked-in cluster reports and every revoked
-// key, newest first, with what the clusters counted of each. A deleted key
+// keyList lists every key a checked-in cluster reports, every revoked key
+// and every reinstated one, newest first, with what the clusters counted of
+// each. A deleted key
 // is left out once no cluster reports it and its escrowed copies are
 // purged: it can neither come back nor need removing.
 func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key {
@@ -500,6 +511,12 @@ func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key 
 		for _, ref := range a.Keys {
 			k := entry(ref.Fingerprint, ref.NotBefore, ref.NotAfter)
 			k.Holders = append(k.Holders, a.ID)
+		}
+	}
+	// a reinstated key is listed while it is restored, held by none at first
+	for fp, r := range keys.Reinstated {
+		if _, revoked := keys.Revoked[fp]; !revoked {
+			entry(fp, r.NotBefore, r.NotAfter)
 		}
 	}
 	for fp, r := range keys.Revoked {

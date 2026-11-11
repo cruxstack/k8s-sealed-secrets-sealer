@@ -24,6 +24,7 @@ type Memory struct {
 	escrow        map[string][]protocol.EscrowRecord
 	escrowExpires map[string]time.Time
 	revoked       map[string]RevokedKey
+	reinstated    map[string]ReinstatedKey
 	usage         map[string]KeyUsage
 	// sessions by user ID, then repository key; seals and changes by
 	// session ID, then command or change ID
@@ -59,6 +60,7 @@ func NewMemory() *Memory {
 		requests: map[rateWindow]int{},
 
 		escrowExpires: map[string]time.Time{},
+		reinstated:    map[string]ReinstatedKey{},
 	}
 }
 
@@ -110,6 +112,7 @@ func (m *Memory) SetKeyStatus(_ context.Context, k KeyRecord) (bool, error) {
 	}
 	rec.Status, rec.StatusBy, rec.StatusAt = k.Status, k.StatusBy, k.StatusAt
 	m.keys[k.Fingerprint] = rec
+	delete(m.reinstated, k.Fingerprint)
 	if k.Status == KeyRevoked {
 		m.revoked[k.Fingerprint] = revokedKey(k)
 	} else {
@@ -145,6 +148,7 @@ func (m *Memory) ReinstateDeletedKey(_ context.Context, k KeyRecord) error {
 	m.keys[k.Fingerprint] = rec
 	delete(m.revoked, k.Fingerprint)
 	delete(m.escrowExpires, k.Fingerprint)
+	m.reinstated[k.Fingerprint] = reinstatedKey(k)
 	return nil
 }
 
@@ -152,6 +156,19 @@ func (m *Memory) RevokedKeys(_ context.Context) (map[string]RevokedKey, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return maps.Clone(m.revoked), nil
+}
+
+func (m *Memory) KeyLists(_ context.Context) (KeyLists, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := KeyLists{Revoked: maps.Clone(m.revoked), Reinstated: map[string]ReinstatedKey{}}
+	now := time.Now()
+	for fp, r := range m.reinstated {
+		if now.Before(r.At.Add(ReinstatedRestoreWindow)) {
+			out.Reinstated[fp] = r
+		}
+	}
+	return out, nil
 }
 
 func (m *Memory) PutKeyUsage(_ context.Context, u KeyUsage) (bool, error) {

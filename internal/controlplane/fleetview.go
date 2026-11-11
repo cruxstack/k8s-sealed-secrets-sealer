@@ -11,14 +11,17 @@ import (
 )
 
 // fleetSnapshot is what the fleet is computed from: the registry in force,
-// every registered agent's latest state and the revoked keys.
+// every registered agent's latest state, and the revoked and reinstated
+// keys.
 type fleetSnapshot struct {
-	reg     *registry.Registry
-	states  map[string]store.AgentState
-	revoked map[string]store.RevokedKey
+	reg        *registry.Registry
+	states     map[string]store.AgentState
+	revoked    map[string]store.RevokedKey
+	reinstated map[string]store.ReinstatedKey
 }
 
-// readSnapshot reads every registered agent's state and the revoked keys.
+// readSnapshot reads every registered agent's state and the revoked and
+// reinstated keys.
 // Check-ins read them afresh: renewal and restore decisions rest on the
 // other agents' latest states, and a check-in that planned from older ones
 // could turn renewal on in a second cluster.
@@ -32,11 +35,11 @@ func (s *Server) readSnapshot(ctx context.Context) (fleetSnapshot, error) {
 	if err != nil {
 		return fleetSnapshot{}, err
 	}
-	revoked, err := s.store.RevokedKeys(ctx)
+	lists, err := s.store.KeyLists(ctx)
 	if err != nil {
 		return fleetSnapshot{}, err
 	}
-	return fleetSnapshot{reg: reg, states: states, revoked: revoked}, nil
+	return fleetSnapshot{reg: reg, states: states, revoked: lists.Revoked, reinstated: lists.Reinstated}, nil
 }
 
 // loadFleet reads the fleet afresh and computes it at now. With usage it
@@ -74,11 +77,15 @@ func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.
 			fps = append(fps, k.Fingerprint)
 		}
 	}
+	// a reinstated key may be in no cluster, and is restored from escrow
+	for fp := range snap.reinstated {
+		fps = append(fps, fp)
+	}
 	escrow, err := s.escrowUploaders(ctx, fps, self)
 	if err != nil {
 		return fleet.Keys{}, err
 	}
-	return fleet.Keys{Revoked: snap.revoked, Escrow: escrow}, nil
+	return fleet.Keys{Revoked: snap.revoked, Escrow: escrow, Reinstated: snap.reinstated}, nil
 }
 
 // escrowUploaders returns who escrowed each key. Escrow records are never

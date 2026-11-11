@@ -654,3 +654,33 @@ func TestCompute_DeletedKey(t *testing.T) {
 		t.Error("a purged key no cluster holds is listed")
 	}
 }
+
+// A reinstated key may be in no cluster any more: every in-scope cluster
+// lacks it, so restore brings it back, and it is listed meanwhile.
+func TestCompute_ReinstatedKeyIsMissingWhereNotHeld(t *testing.T) {
+	reg := testRegistry(t, "a", "b")
+	env, back := key("SHA256:env", 1), key("SHA256:back", 30)
+	keys := Keys{Reinstated: map[string]store.ReinstatedKey{
+		back.Fingerprint: {Fingerprint: back.Fingerprint, NotBefore: back.NotBefore, NotAfter: back.NotAfter, By: "alice", At: now},
+	}}
+	f := Compute("dev", reg, map[string]store.AgentState{
+		"a": state("a", time.Second, env),
+		"b": state("b", time.Second, back, env),
+	}, keys, now)
+	if got := agent(t, f, "a").MissingKeys; !slices.Equal(got, []string{back.Fingerprint}) {
+		t.Errorf("a missing = %v", got)
+	}
+	if got := agent(t, f, "b").MissingKeys; len(got) != 0 {
+		t.Errorf("b missing = %v", got)
+	}
+	f = Compute("dev", reg, map[string]store.AgentState{
+		"a": state("a", time.Second, env),
+		"b": state("b", time.Second, env),
+	}, keys, now)
+	if k := listed(t, f, back.Fingerprint); k.Status != store.KeyActive || len(k.Holders) != 0 || k.EnvKey {
+		t.Errorf("reinstated key held by none = %+v", k)
+	}
+	if f.EnvKey == nil || f.EnvKey.Fingerprint != env.Fingerprint || len(agent(t, f, "b").MissingKeys) != 1 {
+		t.Errorf("env key %+v, b missing %v", f.EnvKey, agent(t, f, "b").MissingKeys)
+	}
+}

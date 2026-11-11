@@ -91,9 +91,10 @@ type Store interface {
 	GetKey(ctx context.Context, fingerprint string) (KeyRecord, bool, error)
 	// SetKeyStatus records k's Status (KeyActive or KeyRevoked), StatusBy
 	// and StatusAt on its record and, in the same write, lists a revoked key
-	// for RevokedKeys or takes a reinstated one off. It reports whether the
-	// key has a record, and fails with ErrKeyChanged when the key is
-	// deleted: DeleteKey and ReinstateDeletedKey change those.
+	// for RevokedKeys or takes a reinstated one off, and takes the key off
+	// the reinstated keys. It reports whether the key has a record, and
+	// fails with ErrKeyChanged when the key is deleted: DeleteKey and
+	// ReinstateDeletedKey change those.
 	SetKeyStatus(ctx context.Context, k KeyRecord) (bool, error)
 	// DeleteKey marks a revoked key deleted, by k.StatusBy at k.StatusAt,
 	// and sets its escrowed copies to expire at k.PurgeAt, all in one
@@ -102,13 +103,17 @@ type Store interface {
 	// deleted or has no record), or its escrowed copies changed meanwhile.
 	DeleteKey(ctx context.Context, k KeyRecord) error
 	// ReinstateDeletedKey makes a deleted key active, by k.StatusBy at
-	// k.StatusAt: it keeps its escrowed copies and takes it off the revoked
-	// keys, all in one write. It fails with ErrKeyChanged when the key is
-	// not deleted. Whether its copies were purged is the caller's to check.
+	// k.StatusAt: it keeps its escrowed copies, takes it off the revoked
+	// keys and lists it as reinstated (KeyLists), all in one write. It
+	// fails with ErrKeyChanged when the key is not deleted. Whether its
+	// copies were purged is the caller's to check.
 	ReinstateDeletedKey(ctx context.Context, k KeyRecord) error
 	// RevokedKeys returns the env's revoked keys, deleted ones included, by
 	// fingerprint.
 	RevokedKeys(ctx context.Context) (map[string]RevokedKey, error)
+	// KeyLists returns the env's revoked keys and its reinstated ones,
+	// with one read.
+	KeyLists(ctx context.Context) (KeyLists, error)
 
 	// PutKeyUsage stores an agent's key usage report, replacing the one
 	// before, unless the stored report has the same ScannedAt: a report is
