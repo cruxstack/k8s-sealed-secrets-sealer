@@ -46,12 +46,23 @@ the env badge, with a summary in its tooltip; when it doesn't, the workspace
 says so above the files, since seals would fail.
 
 Under its agents, the fleet lists the env's keys, newest first: how many
-clusters hold each, its escrowed copies, and its status as a badge (env key,
-active, revoked, future-dated). Revoking a key is a ghost button on its row
-that opens a dialog saying what revoking does and does not do, with a
-destructive confirm; a revoked key's row is muted and offers Reinstate,
-which confirms in a dialog too, since the key goes back into every cluster
-and may become the env key. A notice under the env key warns when a
+clusters hold each, its escrowed copies, its references (the values sealed
+with it, as its clusters counted them), and its status as a badge (env key,
+active, revoked, deleted, future-dated). A reference count never shows a
+bare 0 when a cluster did not count: it is "Unknown" or "At least 12
+values", naming the clusters left out, and opens the count per cluster in a
+row under the key. When no agent counts at all, one note above the table
+says why and the column holds dashes. Every key's row has the same three
+actions, as icons: Revoke, Delete and Reinstate, each grayed out with the
+reason when it does not apply (Delete always, unless the control plane says
+the key may go). Each confirms in a dialog that says what it does and does
+not do: revoking and deleting with a destructive confirm, reinstating
+because the key goes back into every cluster and may become the env key. A
+revoked or deleted key's row is muted; a deleted key's status says who
+deleted it, when its escrowed copies are purged, and the clusters it is
+still being removed from. The agents table shows each agent's latest count:
+values and SealedSecrets, when, the namespaces when not all, and values no
+key decrypts in the warning color. A notice under the env key warns when a
 cluster's keys reach half or 80% of the key limit, or go past it. With no
 env key, the banner says why and what happens next: keys out of sync (and
 whether any agent has checked in), or a new key needed when every key the
@@ -172,8 +183,12 @@ Only table column headers are uppercase (see Tables).
 - Counts are right-aligned and tabular. A count that needs attention (missing
   keys) uses the amber text color.
 - Rows whose cells differ in height (a badge over a time) center their cells
-  vertically, and a column of row actions has a fixed width, so nothing
-  shifts when an action changes the row (Revoke becomes Reinstate).
+  vertically.
+- Row actions are icon buttons (`IconButton`), the same ones in the same
+  order on every row, grayed out with the reason when they do not apply, so
+  nothing shifts when an action changes the row and every row says what can
+  be done to it. Their column is as narrow as the icons (`w-px`), under a
+  visible "Actions" header aligned with them.
 - Long values (key fingerprints) are shortened with an ellipsis, with the
   full value in the `title` and a copy button where people need to paste it.
 - An empty cell shows an em dash (`Dash`), in the sans font even in a
@@ -212,6 +227,12 @@ detail view reached from the row. A row that opens something shows it on
 hover and has a visible affordance; a row that opens nothing does not look
 pressable.
 
+A breakdown of one cell (a key's references per cluster) is a button in
+that cell, with a chevron and `aria-expanded`, that opens a row under it
+spanning the table, never a hover title: it works with a keyboard and a
+tap. The row's content stays in view (`sticky`) when the table scrolls
+sideways on a phone.
+
 ## Cards
 
 Cards have `rounded-xl`, a border and a light shadow (none in the dark
@@ -233,9 +254,15 @@ content with `p-10`.
 - A button that just succeeded may show it for a moment ("Sealed", in the
   success color) before returning to its label.
 - Icon-only buttons (theme toggle, copy) have an `aria-label` and a tooltip
-  or `title`.
+  or `title`. Row actions use `IconButton`: a ghost `icon`-size button (a
+  36px target) with its action in a tooltip on hover and focus, which lets
+  clicks through to the row it covers.
 - A disabled button that people will wonder about says why in muted text
   under it, linked with `aria-describedby`; a `title` alone is not enough.
+  Where text under it does not fit (a row's icons), give `IconButton` a
+  `reason`: it stays focusable (`aria-disabled`, not `disabled`), its
+  reason is its description, its tooltip shows the reason on hover, focus
+  and a tap, and a click does nothing else.
 - Destructive or irreversible actions use the `destructive` variant and
   confirm in a dialog that names what will happen.
 - Navigation that leaves the app (signing in with GitHub) is a link styled as

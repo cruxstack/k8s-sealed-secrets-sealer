@@ -1,13 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { useRef, useState } from "react";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { Lock } from "lucide-react";
 import { Alert } from "./alert";
 import { Badge } from "./badge";
+import { IconButton } from "./icon-button";
 import { FilterInput } from "./filter-input";
 import { RegionTag } from "./region-tag";
 import { RelativeTime } from "./relative-time";
 import { Dash, Table } from "./table";
+import { TooltipProvider } from "./tooltip";
 
 describe("Alert", () => {
   it("shows its icon, heading, text and actions in the variant's colors", () => {
@@ -166,5 +174,94 @@ describe("Table", () => {
     expect(box).toHaveClass("relative", "overflow-x-auto", "shadow-xs");
     // an empty cell is an em dash in the sans font, even in a mono column
     expect(screen.getByLabelText("none")).toHaveClass("font-sans");
+  });
+
+  it("says what an empty cell stands for when it is not none", () => {
+    render(<Dash label="not counted" />);
+    expect(screen.getByLabelText("not counted")).toHaveTextContent("—");
+  });
+});
+
+/** The text of the tooltip on screen, if one is. */
+function tooltipShown() {
+  return document.querySelector("[data-radix-popper-content-wrapper]")
+    ?.textContent;
+}
+
+describe("IconButton", () => {
+  const why = "Every cluster must count references first.";
+
+  it("names what it does in a tooltip on focus, and acts on a click", async () => {
+    let clicked = 0;
+    render(
+      <TooltipProvider>
+        <IconButton
+          label="Delete"
+          aria-label="Delete key abc"
+          onClick={() => clicked++}
+        >
+          <Lock aria-hidden="true" />
+        </IconButton>
+      </TooltipProvider>,
+    );
+    const button = screen.getByRole("button", { name: "Delete key abc" });
+    expect(button).not.toHaveAttribute("aria-disabled");
+    // the conventions' icon size: a 36px target
+    expect(button).toHaveClass("h-9", "w-9");
+    fireEvent.focus(button);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Delete$/);
+    fireEvent.click(button);
+    expect(clicked).toBe(1);
+  });
+
+  it("when it cannot be used, stays focusable with its reason as its description", () => {
+    render(
+      <TooltipProvider>
+        <IconButton label="Delete" reason={why} aria-label="Delete key abc">
+          <Lock aria-hidden="true" />
+        </IconButton>
+      </TooltipProvider>,
+    );
+    const button = screen.getByRole("button", { name: "Delete key abc" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveClass("opacity-50", "cursor-not-allowed");
+    // always described, not only while the tooltip shows
+    expect(button).toHaveAccessibleDescription(why);
+    button.focus();
+    expect(button).toHaveFocus();
+  });
+
+  it("shows why on focus and on a tap, and does nothing else", async () => {
+    let clicked = 0;
+    render(
+      <TooltipProvider>
+        <IconButton
+          label="Delete"
+          reason={why}
+          aria-label="Delete key abc"
+          onClick={() => clicked++}
+        >
+          <Lock aria-hidden="true" />
+        </IconButton>
+      </TooltipProvider>,
+    );
+    const button = screen.getByRole("button", { name: "Delete key abc" });
+    fireEvent.focus(button);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Delete$/);
+    expect(tooltipShown()).toContain(why);
+    // read once: the reason, then what the button does
+    expect(button).toHaveAccessibleDescription(`${why} Delete`);
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
+    // a touch screen has no hover: a tap shows it
+    fireEvent.pointerDown(button, { pointerType: "touch" });
+    fireEvent.click(button);
+    await waitFor(() => expect(tooltipShown()).toContain(why));
+    expect(clicked).toBe(0);
   });
 });

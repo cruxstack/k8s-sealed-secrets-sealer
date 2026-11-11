@@ -184,10 +184,51 @@ func TestAgent_EscrowsWhatTheControlPlaneAsksFor(t *testing.T) {
 	}
 }
 
-type recordingLoader struct{ active []string }
+type recordingLoader struct {
+	active  []string
+	deleted bool
+}
 
 func (r *recordingLoader) LoadRestored(_ context.Context, active string) {
 	r.active = append(r.active, active)
+}
+
+func (r *recordingLoader) DeletedLoaded() bool { return r.deleted }
+
+// While pods that held deleted keys still run, each cycle retries their
+// restart.
+func TestAgent_DropsDeletedKeys(t *testing.T) {
+	loader := &recordingLoader{}
+	a := New(Options{
+		Inventory: &fakeInventory{report: reportWith(t)}, ControlPlane: &fakeControlPlane{}, Interval: 15 * time.Second,
+		Loader: loader, Logger: slog.New(slog.DiscardHandler),
+	})
+	a.cycle(context.Background())
+	loader.deleted = true
+	a.cycle(context.Background())
+	if len(loader.active) != 1 {
+		t.Fatalf("loader calls = %v", loader.active)
+	}
+}
+
+type fixedUsage struct{ r *protocol.KeyUsage }
+
+func (f fixedUsage) Latest() *protocol.KeyUsage { return f.r }
+
+// Each check-in carries the latest count, once there is one.
+func TestAgent_ReportsKeyUsage(t *testing.T) {
+	cp := &fakeControlPlane{}
+	usage := &fixedUsage{}
+	a := New(Options{
+		Inventory: &fakeInventory{report: reportWith(t)}, ControlPlane: cp, Interval: 15 * time.Second,
+		Usage: usage, Logger: slog.New(slog.DiscardHandler),
+	})
+	a.cycle(context.Background())
+	usage.r = &protocol.KeyUsage{ScannedAt: time.Now(), Values: 3}
+	a.cycle(context.Background())
+	if len(cp.got) != 2 || cp.got[0].KeyUsage != nil || cp.got[1].KeyUsage == nil || cp.got[1].KeyUsage.Values != 3 {
+		t.Fatalf("check-ins = %+v", cp.got)
+	}
 }
 
 // While restored keys are not loaded, each cycle retries the restart.

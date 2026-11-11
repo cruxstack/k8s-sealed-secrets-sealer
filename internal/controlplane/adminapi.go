@@ -30,13 +30,14 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 // and to signed-in users who administer the env.
 func (s *Server) fleet(w http.ResponseWriter, r *http.Request) {
 	now := s.now().UTC()
-	f, err := s.loadFleet(r.Context(), now)
+	f, err := s.loadFleet(r.Context(), now, true)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to read the fleet", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	s.noteHeldKeys(r.Context(), &f, now)
+	s.noteRefusedRemovals(r.Context(), &f)
 	httpserver.WriteJSON(w, http.StatusOK, f)
 }
 
@@ -57,7 +58,7 @@ type statusView struct {
 
 // status serves whether values can be sealed in the env right now.
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	f, err := s.loadFleet(r.Context(), s.now().UTC())
+	f, err := s.loadFleet(r.Context(), s.now().UTC(), false)
 	if err != nil {
 		s.internalError(w, r, "failed to read the fleet", err)
 		return

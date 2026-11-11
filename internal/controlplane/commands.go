@@ -223,6 +223,55 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 	httpserver.WriteJSON(w, http.StatusOK, map[string]string{"status": in.Status})
 }
 
+// logRemovals writes the events of a finished keys.delete.v1: each key the
+// agent removed from its cluster, and each it refused to. A key refused
+// because values are sealed with it has its deletion undone.
+func (s *Server) logRemovals(ctx context.Context, agent *registry.Agent, in protocol.CommandResult, base []any) {
+	var res protocol.KeysDeleteResult
+	if len(in.Result) > 0 {
+		_ = json.Unmarshal(in.Result, &res)
+	}
+	refused := false
+	for _, k := range res.Keys {
+		switch k.Outcome {
+		case protocol.KeyRemoved:
+			s.logger.WarnContext(ctx, "deleted sealing key removed from a cluster",
+				append([]any{"event", "key.removed", "fingerprint", k.Fingerprint, "controller_restarted", res.ControllerRestarted}, base...)...)
+		case protocol.KeyRefused:
+			refused = true
+			s.logger.ErrorContext(ctx, "agent refused to remove a deleted sealing key",
+				append([]any{"event", "key.remove_refused", "fingerprint", k.Fingerprint, "reason", k.Reason,
+					"values", k.Values, "sealed_secrets", k.SealedSecrets}, base...)...)
+		}
+	}
+	if in.Status == protocol.CommandFailed && !refused {
+		s.logger.ErrorContext(ctx, "failed to remove deleted sealing keys",
+			append([]any{"event", "key.remove_refused", "error", in.Error}, base...)...)
+	}
+	s.undoRefused(ctx, agent, res.Keys)
+}
+
+// undoRefused undoes the deletion of each key an agent refused to remove
+// because values are sealed with it. The revoked keys are read only then.
+func (s *Server) undoRefused(ctx context.Context, agent *registry.Agent, keys []protocol.KeyDeletion) {
+	var revoked map[string]store.RevokedKey
+	for _, k := range keys {
+		if k.Outcome != protocol.KeyRefused || k.Values <= 0 {
+			continue
+		}
+		if revoked == nil {
+			var err error
+			if revoked, err = s.store.RevokedKeys(ctx); err != nil {
+				s.logger.ErrorContext(ctx, "failed to read revoked keys", "agent_id", agent.ID, "error", err)
+				return
+			}
+		}
+		if r, ok := revoked[k.Fingerprint]; ok && r.Deleted() {
+			s.undoDeletion(ctx, agent, r, store.KeyUse{Values: k.Values, SealedSecrets: k.SealedSecrets}, s.now().UTC())
+		}
+	}
+}
+
 // logCommandResult writes the alert events for a finished key command.
 func (s *Server) logCommandResult(ctx context.Context, agent *registry.Agent, cmd store.CommandRecord, in protocol.CommandResult) {
 	base := []any{"env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "command_id", cmd.ID, "type", cmd.Type}
@@ -249,6 +298,8 @@ func (s *Server) logCommandResult(ctx context.Context, agent *registry.Agent, cm
 			s.logger.ErrorContext(ctx, "failed to restore sealing keys",
 				append([]any{"event", "key.sync_failed", "error", in.Error}, base...)...)
 		}
+	case protocol.CommandKeysDelete:
+		s.logRemovals(ctx, agent, in, base)
 	case protocol.CommandRenewalEnable:
 		if in.Status == protocol.CommandSucceeded {
 			s.logger.WarnContext(ctx, "key renewal turned on", append([]any{"event", "renewal.enabled"}, base...)...)

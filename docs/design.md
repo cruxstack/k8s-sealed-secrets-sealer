@@ -36,7 +36,7 @@ Non-goals for v1:
 - Sharing keys or data across environments. Each environment has its own
   sealing keys, KMS keys, agent registry and DynamoDB table, whether it has a
   control plane of its own or shares one URL with others (section 15).
-- Resealing existing values or retiring old keys (see section 16).
+- Resealing existing values (see section 16).
 - Non-GitHub source control.
 
 ## 2. Concepts and terms
@@ -72,6 +72,9 @@ Non-goals for v1:
 |               | registered cluster in the env. Every seal uses the env key.    |
 | Escrow        | The KMS-encrypted copy of every sealing key, stored in         |
 |               | DynamoDB. Agents sync keys to each other through it.           |
+| Reference     | A value in a SealedSecret a cluster's controller watches,      |
+|               | sealed with a given key. Agents with `cleanup` count them, and |
+|               | a key with any cannot be deleted (section 10).                 |
 
 ## 3. Architecture
 
@@ -324,7 +327,12 @@ serve. One serving a single env also accepts a call without the header.
 A check-in carries the agent version, the protocol version it speaks, the
 command types it supports, its capabilities, its controller's settings
 (namespace, key renew period, key order priority) and its key set:
-fingerprint, `NotBefore`, `NotAfter` and certificate for every key. The
+fingerprint, `NotBefore`, `NotAfter` and certificate for every key. An
+agent with the `cleanup` capability adds its latest count of references
+(`key_usage`): when it finished, the namespaces its controller watches,
+how many SealedSecrets and values it counted, how many values no key in
+the cluster decrypts, and for each key that seals any the values and
+SealedSecrets it seals; or why the count failed. The
 agent's check-in interval (15 seconds by default, 5 seconds to 5 minutes)
 comes in the `X-K8s-Sealed-Secrets-Sealer-Check-In-Interval` header, in
 whole seconds. It is a header because control planes before v0.6.4 refuse a
@@ -332,8 +340,9 @@ check-in with a field they do not know, but ignore a header; one that
 predates the header takes the agent to check in every 15 seconds.
 
 Commands are typed and versioned: `seal.v1`, `keys.restore.v1`,
-`renewal.enable.v1`. Each has an ID (a ULID), the target agent ID, the env,
-a creation time, an expiry and a typed payload. The rules:
+`renewal.enable.v1`, `keys.delete.v1`. Each has an ID (a ULID), the target
+agent ID, the env, a creation time, an expiry and a typed payload. The
+rules:
 
 - **Fixed command set.** The agent has a handler per type compiled in. There is
   no generic exec, apply or proxy command. An unknown type or a payload that
@@ -385,15 +394,19 @@ a creation time, an expiry and a typed payload. The rules:
 | `seal`     | `seal.v1`                              | on      |
 | `keys`     | `keys.restore.v1`, escrow upload       | off     |
 | `renewal`  | `renewal.enable.v1`                    | off     |
+| `cleanup`  | `keys.delete.v1`, counting references  | off     |
 
 `keys` and `renewal` are off by default because they grant access to the
 sealing keys and to the controller Deployment. Key sync, which most
 multi-cluster envs need, works only on agents where an operator turned them
-on. An agent may have none (`APP_CAPABILITIES=none`, which the chart sets
-when all are off): it still checks in, reporting its controller's active
-key.
+on. `cleanup` needs `keys`, and is off by default because it reads
+SealedSecrets in every namespace and deletes key Secrets. An agent may have
+none (`APP_CAPABILITIES=none`, which the chart sets when all are off): it
+still checks in, reporting its controller's active key.
 
-v1 has no command that deletes or disables anything.
+The only command that deletes anything is `keys.delete.v1`, and an agent
+refuses it for a key that any value in its cluster is sealed with
+(section 10).
 
 **Compatibility.** Messages change without breaking the other side:
 
@@ -641,13 +654,14 @@ certificates only). From those reports the control plane computes:
   cluster's key set. Certificates have one-second precision, so keys made in
   the same second tie; the tie goes to the greater fingerprint, so the env
   key never depends on the order agents report in.
-- **Keys left out:** a key an admin revoked, and a key whose `NotBefore` is
-  more than an hour ahead of the control plane's clock, are never the env
-  key, never count as held, are never missing anywhere and are never
-  restored. A future-dated key is used once its time comes; the fleet view
-  flags it, and `key.future_dated` is logged. Without this bound, anyone who
-  can create a Secret in one controller namespace could plant a key dated
-  2099 that would become the env key everywhere and outrank every renewal.
+- **Keys left out:** a key an admin revoked (or deleted), and a key whose
+  `NotBefore` is more than an hour ahead of the control plane's clock, are
+  never the env key, never count as held, are never missing anywhere and
+  are never restored. A future-dated key is used once its time comes; the
+  fleet view flags it, and `key.future_dated` is logged. Without this
+  bound, anyone who can create a Secret in one controller namespace could
+  plant a key dated 2099 that would become the env key everywhere and
+  outrank every renewal.
   When every key the clusters share is left out, there is no env key and
   nothing to restore: sealing waits for a new key, and the fleet view and
   status say so.
@@ -763,7 +777,7 @@ could not create says nothing about the copy. A failure that names no
 copy, from an older agent, moves the agent on to the next copy, as before.
 Only the agent's own results of the last hour count, read once per
 restore, so no agent can steer another away from a good copy. A revoked
-key is not returned. The agent, for each one not
+key, deleted or not, is not returned. The agent, for each one not
 already present (a key Secret with that fingerprint under any value of the
 key label counts, so a key relabeled, for example as `compromised`, is
 never brought back):
@@ -824,7 +838,10 @@ for an hour, and the fleet view says so in the agent's issues. Each
 decision is about the agent that is checking in, and an agent checks in
 serially, so concurrent check-ins from different agents cannot queue
 duplicate commands. Each check-in plans with its own new state and every
-other agent's latest, read afresh.
+other agent's latest, read afresh. A deleted key an admin reinstates
+(section 10) may be in no cluster any more, so for 7 days every in-scope
+cluster without it counts as missing it, and restore brings it back from
+escrow.
 
 ```mermaid
 sequenceDiagram
@@ -897,7 +914,20 @@ level or above:
 | `key.order_mismatch`        | A controller does not order keys by NotBefore.  |
 | `key.future_dated`          | A check-in reports a key dated in the future.   |
 | `key.revoked`               | An admin revoked a key.                         |
-| `key.reinstated`            | An admin reinstated a revoked key.              |
+| `key.reinstated`            | An admin reinstated a revoked or deleted key.   |
+| `key.deleted`               | An admin deleted a key.                         |
+| `key.remove_queued`         | A removal is queued for a cluster holding a     |
+|                             | deleted key.                                    |
+| `key.removed`               | An agent removed a deleted key from its         |
+|                             | cluster.                                        |
+| `key.remove_refused`        | An agent refused to remove a deleted key, as    |
+|                             | values are sealed with it, or could not.        |
+| `key.unmatched_values`      | A cluster has values none of its keys decrypts. |
+| `key.delete_undone`         | A cluster counted values sealed with a deleted  |
+|                             | key, which is revoked again.                    |
+| `key.usage_invalid`         | An agent's count was not valid; it counts as    |
+|                             | failed.                                         |
+| `key.count_failed`          | An agent could not count key references.        |
 | `keys.near_limit`           | A cluster's keys reach 50% or 80% of the limit. |
 | `keys.truncated`            | A cluster reports more keys than are kept.      |
 | `keys.out_of_sync`          | A seal was refused because no env key exists.   |
@@ -911,8 +941,8 @@ and cluster, the fingerprint, the user. An agent's events name its
 controller and what they are about, such as the fingerprint, but not the
 agent or its cluster: tell those apart by where the logs come from.
 Events about a check-in (`key.order_mismatch`, `key.future_dated`,
-`keys.near_limit`, `keys.truncated`) are logged once, at the check-in where
-the condition first shows for that agent.
+`keys.near_limit`, `keys.truncated`, `key.unmatched_values`) are logged
+once, at the check-in where the condition first shows for that agent.
 
 **Backups.** The table has point-in-time recovery and a scheduled AWS Backup
 plan. The escrow key is a multi-Region KMS key with a replica in another
@@ -929,8 +959,8 @@ default; `0` turns renewal off). Two postures are supported:
 
 - **Renewal on everywhere.** Each controller generates keys on its own
   schedule. Sync spreads them, and each becomes the env key once every cluster
-  holds it. The cost is more keys over time, which key retirement will handle
-  (section 16).
+  holds it. The cost is more keys over time, which deleting the keys no
+  value uses keeps down (section 10).
 - **Renewal on in at least one cluster.** Agents report their controller's
   renew period. If no in-scope cluster in the env is known to have renewal
   on, the control plane sends `renewal.enable.v1` to one healthy agent that
@@ -958,7 +988,7 @@ times should not be the one. Renewal in one cluster is better because:
 
 - Sync puts every key in every cluster. With renewal on in N clusters,
   every cluster gains N keys per period instead of one: N times the keys
-  to hold, report on every check-in and, one day, retire.
+  to hold, report on every check-in and, once unused, delete.
 - Every new key is restored into every other cluster, and each restore
   restarts that cluster's controller once. N renewing clusters cause about
   N×(N−1) controller restarts per period instead of N−1.
@@ -975,7 +1005,9 @@ cluster may hold it, so it is never restored again.
 A cluster that joins later does not get keys every cluster leaves out.
 `keys.near_limit` is logged when a cluster's keys reach 50% and 80% of the
 limit, and `keys.truncated` once some are left out; the fleet view warns at
-the same points. Renewal on in one cluster keeps an env far from the limit.
+the same points. Renewal on in one cluster keeps an env far from the limit,
+and deleting old keys no value uses (section 10) takes them out of every
+cluster's count.
 
 The limit was 100 and a check-in over it was refused, which stopped the
 whole env. It is 250 now; the numbers, for 4096-bit keys:
@@ -1001,8 +1033,10 @@ follow in later commands, one at a time.
 |                       | for any namespace/name in the  | refuse cluster-wide and only   |
 |                       | env; open PRs through the      | use certificates from their    |
 |                       | GitHub App; withhold or delete | own cluster; fixed command set |
-|                       | data; lie in the UI.           | with no delete; no inbound     |
-|                       |                                | path into clusters; branch     |
+|                       | data; lie in the UI; have      | whose one delete agents refuse |
+|                       | agents delete keys no value in | for keys values use, by their  |
+|                       | their clusters uses.           | own count; no inbound path     |
+|                       |                                | into clusters; branch          |
 |                       |                                | protection on repos.           |
 | Compromised agent or  | Read that cluster's keys (as   | Inherent to cluster access.    |
 | cluster               | can anyone with secret read in | Transit `Decrypt` limited to   |
@@ -1033,10 +1067,14 @@ follow in later commands, one at a time.
 
 **In plain terms, a compromised control plane can** read values people submit
 while it is compromised, seal those values into pull requests, and stop the
-system from working. **It cannot** read or forge any private sealing key,
-decrypt anything stored before or after, make an agent produce cluster-wide
-ciphertext or encrypt to a key outside the env, turn on agent capabilities, or
-run anything else on a cluster.
+system from working. Through agents with `cleanup`, it can also take keys out
+of clusters that no value there is sealed with, which values in git not yet
+deployed may need; escrow keeps their copies 30 days, but the control plane
+can delete those as it can any data. **It cannot** read or forge any private
+sealing key, decrypt anything stored before or after, make an agent produce
+cluster-wide ciphertext or encrypt to a key outside the env, make an agent
+delete a key a value in its cluster is sealed with, turn on agent
+capabilities, or run anything else on a cluster.
 
 **A compromised cluster** already holds every env key, so injecting a key
 gives it nothing new while it is compromised. An injected key would, however,
@@ -1069,18 +1107,87 @@ the key and still decrypt with it, and so can anyone who has a copy. Values
 sealed with a key that may be compromised must be rotated (sealed again with
 new values), because git history keeps the old ciphertext; resealing the
 same values would not help. The key's escrowed copies are kept, so a key
-revoked by mistake can be reinstated. Taking a key out of the clusters is
-key retirement (section 16).
+revoked by mistake can be reinstated. Deleting it, below, takes it out of
+the clusters.
+
+**Deleting a key.** A revoked key stays in every cluster, and counts toward
+the key limit. Deleting takes it out, and only a revoked key that no value
+uses can be deleted. Agents with the `cleanup` capability count, every few
+minutes (`keyUsageInterval`, 5 by default), the values in the SealedSecrets
+their controller watches by the key that sealed them. They read which
+namespaces the controller watches, and its label selector, from its
+Deployment as the controller does. For each value they decrypt only the
+RSA-wrapped session key at the head of its ciphertext, with each key in the
+cluster under any value of the key label, and drop it at once; a value whose
+SealedSecret has not changed is not decrypted again. A value sealed under
+another scope than its SealedSecret's annotations say still counts for its
+key. Agents report a count per key, never which SealedSecret holds what. The
+fleet page shows each key's references by cluster, and the clusters that did
+not count.
+
+An admin deletes a key from the fleet page, or a script with the admin
+token in an env that allows it, as for revoking:
+
+```sh
+curl -X POST -H "Authorization: Bearer $APP_ADMIN_TOKEN" \
+  https://sealer.example.com/api/v1/envs/dev/admin/keys/SHA256:abc.../delete
+```
+
+It is allowed only when the key is revoked, has an escrowed copy (so the
+deletion can be undone), and every in-scope cluster's agent has `cleanup`
+and counted after the key was revoked (so no new value can be sealed with
+it), within the last hour, without error, and found no value sealed with
+it. A cluster that does not hold the key and has values none of its keys
+decrypts holds the deletion back too: those values may be sealed with the
+key. On every key it cannot delete, active and deleted ones included, the
+fleet view says why not in one sentence (`delete_blocked`), and a request
+to delete it is refused with it. A key with any references is never
+deleted. The deletion holds only for the revocation the counts were made
+since: a key reinstated and revoked again in between is not deleted.
+`key.deleted` names the admin.
+
+Each agent with `cleanup` whose cluster still holds the key is then sent
+`keys.delete.v1`, one at a time as restores are, also when the key limit
+leaves the key out of the agent's stored state. The agent counts again and
+refuses a key any value is sealed with (`key.remove_refused`; the control
+plane asks again 10 minutes later). It names a key Secret by its private
+key, as the controller does, and refuses a key while a Secret holding it
+does not load or has another key's certificate. Otherwise it deletes every
+Secret in the controller's namespace that holds the key, under any value of
+the key label, each only as it was read, and restarts the controller as a
+restore does: the controller holds its keys in memory until it restarts
+(`key.removed`). A cluster that was down, or a key Secret made again, gets
+the same command when its agent reports the key. The key's escrowed copies
+expire 30 days after the deletion. Until then, reinstating the key makes it
+active again, and key sync restores it to every cluster from escrow; after
+that it cannot come back. A deleted key is a revoked key for everything
+else.
+
+A cluster that counts values sealed with a deleted key, or refuses to
+remove it for them, undoes the deletion: the key is revoked again, its
+escrowed copies stop expiring, and `key.delete_undone` names the cluster
+and its counts. Past the purge the copies may be gone; the key still
+returns as revoked, and once reinstated, a cluster that holds it escrows it
+again.
+
+Counts cover only what clusters hold. Values in git that are not deployed to
+a namespace a controller watches (a branch, an app not deployed yet, a
+cluster not in the registry) and pull requests opened before the revocation
+that merge later are not counted. Two things catch those: a value that no
+key in a cluster decrypts is counted as unmatched, which the fleet view shows
+as an issue of that cluster and `key.unmatched_values` reports, and the 30
+days in which reinstating the key brings it back.
 
 **Controller namespace.** The controller runs in its own namespace, not
 `kube-system`. RBAC cannot limit `list secrets` or `delete pods` by label,
 so an agent with the `keys` capability can read every Secret and delete any
-pod in the controller namespace; that namespace must hold only the
-controller and its keys. The agent chart refuses `keys` with the controller
-in `kube-system`.
+pod in the controller namespace, and with `cleanup` delete any Secret
+there; that namespace must hold only the controller and its keys. The agent
+chart refuses `keys` with the controller in `kube-system`.
 
 **Agent RBAC.** The Helm chart installs a Role in the controller namespace,
-bound to the agent's ServiceAccount in the agent's own namespace:
+bound to the agent's ServiceAccount in the agent's own namespace, and with
+`cleanup` one cluster-wide read (below):
 
 | Capability | Rules in the controller namespace                             |
 | ---------- | ------------------------------------------------------------- |
@@ -1091,10 +1198,22 @@ bound to the agent's ServiceAccount in the agent's own namespace:
 | `keys`     | `list`, `create` Secrets; `list`, `delete` Pods and `list`    |
 |            | ReplicaSets (restart).                                        |
 | `renewal`  | `patch` the controller Deployment.                            |
+| `cleanup`  | `delete` Secrets (deleted keys).                              |
 
 `get` and `patch` are limited to the named Service and Deployment with
 `resourceNames`; `list`, `create` and `delete` cannot be, because the
 objects' names are generated or unknown.
+
+With `cleanup` the chart also installs the agent's only cluster-wide
+permission: a ClusterRole and ClusterRoleBinding that let it `list`
+SealedSecrets (`bitnami.com`) in every namespace, to count the values
+sealed with each key. The agent reads only those its controller watches,
+but with `keys` it holds every private key of its cluster, so the
+permission lets it decrypt every SealedSecret those keys sealed, anywhere
+in the cluster. Their name has the release's namespace in it, so agents of
+several controllers in one cluster each have their own. The chart refuses
+`cleanup` without `keys`, which it needs to read the keys it counts with
+and to restart the controller.
 
 `patch` on the Deployment cannot be limited to the one argument renewal
 sets: an agent with `renewal` can change the controller's pod spec, and so
@@ -1116,11 +1235,13 @@ shows creating one.
 | Entity         | `pk`               | `sk`                | TTL                   |
 | -------------- | ------------------ | ------------------- | --------------------- |
 | Agent state    | `AGENT#<id>`       | `STATE`             | none                  |
+| Key usage      | `AGENT#<id>`       | `USAGE`             | none                  |
 | Command        | `AGENT#<id>`       | `CMD#<ulid>`        | expiry + 1 hour       |
 | Key            | `KEY#<fp>`         | `META`              | none                  |
-| Key escrow     | `KEY#<fp>`         | `ESCROW`            | none                  |
-| Escrow copy    | `KEY#<fp>`         | `ESCROW#<agent id>` | none                  |
+| Key escrow     | `KEY#<fp>`         | `ESCROW`            | purge, once deleted   |
+| Escrow copy    | `KEY#<fp>`         | `ESCROW#<agent id>` | purge, once deleted   |
 | Revoked key    | `KEYS`             | `REVOKED#<fp>`      | none                  |
+| Reinstated key | `KEYS`             | `REINSTATED#<fp>`   | reinstated + 7 days   |
 | Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
 | Session count  | `USER#<user id>`   | `SESSIONS`          | session's maximum age |
 | Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
@@ -1133,7 +1254,19 @@ shows creating one.
   controller settings, key set (the newest 250), how many keys were
   reported and the newest `NotBefore` of those left out, and when the agent
   joined (its first check-in, or the first after its cluster was rebuilt).
-  Commands in flight are counted from the agent's commands.
+  Commands in flight are counted from the agent's commands. For an agent
+  with `cleanup`, when its latest stored count of references finished and
+  how many values it found unmatched, so a check-in carrying the same count
+  writes nothing more.
+- **Key usage:** an agent's latest count of references: when the agent
+  finished it (`scanned_at`, the agent's clock) and when the control plane
+  first received it (`counted_at`, its own), the namespaces counted, how
+  many SealedSecrets and values, how many unmatched, and per key the values
+  and SealedSecrets it seals; or the error. A count that is not valid is
+  stored as a failed one. It is written only when an agent sends a new
+  count, on condition it is new, so `counted_at` is never moved later, and
+  it is kept out of the agent state that every check-in reads. The fleet view and the delete gate read every agent's with one
+  batch read.
 - **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`;
   past its expiry without a result it counts as expired), lease and finish
   times, expiry, payload, result. The expiry is also kept as epoch
@@ -1142,21 +1275,33 @@ shows creating one.
   removed when the command is leased; a seal's result keeps only a summary,
   since its ciphertexts go to the pending change. Polls, seals and pull
   requests look for open commands only among those queued in the last 11
-  minutes, and key sync among those of the last 16, which covers commands
+  minutes, and key sync among those of the last 21, which covers commands
   that finished recently: command IDs are ULIDs, so each is a range of sort
   keys.
 - **Key:** certificate, `NotBefore`, `NotAfter`, first seen (agent and time),
-  status (`active` or `revoked`) and who set it when. Which clusters hold a
-  key is derived from agent state.
+  status (`active`, `revoked` or `deleted`) and who set it when, and a
+  deleted key's purge time (`purge_at`, 30 days after). Which clusters hold
+  a key is derived from agent state.
 - **Key escrow:** wrapped data key, nonce, ciphertext, KMS key ARN and
   encryption context, uploading agent and time. The first upload is
   `ESCROW` and lists the agents of the other copies (`copies`), so one read
   tells who escrowed a key; each other agent's copy is `ESCROW#<agent id>`,
   three in all at most. Copies are written with the list in one
-  transaction.
+  transaction. Deleting a key sets `expires_at`, the table's TTL, on each of
+  its copies to its purge time, in the same transaction as its status, on
+  condition no copy was added meanwhile. DynamoDB removes them some time
+  after, up to days later, so every read treats a copy past it as gone.
+  Reinstating removes it.
 - **Revoked key:** fingerprint, `NotBefore`, `NotAfter`, who revoked it and
   when, written with the key's status in one transaction, so every
-  check-in reads all revoked keys with one query. Revocations live only in
+  check-in reads all revoked keys with one query. A deleted key keeps its
+  record, with its status, who deleted it, when, and its purge time, so
+  every check-in still knows it from that query.
+- **Reinstated key:** a deleted key an admin reinstated, with its
+  `NotBefore`, `NotAfter`, and who reinstated it when, written with its
+  status; it is read with the revoked keys. For 7 days every in-scope
+  cluster without it is missing it, since no cluster may hold it any more
+  (section 8). Revocations live only in
   the table: a restore to an earlier point, or a new table, loses those
   made since, and they must be made again
   ([docs/operations.md](operations.md#restoring-the-table)).
@@ -1237,8 +1382,12 @@ fingerprint), never values or ciphertexts:
 |              | `key.escrow_read`, `key.escrow_rejected`,                    |
 |              | `key.escrow_refused`, `key.restore_queued`, `key.restored`,  |
 |              | `key.sync_failed`, `key.revoked`, `key.reinstated`,          |
+|              | `key.deleted`, `key.remove_queued`, `key.removed`,           |
+|              | `key.remove_refused`, `key.delete_undone`,                   |
+|              | `key.unmatched_values`, `key.usage_invalid`,                 |
 |              | `renewal.enable_queued`, `renewal.enabled`,                  |
-|              | `renewal.enable_failed`; `key.escrow_uploaded` and           |
+|              | `renewal.enable_failed`; `key.escrow_uploaded`,              |
+|              | `key.removed`, `key.remove_refused`, `key.count_failed` and  |
 |              | `controller.restarted` from the agent                        |
 
 Collect the agents' logs from every cluster as well as the control
@@ -1460,12 +1609,14 @@ a local image registry, driven by Tilt through atmos (`atmos dev up`).
 | `<sim>-apps`           | Targets for end-to-end tests.                      |
 
 The simulated clusters are `dev-use1-blue`, `dev-use1-green` and
-`dev-use2-blue`: one env, two regions, two clusters in one region. Agents use
-k8s-oidc identity; all three share the k3d cluster's issuer and are told apart
-by their service account subject. Each simulated cluster gets the same Helm
-chart and RBAC layout as a real one. The same control plane also serves a
-`prod` env whose one cluster does not run (`otherEnvs` in `dev/stack.yaml`).
-`atmos dev agent up` runs an isolated copy of the stack per Git worktree.
+`dev-use2-blue`: one env, two regions, two clusters in one region. Their
+agents have every capability, and count key references every 30 seconds.
+Agents use k8s-oidc identity; all three share the k3d cluster's issuer and
+are told apart by their service account subject. Each simulated cluster
+gets the same Helm chart and RBAC layout as a real one. The same control
+plane also serves a `prod` env whose one cluster does not run (`otherEnvs`
+in `dev/stack.yaml`). `atmos dev agent up` runs an isolated copy of the
+stack per Git worktree.
 
 **Why e2e can't apply one sealed document to all three.** Strict-scope
 ciphertext is bound to a namespace and name. Each simulated controller only
@@ -1482,6 +1633,10 @@ all three. The end-to-end tests prove the same property another way:
   one cluster, unseals in every cluster.
 - Every controller starts with its own key and renewal off: the keys
   converge through escrow, and renewal is turned on in exactly one cluster.
+- Each cluster counts the values sealed with the env key in the SealedSecrets
+  its controller watches. A key no value uses is revoked, deleted once every
+  cluster counted it since, removed from every cluster, and reinstated from
+  escrow.
 
 [docs/development.md](development.md#tests-and-checks) lists every check.
 Key rotation (the env key staying put until every cluster holds a new key)
@@ -1600,16 +1755,6 @@ else.
   to the agent but uses the controller's newest key) or re-encrypts in its own
   memory with the env key. Results go through the same session and pull
   request pipeline. Needs long-running batch commands with progress.
-- **Key usage tracking.** The agent lists SealedSecrets in its cluster and, for
-  each value, decrypts only the RSA-wrapped session key at the head of the
-  ciphertext with each key in turn to learn which key sealed it. It reports
-  only a count per fingerprint, never names or values. The key entity gets
-  per-cluster counts and a last-seen-in-use time.
-- **Key retirement.** A manual action, allowed once a key has had zero use in
-  every cluster for N days, removes it from every controller. The escrow copy
-  is kept until backups that contain it have aged out. Revoking (section 10)
-  already stops the control plane using and spreading a key; retirement
-  would also take it out of the clusters and the key limit.
 
 ## 17. Build order
 

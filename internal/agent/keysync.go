@@ -15,6 +15,7 @@ import (
 	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/keyutil"
 
@@ -63,8 +64,15 @@ type KeySync struct {
 	logger      *slog.Logger
 	now         func() time.Time
 
-	// restartMu serializes controller restarts, from restores and from the
-	// check-in loop, and guards the fields below
+	// droppedMu guards dropped: the controller's pods, by UID, that were
+	// running when this agent deleted key Secrets, which hold the deleted
+	// keys until they restart. It has its own lock so the check-in loop
+	// can ask about it while a restart rolls.
+	droppedMu sync.Mutex
+	dropped   map[types.UID]bool
+
+	// restartMu serializes controller restarts, from restores, removals
+	// and the check-in loop, and guards the fields below
 	restartMu      sync.Mutex
 	nextRestart    time.Time
 	restartBackoff time.Duration
@@ -120,6 +128,7 @@ func NewKeySync(opts KeySyncOptions) *KeySync {
 		restartBackoff: restartRetry,
 		settle:         time.Second,
 		restartPoll:    restartPoll,
+		dropped:        map[types.UID]bool{},
 	}
 }
 

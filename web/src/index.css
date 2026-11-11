@@ -247,3 +247,11 @@
     @apply tracking-tight;
   }
 }
+
+/* A tooltip that holds only text lets clicks through to what it covers,
+   wrapper and all: over a column of icon buttons it covers the next row's
+   (IconButton). Radix styles the wrapper itself, so this is the one place
+   to reach it. */
+[data-radix-popper-content-wrapper]:has(> [data-click-through]) {
+  pointer-events: none;
+}

@@ -3,8 +3,12 @@
 {{- if and .Values.capabilities.keys (eq .Values.controller.namespace "kube-system") }}
 {{- fail "capabilities.keys needs the controller in a namespace of its own, not kube-system: it lets the agent list every Secret and delete any pod in the controller's namespace" }}
 {{- end }}
+{{- if and .Values.capabilities.cleanup (not .Values.capabilities.keys) }}
+{{- fail "capabilities.cleanup needs capabilities.keys: it counts with the key Secrets and restarts the controller as key sync does" }}
+{{- end }}
 # Everything the agent may do is granted here, in the controller's namespace
-# only. Nothing is cluster-wide. See docs/design.md, "Agent RBAC".
+# only, except that cleanup lists SealedSecrets in every namespace (below).
+# See docs/design.md, "Agent RBAC".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -50,6 +54,13 @@ rules:
     resources: ["replicasets"]
     verbs: ["list"]
   {{- end }}
+  {{- if .Values.capabilities.cleanup }}
+  # delete the key Secrets of keys an admin deleted; cannot be narrowed by
+  # name either
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["delete"]
+  {{- end }}
   {{- if .Values.capabilities.renewal }}
   # set --key-renew-period in the controller's arguments. RBAC cannot narrow
   # a patch to one field, so this allows any change to the controller's
@@ -76,3 +87,37 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "agent.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.capabilities.cleanup }}
+{{- $cluster := printf "%s-%s-sealedsecrets" .Release.Namespace (include "agent.fullname" .) | trunc 253 | trimSuffix "-" }}
+---
+# cleanup: list the SealedSecrets the controller may watch, in any namespace,
+# to count the values sealed with each key. With keys the agent holds the
+# cluster's private keys, so this lets it decrypt every SealedSecret they
+# sealed. The name has the release's namespace, so agents of several
+# controllers in one cluster each have their own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $cluster }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $cluster }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $cluster }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

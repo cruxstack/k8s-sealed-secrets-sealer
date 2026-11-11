@@ -139,7 +139,7 @@ def agent_registry():
                     "id": c["name"],
                     "cluster": c["name"],
                     "region": c["region"],
-                    "capabilities": ["seal", "keys", "renewal"],
+                    "capabilities": ["seal", "keys", "renewal", "cleanup"],
                     "identity": {"k8s": {
                         "issuer": "local",
                         "subject": "system:serviceaccount:%s-sealer:sealer-agent" % c["name"],

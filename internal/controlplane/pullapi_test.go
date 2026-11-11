@@ -271,6 +271,37 @@ func TestPullRequest_Refuses(t *testing.T) {
 	}
 }
 
+// A key deleted while a seal with it runs is a revoked key for the seal: its
+// value never becomes a pending change.
+func TestSeal_FailsWithADeletedKey(t *testing.T) {
+	sh := newSealHarness(t)
+	ctx := context.Background()
+	sess := sh.openSession()
+	rec := sh.seal(sess.ID, search, "index-token", "search-s3cr3t")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("seal = %d %s", rec.Code, rec.Body)
+	}
+	queued := decode[sealView](t, rec)
+	k, _, err := sh.store.GetKey(ctx, sh.key.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := sh.clock()
+	purge := at.Add(deletedKeyRetention)
+	k.Status, k.StatusBy, k.StatusAt = store.KeyRevoked, "carol", &at
+	if ok, err := sh.store.SetKeyStatus(ctx, k); err != nil || !ok {
+		t.Fatalf("revoke: %v %v", ok, err)
+	}
+	k.Status, k.PurgeAt = store.KeyDeleted, &purge
+	if err := sh.store.DeleteKey(ctx, k, at); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	sh.runAgent(queued.Agent.ID)
+	if got := sh.sealStatus(sess.ID, queued.ID); got.Status != sealFailed || got.Error != "the key was revoked; seal the value again" {
+		t.Fatalf("seal after the deletion = %+v", got)
+	}
+}
+
 // A key revoked while values sealed with it wait in a session, or while a
 // seal with it runs, never reaches a pull request: the values are sealed
 // again with a new key first.

@@ -369,7 +369,7 @@ func sessionFull(changes []store.Change) string {
 
 // chooseSealer picks the agent for a seal and returns it with the env key.
 func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Time) (fleet.Agent, string, error) {
-	f, err := s.loadFleet(ctx, now)
+	f, err := s.loadFleet(ctx, now, false)
 	if err != nil {
 		return fleet.Agent{}, "", err
 	}
@@ -504,7 +504,7 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 			s.internalError(w, r, "failed to read key", err)
 			return
 		}
-		if key.Status == store.KeyRevoked {
+		if key.Revoked() {
 			revoked = true
 			status, errMsg = protocol.CommandFailed, "the key was revoked; seal the value again"
 		}

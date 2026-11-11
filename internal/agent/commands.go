@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
@@ -258,9 +259,14 @@ func sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
+// truncate cuts s to at most n bytes, at a rune boundary, so the result is
+// valid UTF-8 that stays within n once encoded.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

@@ -80,6 +80,18 @@ func (s *Server) agentPutEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// a deleted key's copies expire at its purge time; one stored now
+	// would outlive it
+	key, _, err := s.store.GetKey(ctx, fp)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to read key", "agent_id", agent.ID, "fingerprint", fp, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if key.Status == store.KeyDeleted {
+		writeError(w, http.StatusConflict, "key is deleted")
+		return
+	}
 	if !slices.ContainsFunc(states[agent.ID].Keys, func(k store.KeyRef) bool { return k.Fingerprint == fp }) {
 		writeError(w, http.StatusConflict, "agent has not reported this key")
 		return
@@ -169,7 +181,7 @@ func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if key.Status == store.KeyRevoked {
+	if key.Revoked() {
 		s.logger.WarnContext(ctx, "refused to return a revoked key from escrow",
 			"event", "key.escrow_refused", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp)
 		writeError(w, http.StatusGone, "key is revoked")

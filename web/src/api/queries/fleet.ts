@@ -36,10 +36,26 @@ export async function revokeKey(fingerprint: string): Promise<KeyStatus> {
   return data;
 }
 
-/** Reinstates a revoked key. */
+/**
+ * Reinstates a revoked key, or a deleted one until its escrowed copies are
+ * purged: it is active again, and restored to every cluster that lacks it.
+ */
 export async function reinstateKey(fingerprint: string): Promise<KeyStatus> {
   const { data } = await apiClient.post<KeyStatus>(
     `/keys/${fingerprintPath(fingerprint)}/reinstate`,
+  );
+  return data;
+}
+
+/**
+ * Deletes a revoked key no cluster refers to: every cluster removes it, and
+ * its escrowed copies are purged after 30 days, until when reinstating it
+ * undoes the delete. The control plane refuses (409) with a sentence saying
+ * why when it may not.
+ */
+export async function deleteKey(fingerprint: string): Promise<KeyStatus> {
+  const { data } = await apiClient.post<KeyStatus>(
+    `/keys/${fingerprintPath(fingerprint)}/delete`,
   );
   return data;
 }

@@ -37,10 +37,19 @@ type Escrower interface {
 	Escrow(ctx context.Context, fingerprints []string)
 }
 
-// KeyLoader gets the controller to load keys restored into it; active is the
-// key it seals with.
+// KeyLoader gets the controller to load keys restored into it, and drop
+// keys deleted from it; active is the key it seals with.
 type KeyLoader interface {
 	LoadRestored(ctx context.Context, active string)
+	// DeletedLoaded reports whether controller pods may still hold keys
+	// the agent deleted, because their restart failed.
+	DeletedLoaded() bool
+}
+
+// UsageReporter has the latest count of the values the controller's
+// SealedSecrets hold by key, nil before the first.
+type UsageReporter interface {
+	Latest() *protocol.KeyUsage
 }
 
 // Options configures an Agent.
@@ -54,8 +63,11 @@ type Options struct {
 	// Escrow uploads keys after a check-in asks for them, and Loader
 	// restarts the controller while restored keys are not loaded; both are
 	// nil without the keys capability.
-	Escrow  Escrower
-	Loader  KeyLoader
+	Escrow Escrower
+	Loader KeyLoader
+	// Usage is the agent's count of key references, reported with each
+	// check-in; nil without the cleanup capability.
+	Usage   UsageReporter
 	Logger  *slog.Logger
 	Version string
 	// Now overrides the clock, for tests.
@@ -71,6 +83,7 @@ type Agent struct {
 	commands     []string
 	escrow       Escrower
 	loader       KeyLoader
+	usage        UsageReporter
 	logger       *slog.Logger
 	version      string
 	now          func() time.Time
@@ -99,6 +112,7 @@ func New(opts Options) *Agent {
 		commands:     opts.Commands,
 		escrow:       opts.Escrow,
 		loader:       opts.Loader,
+		usage:        opts.Usage,
 		logger:       logger,
 		version:      opts.Version,
 		now:          now,
@@ -135,10 +149,11 @@ func (a *Agent) cycle(ctx context.Context) {
 	a.noteKeyCount(cycleCtx, len(report.Keys))
 	a.checkIn(cycleCtx, report)
 
-	// restored keys are loaded whether or not the control plane answered:
-	// decryption must never wait for it. The restart gets time of its own,
-	// so a check-in that timed out does not cut it short.
-	if a.loader != nil && len(report.Pending) > 0 {
+	// restored keys are loaded, and deleted ones dropped, whether or not
+	// the control plane answered: decryption must never wait for it. The
+	// restart gets time of its own, so a check-in that timed out does not
+	// cut it short.
+	if a.loader != nil && (len(report.Pending) > 0 || a.loader.DeletedLoaded()) {
 		loadCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
 		defer cancel()
 		a.loader.LoadRestored(loadCtx, report.Controller.ActiveFingerprint)
@@ -157,7 +172,7 @@ func (a *Agent) checkIn(ctx context.Context, report Report) {
 	if commands == nil {
 		commands = []string{}
 	}
-	resp, err := a.controlPlane.CheckIn(ctx, protocol.CheckIn{
+	in := protocol.CheckIn{
 		Protocol:     protocol.Version,
 		AgentVersion: a.version,
 		Capabilities: capabilities,
@@ -165,7 +180,11 @@ func (a *Agent) checkIn(ctx context.Context, report Report) {
 		Controller:   report.Controller,
 		Keys:         report.Keys,
 		KeysComplete: report.Complete,
-	})
+	}
+	if a.usage != nil {
+		in.KeyUsage = a.usage.Latest()
+	}
+	resp, err := a.controlPlane.CheckIn(ctx, in)
 	if err != nil {
 		a.logger.WarnContext(ctx, "failed to check in with the control plane",
 			"event", "agent.checkin_failed", "error", err)

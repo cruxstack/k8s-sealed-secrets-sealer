@@ -499,7 +499,7 @@ agents:
 	}
 	plan := func(self string, states map[string]store.AgentState, cmds []store.CommandRecord) bool {
 		a, _ := reg.Agent(self)
-		return planKeySync(fleet.Compute("dev", reg, states, fleet.Keys{}, now), a, states[self], false, cmds, fleet.Keys{}, now).EnableRenewal
+		return planKeySync(fleet.Compute("dev", reg, states, fleet.Keys{}, now), a, states[self], nil, false, cmds, fleet.Keys{}, now).EnableRenewal
 	}
 
 	off := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "0s", 0)}
@@ -510,7 +510,7 @@ agents:
 	// checks in before their states are stored, and each could see itself
 	// as the lowest
 	a, _ := reg.Agent("a")
-	if planKeySync(fleet.Compute("dev", reg, off, fleet.Keys{}, now), a, off["a"], true, nil, fleet.Keys{}, now).EnableRenewal {
+	if planKeySync(fleet.Compute("dev", reg, off, fleet.Keys{}, now), a, off["a"], nil, true, nil, fleet.Keys{}, now).EnableRenewal {
 		t.Error("renewal was asked on a's first check-in")
 	}
 	on := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "720h0m0s", 0)}

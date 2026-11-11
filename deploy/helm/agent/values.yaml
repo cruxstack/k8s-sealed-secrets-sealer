@@ -52,6 +52,15 @@ capabilities:
   # as few agents as you can (one per env is enough), or set the
   # controller's own keyrenewperiod value and leave this off.
   renewal: false
+  # count the values in the SealedSecrets the controller watches by the key
+  # that sealed them, so an admin can delete keys nothing uses, and remove
+  # keys an admin deleted from the controller. This adds the agent's only
+  # cluster-wide permission: list SealedSecrets in every namespace. With
+  # keys the agent holds every private key of its cluster, so it can then
+  # decrypt every SealedSecret those keys sealed, anywhere in the cluster,
+  # not only the controller's. It also lets the agent delete Secrets in the
+  # controller's namespace, so it can delete keys there. Needs keys.
+  cleanup: false
 
 # The control plane this agent checks in with (required). It must be https;
 # allowInsecure permits plain http for local stacks only.
@@ -106,6 +115,12 @@ kms:
 # unless check-ins cost too much, and run more than one seal-capable agent.
 checkinInterval: 15s
 
+# How often, at most, the agent counts the values sealed with each key, from
+# 30s to 30m (cleanup capability). A count decrypts only the RSA part of each
+# value that changed since the last, a few milliseconds each with 4096-bit
+# keys; the control plane uses counts up to an hour old.
+keyUsageInterval: 5m
+
 # On shutdown the agent finishes the command it is running and reports its
 # result, within 45 seconds (a held commands poll and a few commands), then
 # reports those it could not finish as failed, within 10 more. Keep this
@@ -125,6 +140,10 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# With a memory limit the agent keeps its heap within 90% of it. 128Mi holds
+# a count's list page (100 SealedSecrets, tens of MiB while decoded when
+# each has dozens of values) and the RSA parts of up to 50,000 values a
+# count decrypts at once, about 26 MiB with 4096-bit keys.
 resources:
   requests:
     cpu: 10m

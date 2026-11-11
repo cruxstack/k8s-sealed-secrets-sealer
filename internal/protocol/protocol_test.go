@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -65,5 +66,36 @@ func TestHealthWindow(t *testing.T) {
 		if got := HealthWindow(interval); got != want {
 			t.Errorf("HealthWindow(%s) = %s, want %s", interval, got, want)
 		}
+	}
+}
+
+// A usage report says "every namespace" with null, and leaves out the keys
+// when no key seals a value.
+func TestKeyUsage_JSON(t *testing.T) {
+	b, err := json.Marshal(KeyUsage{ScannedAt: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"scanned_at":"2026-11-10T12:00:00Z","namespaces":null,"sealed_secrets":0,"values":0,"unmatched":0}`
+	if string(b) != want {
+		t.Fatalf("KeyUsage = %s, want %s", b, want)
+	}
+}
+
+// Every capability another needs is a capability, and every command's
+// capability is one.
+func TestCapabilities(t *testing.T) {
+	for c, need := range CapabilityNeeds {
+		if !IsCapability(c) || !IsCapability(need) || c == need {
+			t.Errorf("CapabilityNeeds[%q] = %q", c, need)
+		}
+	}
+	for cmd, c := range CommandCapability {
+		if !IsCapability(c) {
+			t.Errorf("command %s needs unknown capability %q", cmd, c)
+		}
+	}
+	if CommandCapability[CommandKeysDelete] != CapabilityCleanup {
+		t.Error("keys.delete.v1 is not cleanup's")
 	}
 }

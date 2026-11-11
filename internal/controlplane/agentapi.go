@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -165,6 +167,9 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 	// what is stored (the keys kept under the limit, when it joined)
 	snap, snapErr := s.readSnapshot(r.Context())
 	prev, seen := snap.states[agent.ID]
+	// every key the agent reported, before the key limit leaves the
+	// unusable ones out: deleted keys are among them
+	reported := slices.Clone(state.Keys)
 	records = applyKeyReport(&state, records, prev, seen, snap.revoked, now)
 	if snapErr != nil {
 		// the check-in is stored all the same, so the agent stays healthy,
@@ -172,6 +177,7 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 		// join time is unknown, as for agents seen before it was recorded
 		state.JoinedAt = nil
 	}
+	s.storeKeyUsage(r.Context(), agent, in.KeyUsage, &state, prev, snapErr == nil, snap.revoked, now)
 	if err := s.store.PutAgentState(r.Context(), state); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to store agent check-in", "agent_id", agent.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -201,7 +207,7 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 	err = snapErr
 	if err == nil {
 		snap.states[agent.ID] = state
-		escrowNeeded, err = s.syncKeys(r.Context(), agent, state, snap, seen)
+		escrowNeeded, err = s.syncKeys(r.Context(), agent, state, reported, snap, seen)
 	}
 	if err != nil {
 		// key sync catches up on a later check-in; the check-in itself is
@@ -221,6 +227,76 @@ func (s *Server) agentCheckIn(w http.ResponseWriter, r *http.Request, agent *reg
 	})
 }
 
+// storeKeyUsage stores the key usage report a check-in carries, from an
+// agent with the cleanup capability, unless the agent's previous state
+// shows it stored already: a report is stored once, with the time it first
+// came in, which the delete gate compares with when a key was revoked. A
+// report that is not valid is stored as a failed count, so it holds
+// deletions back without refusing the check-in. It notes the report in the
+// agent's state, and logs key.unmatched_values when the agent's cluster
+// first has values none of its keys decrypts. A new report that counts
+// values for a deleted key undoes the deletion (undoDeletion). A report
+// that cannot be stored is left for the next check-in, which carries it
+// again; the check-in itself goes on. prevKnown says whether prev is the
+// agent's previous state (the zero state before its first check-in), and
+// revoked are the env's revoked keys, nil when they could not be read.
+func (s *Server) storeKeyUsage(ctx context.Context, agent *registry.Agent, in *protocol.KeyUsage, state *store.AgentState, prev store.AgentState, prevKnown bool, revoked map[string]store.RevokedKey, now time.Time) {
+	if prevKnown {
+		state.UsageScannedAt, state.UsageUnmatched = prev.UsageScannedAt, prev.UsageUnmatched
+	}
+	if in == nil || !slices.Contains(state.Capabilities, protocol.CapabilityCleanup) {
+		return
+	}
+	scanned := in.ScannedAt.UTC()
+	if prevKnown && prev.UsageScannedAt != nil && prev.UsageScannedAt.Equal(scanned) {
+		return
+	}
+	u := store.KeyUsage{
+		AgentID: agent.ID, CountedAt: now, ScannedAt: scanned, Namespaces: in.Namespaces,
+		SealedSecrets: in.SealedSecrets, Values: in.Values, Unmatched: in.Unmatched, Error: in.Error,
+	}
+	if len(in.Keys) > 0 {
+		u.Keys = make(map[string]store.KeyUse, len(in.Keys))
+		for fp, use := range in.Keys {
+			u.Keys[fp] = store.KeyUse{Values: use.Values, SealedSecrets: use.SealedSecrets}
+		}
+	}
+	if errs := keyUsageErrors(in); len(errs) > 0 {
+		msgs := make([]string, len(errs))
+		for i, err := range errs {
+			msgs[i] = err.Error()
+		}
+		u = store.KeyUsage{
+			AgentID: agent.ID, CountedAt: now, ScannedAt: scanned,
+			Error: truncateRunes("the agent's count is not valid: "+strings.Join(msgs, "; "), protocol.MaxUsageError),
+		}
+		s.logger.WarnContext(ctx, "agent's count of key references is not valid; it counts as failed",
+			"event", "key.usage_invalid", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "error", u.Error)
+	}
+	stored, err := s.store.PutKeyUsage(ctx, u)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to store key usage", "agent_id", agent.ID, "error", err)
+		return
+	}
+	state.UsageScannedAt = &scanned
+	if u.Error != "" {
+		return
+	}
+	if stored {
+		for fp, use := range u.Keys {
+			if r, ok := revoked[fp]; ok && r.Deleted() && use.Values > 0 {
+				s.undoDeletion(ctx, agent, r, use, now)
+			}
+		}
+	}
+	state.UsageUnmatched = in.Unmatched
+	if stored && prevKnown && in.Unmatched > 0 && prev.UsageUnmatched == 0 {
+		s.logger.WarnContext(ctx, "cluster's SealedSecrets hold values none of its keys decrypts",
+			"event", "key.unmatched_values", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster,
+			"unmatched", in.Unmatched, "values", in.Values)
+	}
+}
+
 // checkInIntervalSeconds reads an agent's check-in interval header, held
 // within the bounds an agent accepts. It is 0 when the header is missing or
 // not a whole number of seconds, as from agents that predate it.
@@ -230,6 +306,61 @@ func checkInIntervalSeconds(v string) int {
 		return 0
 	}
 	return min(max(n, int(protocol.MinCheckInInterval/time.Second)), int(protocol.MaxCheckInInterval/time.Second))
+}
+
+// truncateRunes cuts s to at most n bytes, at a rune boundary, so the
+// result is valid UTF-8 no longer than n.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// keyUsageErrors checks a check-in's key usage report, if any, within the
+// limits a stored report keeps to.
+func keyUsageErrors(u *protocol.KeyUsage) []error {
+	if u == nil {
+		return nil
+	}
+	var errs []error
+	fail := func(format string, args ...any) { errs = append(errs, fmt.Errorf("key_usage: "+format, args...)) }
+	if u.ScannedAt.IsZero() {
+		fail("scanned_at is required")
+	}
+	if len(u.Namespaces) > protocol.MaxUsageNamespaces {
+		fail("too many namespaces")
+	} else {
+		for _, ns := range u.Namespaces {
+			if len(validation.IsDNS1123Label(ns)) > 0 {
+				fail("namespace %q is not a DNS-1123 label", ns)
+				break
+			}
+		}
+	}
+	if u.SealedSecrets < 0 || u.Values < 0 || u.Unmatched < 0 || u.Unmatched > u.Values {
+		fail("counts are out of range")
+	}
+	if len(u.Error) > protocol.MaxUsageError {
+		fail("error is too long")
+	}
+	if len(u.Keys) > protocol.MaxKeys {
+		fail("too many keys")
+	}
+	for fp, use := range u.Keys {
+		if !strings.HasPrefix(fp, "SHA256:") || len(fp) > 128 {
+			fail("%q is not a key fingerprint", fp)
+			break
+		}
+		if use.Values < 1 || use.Values > u.Values || use.SealedSecrets < 1 || use.SealedSecrets > use.Values || use.SealedSecrets > u.SealedSecrets {
+			fail("counts of key %s are out of range", fp)
+			break
+		}
+	}
+	return errs
 }
 
 func (s *Server) isKnownKey(fp string) bool {

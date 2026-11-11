@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -65,6 +66,8 @@ func TestStore_AgentStates(t *testing.T) {
 				JoinedAt:     ptr(now.Add(-time.Minute)),
 
 				CheckInIntervalSeconds: 60,
+				UsageScannedAt:         ptr(now.Add(-time.Second)),
+				UsageUnmatched:         2,
 			}
 			if err := s.PutAgentState(ctx, state); err != nil {
 				t.Fatal(err)
@@ -88,13 +91,17 @@ func TestStore_AgentStates(t *testing.T) {
 			if g.KeysReported != 3 || g.DroppedUpTo == nil || !g.DroppedUpTo.Equal(*state.DroppedUpTo) || g.JoinedAt == nil || !g.JoinedAt.Equal(*state.JoinedAt) {
 				t.Fatalf("key limit and joining round trip: %+v", g)
 			}
+			if g.UsageScannedAt == nil || !g.UsageScannedAt.Equal(*state.UsageScannedAt) || g.UsageUnmatched != 2 {
+				t.Fatalf("usage marker round trip: %+v", g)
+			}
 			// states stored before these were recorded read as unknown
 			state.AgentID, state.KeysReported, state.DroppedUpTo, state.JoinedAt = "use1-green", 0, nil, nil
+			state.UsageScannedAt, state.UsageUnmatched = nil, 0
 			if err := s.PutAgentState(ctx, state); err != nil {
 				t.Fatal(err)
 			}
 			got, err = s.GetAgentStates(ctx, []string{"use1-green"})
-			if g := got["use1-green"]; err != nil || g.KeysReported != 0 || g.DroppedUpTo != nil || g.JoinedAt != nil {
+			if g := got["use1-green"]; err != nil || g.KeysReported != 0 || g.DroppedUpTo != nil || g.JoinedAt != nil || g.UsageScannedAt != nil {
 				t.Fatalf("state without them: %+v %v", g, err)
 			}
 		})
@@ -449,6 +456,276 @@ func TestStore_KeyStatus(t *testing.T) {
 			}
 			if revoked, err := s.RevokedKeys(ctx); err != nil || len(revoked) != 0 {
 				t.Fatalf("a reinstated key is still listed: %v %v", revoked, err)
+			}
+		})
+	}
+}
+
+func TestStore_DeleteKey(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			fp := "SHA256:delete-" + name + "-" + now.Format("150405.000000")
+			k := KeyRecord{Fingerprint: fp, Certificate: "PEM", NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), FirstSeenAgent: "use1-blue", FirstSeenAt: now}
+			if _, err := s.PutKeyIfAbsent(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range []string{"use1-blue", "use1-green"} {
+				rec := protocol.EscrowRecord{
+					Fingerprint: fp, Certificate: "PEM", UploadedBy: agent, UploadedAt: now,
+					Envelope: protocol.Envelope{KeyID: "k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y29weQ==", Context: map[string]string{"fingerprint": fp}},
+				}
+				if stored, _, err := s.PutEscrow(ctx, rec, 3); err != nil || !stored {
+					t.Fatalf("escrow from %s: stored=%v err=%v", agent, stored, err)
+				}
+			}
+			later := now.Add(time.Minute)
+			purge := later.Add(30 * 24 * time.Hour)
+			del := k
+			del.Status, del.StatusBy, del.StatusAt, del.PurgeAt = KeyDeleted, "bob", &later, &purge
+
+			// only a revoked key is deleted, and only the revocation checked
+			if err := s.DeleteKey(ctx, del, now); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("delete of an active key: %v", err)
+			}
+			unknown := del
+			unknown.Fingerprint = fp + "-unknown"
+			if err := s.DeleteKey(ctx, unknown, now); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("delete of an unknown key: %v", err)
+			}
+			revoke := k
+			revoke.Status, revoke.StatusBy, revoke.StatusAt = KeyRevoked, "alice", &now
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
+				t.Fatalf("revoke: ok=%v err=%v", ok, err)
+			}
+			if err := s.DeleteKey(ctx, del, now.Add(-time.Minute)); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("delete of another revocation: %v", err)
+			}
+			if err := s.DeleteKey(ctx, del, now); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if err := s.DeleteKey(ctx, del, now); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("delete again: %v", err)
+			}
+			got, _, _ := s.GetKey(ctx, fp)
+			if got.Status != KeyDeleted || got.StatusBy != "bob" || got.PurgeAt == nil || !got.PurgeAt.Equal(purge) || !got.Revoked() {
+				t.Fatalf("deleted key: %+v", got)
+			}
+			revoked, err := s.RevokedKeys(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := revoked[fp]
+			if !r.Deleted() || r.By != "alice" || !r.At.Equal(now) || r.DeletedBy != "bob" || r.DeletedAt == nil || !r.DeletedAt.Equal(later) ||
+				r.PurgeAt == nil || !r.PurgeAt.Equal(purge) || r.Purged(later) || !r.Purged(purge) {
+				t.Fatalf("deleted key's record: %+v", r)
+			}
+			// a deleted key changes status only through reinstating it
+			if ok, err := s.SetKeyStatus(ctx, revoke); !errors.Is(err, ErrKeyChanged) || ok {
+				t.Fatalf("revoke of a deleted key: ok=%v err=%v", ok, err)
+			}
+			// its copies are kept until the purge, and no copy is added
+			if recs, err := s.Escrow(ctx, fp); err != nil || len(recs) != 2 {
+				t.Fatalf("escrow of a deleted key: %d %v", len(recs), err)
+			}
+			extra := protocol.EscrowRecord{Fingerprint: fp, Certificate: "PEM", UploadedBy: "use2-blue", UploadedAt: now,
+				Envelope: protocol.Envelope{KeyID: "k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y29weQ==", Context: map[string]string{}}}
+			if stored, _, err := s.PutEscrow(ctx, extra, 3); err != nil || stored {
+				t.Fatalf("copy of a deleted key: stored=%v err=%v", stored, err)
+			}
+
+			reinstate := k
+			reinstate.Status, reinstate.StatusBy, reinstate.StatusAt = KeyActive, "carol", &later
+			if err := s.ReinstateDeletedKey(ctx, reinstate); err != nil {
+				t.Fatalf("reinstate: %v", err)
+			}
+			if err := s.ReinstateDeletedKey(ctx, reinstate); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("reinstate again: %v", err)
+			}
+			got, _, _ = s.GetKey(ctx, fp)
+			if got.Status != KeyActive || got.StatusBy != "carol" || got.PurgeAt != nil {
+				t.Fatalf("reinstated key: %+v", got)
+			}
+			lists, err := s.KeyLists(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := lists.Reinstated[fp]; len(lists.Revoked) != 0 || r.By != "carol" || !r.At.Equal(later) || !r.NotBefore.Equal(k.NotBefore) {
+				t.Fatalf("lists after reinstating = %+v", lists)
+			}
+			// its copies no longer expire, so new ones may be added again
+			if stored, _, err := s.PutEscrow(ctx, extra, 3); err != nil || !stored {
+				t.Fatalf("copy of a reinstated key: stored=%v err=%v", stored, err)
+			}
+
+			// deleted again, with a purge time already past: its copies are
+			// gone to every read, whether or not TTL has removed them
+			past := now.Add(-time.Second)
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
+				t.Fatalf("revoke again: ok=%v err=%v", ok, err)
+			}
+			// revoked, it is no longer to be restored everywhere
+			if lists, err := s.KeyLists(ctx); err != nil || len(lists.Reinstated) != 0 || len(lists.Revoked) != 1 {
+				t.Fatalf("lists after revoking again = %+v, %v", lists, err)
+			}
+			del.PurgeAt = &past
+			if err := s.DeleteKey(ctx, del, now); err != nil {
+				t.Fatalf("delete with a past purge: %v", err)
+			}
+			if recs, err := s.Escrow(ctx, fp); err != nil || len(recs) != 0 {
+				t.Fatalf("escrow past the purge: %d %v", len(recs), err)
+			}
+			if up, err := s.EscrowUploaders(ctx, []string{fp}); err != nil || len(up) != 0 {
+				t.Fatalf("uploaders past the purge: %v %v", up, err)
+			}
+		})
+	}
+}
+
+// A key with no escrowed copy is deleted all the same; a copy stored
+// between the read of its copies and the write would be left without its
+// purge time, so the write is refused then.
+func TestStore_DeleteKeyWithoutEscrow(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			fp := "SHA256:delete-bare-" + name + "-" + now.Format("150405.000000")
+			k := KeyRecord{Fingerprint: fp, Certificate: "PEM", FirstSeenAt: now}
+			if _, err := s.PutKeyIfAbsent(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			revoke := k
+			revoke.Status, revoke.StatusBy, revoke.StatusAt = KeyRevoked, "alice", &now
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
+				t.Fatalf("revoke: ok=%v err=%v", ok, err)
+			}
+			purge := now.Add(time.Hour)
+			del := k
+			del.Status, del.StatusBy, del.StatusAt, del.PurgeAt = KeyDeleted, "bob", &now, &purge
+			if err := s.DeleteKey(ctx, del, now); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if got, _, _ := s.GetKey(ctx, fp); got.Status != KeyDeleted {
+				t.Fatalf("status = %q", got.Status)
+			}
+			// nor is a first copy stored once it is deleted
+			first := protocol.EscrowRecord{Fingerprint: fp, Certificate: "PEM", UploadedBy: "use1-blue", UploadedAt: now,
+				Envelope: protocol.Envelope{KeyID: "k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y29weQ==", Context: map[string]string{}}}
+			if stored, _, err := s.PutEscrow(ctx, first, 3); err != nil || stored {
+				t.Fatalf("first copy of a deleted key: stored=%v err=%v", stored, err)
+			}
+		})
+	}
+}
+
+// A deletion a cluster's count contradicts is undone: the key is revoked
+// again, as it was, and its copies no longer expire.
+func TestStore_UndeleteKey(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			fp := "SHA256:undelete-" + name + "-" + now.Format("150405.000000")
+			k := KeyRecord{Fingerprint: fp, Certificate: "PEM", FirstSeenAt: now}
+			if _, err := s.PutKeyIfAbsent(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			escrow := func(agent string) bool {
+				t.Helper()
+				stored, _, err := s.PutEscrow(ctx, protocol.EscrowRecord{Fingerprint: fp, Certificate: "PEM", UploadedBy: agent, UploadedAt: now,
+					Envelope: protocol.Envelope{KeyID: "k", WrappedKey: "d3JhcHBlZA==", Nonce: "bm9uY2U=", Ciphertext: "Y29weQ==", Context: map[string]string{}}}, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return stored
+			}
+			escrow("use1-blue")
+			revoke := k
+			revoke.Status, revoke.StatusBy, revoke.StatusAt = KeyRevoked, "alice", &now
+			if ok, err := s.SetKeyStatus(ctx, revoke); err != nil || !ok {
+				t.Fatalf("revoke: ok=%v err=%v", ok, err)
+			}
+			listed := RevokedKey{Fingerprint: fp, By: "alice", At: now}
+			if err := s.UndeleteKey(ctx, listed); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("undelete of a key not deleted: %v", err)
+			}
+			later, purge := now.Add(time.Minute), now.Add(time.Hour)
+			del := k
+			del.Status, del.StatusBy, del.StatusAt, del.PurgeAt = KeyDeleted, "bob", &later, &purge
+			if err := s.DeleteKey(ctx, del, now); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if err := s.UndeleteKey(ctx, listed); err != nil {
+				t.Fatalf("undelete: %v", err)
+			}
+			if err := s.UndeleteKey(ctx, listed); !errors.Is(err, ErrKeyChanged) {
+				t.Fatalf("undelete again: %v", err)
+			}
+			got, _, _ := s.GetKey(ctx, fp)
+			if got.Status != KeyRevoked || got.StatusBy != "alice" || got.StatusAt == nil || !got.StatusAt.Equal(now) || got.PurgeAt != nil {
+				t.Fatalf("undeleted key: %+v", got)
+			}
+			revoked, _ := s.RevokedKeys(ctx)
+			if r := revoked[fp]; r.Deleted() || r.DeletedBy != "" || r.DeletedAt != nil || r.PurgeAt != nil || r.By != "alice" {
+				t.Fatalf("undeleted key's record: %+v", r)
+			}
+			// its copy no longer expires: another may be added, and it is
+			// deleted again from the same revocation
+			if recs, _ := s.Escrow(ctx, fp); len(recs) != 1 || !escrow("use1-green") {
+				t.Fatalf("escrow of the undeleted key: %d copies", len(recs))
+			}
+			if err := s.DeleteKey(ctx, del, now); err != nil {
+				t.Fatalf("delete again: %v", err)
+			}
+		})
+	}
+}
+
+func TestStore_KeyUsage(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			agent := "use1-blue-usage-" + name
+			u := KeyUsage{
+				AgentID: agent, CountedAt: now, ScannedAt: now.Add(-time.Second),
+				Namespaces: []string{"apps", "sealed-secrets"}, SealedSecrets: 3, Values: 5, Unmatched: 1,
+				Keys: map[string]KeyUse{"SHA256:a/b+c=": {Values: 4, SealedSecrets: 2}},
+			}
+			if stored, err := s.PutKeyUsage(ctx, u); err != nil || !stored {
+				t.Fatalf("put: stored=%v err=%v", stored, err)
+			}
+			// the same report again keeps the time it was first received
+			again := u
+			again.CountedAt = now.Add(time.Minute)
+			if stored, err := s.PutKeyUsage(ctx, again); err != nil || stored {
+				t.Fatalf("put again: stored=%v err=%v", stored, err)
+			}
+			// the agent state shares the partition and is not usage
+			if err := s.PutAgentState(ctx, AgentState{AgentID: agent, LastCheckIn: now}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.KeyUsages(ctx, []string{agent, "missing"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := got[agent]
+			if len(got) != 1 || !g.CountedAt.Equal(now) || !g.ScannedAt.Equal(u.ScannedAt) || !slices.Equal(g.Namespaces, u.Namespaces) ||
+				g.SealedSecrets != 3 || g.Values != 5 || g.Unmatched != 1 || g.Keys["SHA256:a/b+c="] != (KeyUse{Values: 4, SealedSecrets: 2}) {
+				t.Fatalf("usage round trip: %+v", got)
+			}
+
+			// a newer report replaces it; a failed one has no counts and
+			// every namespace reads as none
+			failed := KeyUsage{AgentID: agent, CountedAt: now.Add(2 * time.Minute), ScannedAt: now.Add(time.Minute), Error: "forbidden"}
+			if stored, err := s.PutKeyUsage(ctx, failed); err != nil || !stored {
+				t.Fatalf("put failed: stored=%v err=%v", stored, err)
+			}
+			got, _ = s.KeyUsages(ctx, []string{agent})
+			if g := got[agent]; g.Error != "forbidden" || len(g.Keys) != 0 || len(g.Namespaces) != 0 || g.Values != 0 {
+				t.Fatalf("failed usage: %+v", g)
 			}
 		})
 	}

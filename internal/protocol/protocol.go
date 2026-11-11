@@ -30,13 +30,21 @@ const (
 	CapabilitySeal    = "seal"
 	CapabilityKeys    = "keys"
 	CapabilityRenewal = "renewal"
+	// CapabilityCleanup lets an agent count which keys its controller's
+	// SealedSecrets are sealed with, and delete keys an admin deleted. It
+	// needs CapabilityKeys.
+	CapabilityCleanup = "cleanup"
 )
 
 // Capabilities lists every known capability.
-var Capabilities = []string{CapabilitySeal, CapabilityKeys, CapabilityRenewal}
+var Capabilities = []string{CapabilitySeal, CapabilityKeys, CapabilityRenewal, CapabilityCleanup}
 
 // IsCapability reports whether c is a known capability.
 func IsCapability(c string) bool { return slices.Contains(Capabilities, c) }
+
+// CapabilityNeeds is the capability each capability needs besides itself:
+// counting references reads the key Secrets that keys grants.
+var CapabilityNeeds = map[string]string{CapabilityCleanup: CapabilityKeys}
 
 // Limits on a check-in.
 const (
@@ -53,6 +61,11 @@ const (
 	MaxRestoreKeys = 100
 	// MaxCertificateBytes bounds one PEM certificate.
 	MaxCertificateBytes = 16 << 10
+	// MaxUsageNamespaces bounds the namespaces a key usage report names: a
+	// controller's own and its --additional-namespaces.
+	MaxUsageNamespaces = 1000
+	// MaxUsageError bounds the error of a key usage report.
+	MaxUsageError = 1024
 )
 
 // Login methods for POST /agent/v1/session.
@@ -160,6 +173,34 @@ type CheckIn struct {
 	// active certificate (it lacks the keys capability), so Keys may not be
 	// the controller's whole key set.
 	KeysComplete bool `json:"keys_complete"`
+	// KeyUsage is the agent's latest finished count of key references, from
+	// agents with the cleanup capability; nil before the first.
+	KeyUsage *KeyUsage `json:"key_usage,omitempty"`
+}
+
+// KeyUsage is the agent's latest count of the values its controller's
+// SealedSecrets hold, by the key that sealed them. It names no SealedSecret
+// and holds no value.
+type KeyUsage struct {
+	// ScannedAt is when the scan finished, by the agent's clock.
+	ScannedAt time.Time `json:"scanned_at"`
+	// Namespaces are those the controller watches; nil for every namespace.
+	Namespaces    []string `json:"namespaces"`
+	SealedSecrets int      `json:"sealed_secrets"`
+	Values        int      `json:"values"`
+	// Unmatched counts the values no key in the cluster decrypts.
+	Unmatched int `json:"unmatched"`
+	// Keys holds, by fingerprint, the keys that seal at least one value; at
+	// most MaxKeys.
+	Keys map[string]KeyUse `json:"keys,omitempty"`
+	// Error says why the scan failed; the counts are then absent.
+	Error string `json:"error,omitempty"`
+}
+
+// KeyUse is how many values one key seals, and in how many SealedSecrets.
+type KeyUse struct {
+	Values        int `json:"values"`
+	SealedSecrets int `json:"sealed_secrets"`
 }
 
 // Negotiate returns the newest of ours (newest first) that the agent speaks:
@@ -209,6 +250,7 @@ const (
 	CommandSeal          = "seal.v1"
 	CommandKeysRestore   = "keys.restore.v1"
 	CommandRenewalEnable = "renewal.enable.v1"
+	CommandKeysDelete    = "keys.delete.v1"
 )
 
 // CommandCapability is the capability each command needs.
@@ -216,6 +258,7 @@ var CommandCapability = map[string]string{
 	CommandSeal:          CapabilitySeal,
 	CommandKeysRestore:   CapabilityKeys,
 	CommandRenewalEnable: CapabilityRenewal,
+	CommandKeysDelete:    CapabilityCleanup,
 }
 
 // Command is a unit of work queued for one agent.
@@ -270,6 +313,40 @@ type KeyFailure struct {
 	// them out.
 	UploadedBy string `json:"uploaded_by,omitempty"`
 	BadCopy    bool   `json:"bad_copy,omitempty"`
+}
+
+// KeysDeletePayload asks an agent to remove keys an admin deleted from its
+// controller, at most MaxRestoreKeys.
+type KeysDeletePayload struct {
+	Fingerprints []string `json:"fingerprints"`
+}
+
+// What keys.delete.v1 did with a key.
+const (
+	// KeyRemoved: the agent deleted the key's Secrets.
+	KeyRemoved = "removed"
+	// KeyAbsent: the cluster holds no Secret of the key.
+	KeyAbsent = "absent"
+	// KeyRefused: the agent left the key in place; Reason says why.
+	KeyRefused = "refused"
+)
+
+// KeysDeleteResult reports a keys.delete.v1, one entry per fingerprint. The
+// command succeeds when every key was removed or absent.
+type KeysDeleteResult struct {
+	Keys                []KeyDeletion `json:"keys"`
+	ControllerRestarted bool          `json:"controller_restarted"`
+}
+
+// KeyDeletion is what keys.delete.v1 did with one key. Values and
+// SealedSecrets are the references the agent counted, when it refused the
+// key for them.
+type KeyDeletion struct {
+	Fingerprint   string `json:"fingerprint"`
+	Outcome       string `json:"outcome"`
+	Reason        string `json:"reason,omitempty"`
+	Values        int    `json:"values,omitempty"`
+	SealedSecrets int    `json:"sealed_secrets,omitempty"`
 }
 
 // RenewalEnablePayload asks an agent to turn on its controller's key

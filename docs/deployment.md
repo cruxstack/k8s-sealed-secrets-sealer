@@ -190,11 +190,27 @@ capabilities:
   # this cluster runs only at times; renewal belongs in one that is always
   # up (design section 9)
   renewal: false
+  # count the values sealed with each key, so unused keys can be deleted,
+  # and remove deleted keys; needs keys
+  cleanup: true
 kms:
   # the replicas in this cluster's region
   transitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-transit
   escrowKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-escrow
 ```
+
+Everything the chart grants the agent is in the controller's namespace,
+except with `cleanup`: a ClusterRole and ClusterRoleBinding, named
+`<release namespace>-<full name>-sealedsecrets`, let it `list`
+SealedSecrets in every namespace, to count the values sealed with each key.
+With `keys` the agent holds its cluster's private keys, so this lets it
+decrypt every SealedSecret they sealed, in any namespace. `cleanup` also
+lets it delete Secrets in the controller's namespace, to remove keys an
+admin deleted. It needs `keys`, and the chart refuses it without.
+`keyUsageInterval` (5 minutes by default, 30s to 30m) sets how often it
+counts. An admin can delete a key only once every
+cluster's agent counts (design section 10), so turn `cleanup` on in every
+cluster of an env, in its values and its registry entry, or in none.
 
 Installed with `helm install sealer-agent ... --namespace sealer`, the chart
 creates the service account `sealer-agent` (the release's full name, unless
@@ -263,14 +279,14 @@ agents:
   - id: prod-use1-blue
     cluster: prod-use1-blue
     region: use1
-    capabilities: [seal, keys, renewal]
+    capabilities: [seal, keys, renewal, cleanup]
     identity:
       aws:
         roleArn: arn:aws:iam::333333333333:role/sealer-agent-prod-use1-blue
   - id: prod-use2-blue
     cluster: prod-use2-blue
     region: use2
-    capabilities: [seal, keys]
+    capabilities: [seal, keys, cleanup]
     identity:
       aws:
         roleArn: arn:aws:iam::333333333333:role/sealer-agent-prod-use2-blue
@@ -306,7 +322,8 @@ can seal for any of its clusters.
 | `agents[].cluster`            | The cluster's name, shown in the fleet and logs.       |
 | `agents[].region`             | The cluster's region label (`use1`), which documents'  |
 |                               | region annotations name.                               |
-| `agents[].capabilities`       | What the agent may do: `seal`, `keys`, `renewal`.      |
+| `agents[].capabilities`       | What the agent may do: `seal`, `keys`, `renewal`,      |
+|                               | `cleanup` (which needs `keys`).                        |
 | `agents[].identity.aws`       | `roleArn`, and optionally `roleId` (`AROA...`).        |
 | `agents[].identity.k8s`       | `issuer` (an issuer's `name`) and `subject`            |
 |                               | (`system:serviceaccount:<namespace>:<name>`).          |

@@ -25,7 +25,7 @@ agents:
   - id: use1-blue
     cluster: blue
     region: use1
-    capabilities: [seal, keys, renewal]
+    capabilities: [seal, keys, renewal, cleanup]
     identity:
       k8s: {issuer: local, subject: "system:serviceaccount:sealer:sealer-agent"}
 `
@@ -45,7 +45,7 @@ func TestParse_Valid(t *testing.T) {
 	if _, ok := r.AgentByK8s("local", "system:serviceaccount:other:sealer-agent"); ok {
 		t.Fatal("unregistered subject was found")
 	}
-	if !a.HasCapability("keys") {
+	if !a.HasCapability("keys") || !a.HasCapability("cleanup") {
 		t.Error("capabilities not kept")
 	}
 	if got := r.Issuers[0].JWKSFile; got != "/etc/registry/jwks/local.json" {
@@ -74,6 +74,7 @@ agents:
   - id: dup
     cluster: blue
     region: use1
+    capabilities: [seal, cleanup]
     identity:
       k8s: {issuer: missing, subject: "user:alice"}
   - id: dup
@@ -93,6 +94,7 @@ agents:
 		"id must be a DNS-1123 label",
 		`duplicate capability "seal"`,
 		`unknown capability "root"`,
+		`capability "cleanup" needs "keys"`,
 		"set exactly one of identity.k8s and identity.aws",
 		`unknown issuer "missing"`,
 		"subject must be system:serviceaccount",

@@ -32,11 +32,20 @@ import (
 )
 
 // faultyStore fails reads of every agent's state while failStateReads is
-// set, and counts reads of an agent's commands.
+// set, and writes of key usage while failUsageWrites is, and counts reads
+// of an agent's commands.
 type faultyStore struct {
 	store.Store
-	failStateReads atomic.Bool
-	commandReads   atomic.Int32
+	failStateReads  atomic.Bool
+	failUsageWrites atomic.Bool
+	commandReads    atomic.Int32
+}
+
+func (f *faultyStore) PutKeyUsage(ctx context.Context, u store.KeyUsage) (bool, error) {
+	if f.failUsageWrites.Load() {
+		return false, errors.New("throttled")
+	}
+	return f.Store.PutKeyUsage(ctx, u)
 }
 
 func (f *faultyStore) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]store.CommandRecord, error) {
@@ -62,13 +71,20 @@ type keyHarness struct {
 
 func newKeyHarness(t *testing.T) *keyHarness {
 	t.Helper()
-	reg, err := registry.Parse([]byte(`
+	return newKeyHarnessWith(t, `
 issuers: [{name: local, url: "https://k8s.example.com", jwksFile: k.json}]
 agents:
   - {id: a, cluster: a, region: use1, capabilities: [seal, keys, renewal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
   - {id: b, cluster: b, region: use1, capabilities: [seal, keys], identity: {k8s: {issuer: local, subject: "system:serviceaccount:b:agent"}}}
   - {id: c, cluster: c, region: use2, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:c:agent"}}}
-`), "")
+`)
+}
+
+// newKeyHarnessWith is newKeyHarness with another registry of agents a, b
+// and c.
+func newKeyHarnessWith(t *testing.T, registryYAML string) *keyHarness {
+	t.Helper()
+	reg, err := registry.Parse([]byte(registryYAML), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +118,8 @@ agents:
 		AdminTokenKeyChanges: true,
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
+	// escrowed copies expire by the harness's clock, as by the table's TTL
+	mem.SetClock(sh.clock)
 	for _, id := range []string{"a", "b", "c"} {
 		sh.sessions[id] = agentSession(t, sessions, reg, id)
 	}
@@ -247,7 +265,7 @@ func TestKeyStatus_AdminTokenChangesKeysOnlyWhenAllowed(t *testing.T) {
 	if rec := h.do(http.MethodPost, "/agent/v1/checkin", h.login(), checkIn(k)); rec.Code != http.StatusOK {
 		t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
 	}
-	for _, action := range []string{"revoke", "reinstate"} {
+	for _, action := range []string{"revoke", "reinstate", "delete"} {
 		path := "/api/v1/admin/keys/" + protocol.FingerprintPath(k.Fingerprint) + "/" + action
 		if rec := h.do(http.MethodPost, path, "wrong", nil); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s with a wrong token = %d", action, rec.Code)
@@ -672,7 +690,7 @@ agents:
 		},
 	}
 	self, _ := reg.Agent("a")
-	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], false, nil, keys, now)
+	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
 	// a adds its copy where it has none and the key has room; not of
 	// revoked or future-dated keys
 	if !slices.Equal(plan.EscrowNeeded, []string{theirs.Fingerprint}) {
@@ -695,7 +713,7 @@ agents:
 		many = append(many, ref(fmt.Sprintf("SHA256:first-%02d", i), time.Hour))
 	}
 	states["a"] = st("a", many...)
-	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], false, nil, keys, now)
+	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
 	if len(plan.EscrowNeeded) != maxCopiesPerCheckIn+5 || !slices.Contains(plan.EscrowNeeded, "SHA256:first-04") {
 		t.Errorf("escrow needed = %d keys %v, want %d copies and the 5 first copies", len(plan.EscrowNeeded), plan.EscrowNeeded, maxCopiesPerCheckIn)
 	}
@@ -738,7 +756,7 @@ agents:
 	self, _ := reg.Agent("b")
 	plan := func(commands ...store.CommandRecord) []string {
 		t.Helper()
-		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], false, commands, keys, now).Restore
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], nil, false, commands, keys, now).Restore
 	}
 
 	first := plan()

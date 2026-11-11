@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
@@ -37,6 +38,16 @@ const (
 	// clocks that disagree. A key dated later is not used or restored
 	// until then.
 	FutureSkew = time.Hour
+	// UsageFresh is how recently, by the control plane's clock, a cluster's
+	// count of key references must have come in to count.
+	UsageFresh = time.Hour
+)
+
+// Why a key that is not revoked cannot be deleted. The delete API refuses
+// with the same sentences as the fleet view's Key.DeleteBlocked.
+const (
+	BlockedActive  = "Revoke the key first."
+	BlockedDeleted = "The key is already deleted."
 )
 
 // orderCertNotBefore is the controller's default key order and the only one
@@ -50,6 +61,14 @@ type Keys struct {
 	// Escrow lists, by fingerprint, the agents that escrowed a copy of
 	// each key; a key with no escrowed copy is absent.
 	Escrow map[string][]string
+	// Reinstated are the deleted keys an admin reinstated lately, by
+	// fingerprint: every in-scope cluster without one is missing it, though
+	// no cluster may hold it any more.
+	Reinstated map[string]store.ReinstatedKey
+	// Usage holds each agent's latest count of key references, by agent
+	// ID. It is nil where it was not read: check-ins plan without it, and
+	// every key then counts as uncounted.
+	Usage map[string]store.KeyUsage
 }
 
 // Usable reports whether a key may be the env key, count as held and be
@@ -97,14 +116,64 @@ type Key struct {
 	// EscrowCopies is how many escrowed copies the key has.
 	EscrowCopies int  `json:"escrow_copies"`
 	EnvKey       bool `json:"env_key"`
-	// Status is store.KeyActive or store.KeyRevoked, with who revoked it
-	// and when.
+	// Status is store.KeyActive, store.KeyRevoked or store.KeyDeleted,
+	// with who revoked it and when, and for a deleted key who deleted it,
+	// when, and when its escrowed copies are purged (Purged once that has
+	// passed: it cannot be reinstated).
 	Status    string     `json:"status"`
 	RevokedBy string     `json:"revoked_by,omitempty"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	DeletedBy string     `json:"deleted_by,omitempty"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	PurgeAt   *time.Time `json:"purge_at,omitempty"`
+	Purged    bool       `json:"purged"`
 	// FutureDated marks a key valid only from more than FutureSkew ahead;
 	// it is not used or restored until then.
 	FutureDated bool `json:"future_dated"`
+	// References are the values sealed with the key, as clusters counted
+	// them.
+	References KeyReferences `json:"references"`
+	// Deletable says whether an admin may delete the key now: only a
+	// revoked key that no in-scope cluster has values sealed with, by
+	// counts every one of them made since it was revoked. DeleteBlocked
+	// says why not, in one sentence, on every key that is not deletable.
+	Deletable     bool   `json:"deletable"`
+	DeleteBlocked string `json:"delete_blocked,omitempty"`
+}
+
+// KeyReferences are the values sealed with one key, summed over the
+// in-scope clusters that counted them.
+type KeyReferences struct {
+	Values        int `json:"values"`
+	SealedSecrets int `json:"sealed_secrets"`
+	// Clusters has one entry per in-scope cluster that counted, those
+	// counting none included.
+	Clusters []ClusterReferences `json:"clusters"`
+	// Uncounted are the in-scope agents whose clusters did not count: no
+	// cleanup capability, never counted, a failed count, or a count older
+	// than UsageFresh.
+	Uncounted []string `json:"uncounted"`
+}
+
+// ClusterReferences are one cluster's values sealed with a key.
+type ClusterReferences struct {
+	Agent         string    `json:"agent"`
+	Cluster       string    `json:"cluster"`
+	Values        int       `json:"values"`
+	SealedSecrets int       `json:"sealed_secrets"`
+	CountedAt     time.Time `json:"counted_at"`
+}
+
+// KeyUsage is an agent's latest count of its cluster's SealedSecrets.
+type KeyUsage struct {
+	// CountedAt is when the control plane received the count.
+	CountedAt time.Time `json:"counted_at"`
+	// Namespaces are those the controller watches; nil for every one.
+	Namespaces    []string `json:"namespaces"`
+	SealedSecrets int      `json:"sealed_secrets"`
+	Values        int      `json:"values"`
+	Unmatched     int      `json:"unmatched"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // Agent is one registered agent and what is known about it.
@@ -137,16 +206,23 @@ type Agent struct {
 	// recorded.
 	Joining  bool       `json:"joining"`
 	JoinedAt *time.Time `json:"joined_at,omitempty"`
-	Issues   []string   `json:"issues,omitempty"`
+	// KeyUsage is the agent's latest count of key references; nil when it
+	// has never reported one.
+	KeyUsage *KeyUsage `json:"key_usage,omitempty"`
+	Issues   []string  `json:"issues,omitempty"`
 
 	// canRestore is set when the agent may be sent keys.restore.v1,
 	// reports its whole key set and knows its controller orders keys by
 	// NotBefore, as the agent requires to restore; orderUnknown when that
 	// order alone keeps it from restoring. droppedUpTo is the newest
-	// NotBefore of the usable keys left out of its report.
+	// NotBefore of the usable keys left out of its report. canCount is set
+	// when it is registered for and reports the cleanup capability, and
+	// usage is its latest count.
 	canRestore   bool
 	orderUnknown bool
 	droppedUpTo  *time.Time
+	canCount     bool
+	usage        *store.KeyUsage
 }
 
 // CanRestore reports whether the agent can restore keys into its cluster:
@@ -202,6 +278,11 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 		// orders keys by NotBefore; it reports "" when it cannot
 		a.canRestore = keysOK && ctrl.KeyOrderPriority == orderCertNotBefore
 		a.orderUnknown = keysOK && ctrl.KeyOrderPriority == ""
+		a.canCount = ra.HasCapability(protocol.CapabilityCleanup) && slices.Contains(s.Capabilities, protocol.CapabilityCleanup)
+		if u, ok := keys.Usage[ra.ID]; ok {
+			a.usage = &u
+			a.KeyUsage = usageView(u)
+		}
 
 		if !a.Healthy {
 			a.Issues = append(a.Issues, "has not checked in recently")
@@ -218,13 +299,14 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 			a.Issues = append(a.Issues, "key order unknown (set where the agent cannot read it, or its controller's Deployment could not be read); key restores into it are refused")
 		}
 		a.Issues = append(a.Issues, keyIssues(a, now)...)
+		a.Issues = append(a.Issues, usageIssues(a)...)
 		f.Agents = append(f.Agents, a)
 	}
 
 	markJoining(f.Agents, keys, usable, now)
 	f.EnvKey = envKey(f.Agents, func(a *Agent) bool { return a.Joining }, usable)
 	f.KeysInSync = f.EnvKey != nil
-	markMissing(f.Agents, usable)
+	markMissing(f.Agents, keys.Reinstated, usable)
 	f.NoUsableKey = f.EnvKey == nil && noUsableKey(f.Agents)
 	explainHoldups(f.Agents, f.EnvKey, usable, now)
 	f.Keys = keyList(f.Agents, f.EnvKey, keys, now)
@@ -320,10 +402,16 @@ func markJoining(agents []Agent, keys Keys, usable func(store.KeyRef) bool, now 
 }
 
 // markMissing lists, for each in-scope agent, the usable keys other
-// in-scope clusters hold that it does not, leaving out keys that may be
-// among those dropped from its report over the key limit.
-func markMissing(agents []Agent, usable func(store.KeyRef) bool) {
+// in-scope clusters hold, and the reinstated keys, that it does not,
+// leaving out keys that may be among those dropped from its report over
+// the key limit.
+func markMissing(agents []Agent, reinstated map[string]store.ReinstatedKey, usable func(store.KeyRef) bool) {
 	held := map[string]store.KeyRef{}
+	for fp, r := range reinstated {
+		if k := (store.KeyRef{Fingerprint: fp, NotBefore: r.NotBefore, NotAfter: r.NotAfter}); usable(k) {
+			held[fp] = k
+		}
+	}
 	for _, a := range agents {
 		if !a.InScope {
 			continue
@@ -404,8 +492,11 @@ func keyIssues(a Agent, now time.Time) []string {
 	return out
 }
 
-// keyList lists every key a checked-in cluster reports and every revoked
-// key, newest first.
+// keyList lists every key a checked-in cluster reports, every revoked key
+// and every reinstated one, newest first, with what the clusters counted of
+// each. A deleted key
+// is left out once no cluster reports it and its escrowed copies are
+// purged: it can neither come back nor need removing.
 func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key {
 	byFP := map[string]*Key{}
 	entry := func(fp string, notBefore, notAfter time.Time) *Key {
@@ -422,16 +513,41 @@ func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key 
 			k.Holders = append(k.Holders, a.ID)
 		}
 	}
+	// a reinstated key is listed while it is restored, held by none at first
+	for fp, r := range keys.Reinstated {
+		if _, revoked := keys.Revoked[fp]; !revoked {
+			entry(fp, r.NotBefore, r.NotAfter)
+		}
+	}
 	for fp, r := range keys.Revoked {
+		if _, held := byFP[fp]; !held && r.Purged(now) {
+			continue
+		}
 		k := entry(fp, r.NotBefore, r.NotAfter)
 		at := r.At
 		k.Status, k.RevokedBy, k.RevokedAt = store.KeyRevoked, r.By, &at
+		if r.Deleted() {
+			k.Status, k.DeletedBy, k.DeletedAt, k.PurgeAt, k.Purged = store.KeyDeleted, r.DeletedBy, r.DeletedAt, r.PurgeAt, r.Purged(now)
+		}
 	}
 	out := make([]Key, 0, len(byFP))
 	for _, k := range byFP {
-		k.EscrowCopies = len(keys.Escrow[k.Fingerprint])
+		if !k.Purged {
+			// a purged key's copies are gone, though a cache may list them
+			k.EscrowCopies = len(keys.Escrow[k.Fingerprint])
+		}
 		k.EnvKey = env != nil && env.Fingerprint == k.Fingerprint
 		k.FutureDated = FutureDated(store.KeyRef{NotBefore: k.NotBefore}, now)
+		k.References = references(agents, k.Fingerprint, now)
+		switch k.Status {
+		case store.KeyActive:
+			k.DeleteBlocked = BlockedActive
+		case store.KeyDeleted:
+			k.DeleteBlocked = BlockedDeleted
+		default:
+			k.DeleteBlocked = deleteBlocked(agents, *k, keys.Revoked[k.Fingerprint], now)
+			k.Deletable = k.DeleteBlocked == ""
+		}
 		out = append(out, *k)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -441,6 +557,172 @@ func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key 
 		return out[i].Fingerprint > out[j].Fingerprint
 	})
 	return out
+}
+
+// counted reports whether an agent's latest count of key references
+// counts at now: it may count (the cleanup capability), and its latest
+// count succeeded and came in within UsageFresh.
+func counted(a Agent, now time.Time) bool {
+	return a.canCount && a.usage != nil && a.usage.Error == "" && now.Sub(a.usage.CountedAt) <= UsageFresh
+}
+
+// references sums what the in-scope clusters (every agent that has checked
+// in, down or not) counted of a key, and names those that did not count.
+func references(agents []Agent, fp string, now time.Time) KeyReferences {
+	refs := KeyReferences{Clusters: []ClusterReferences{}, Uncounted: []string{}}
+	for _, a := range agents {
+		switch {
+		case !a.CheckedIn:
+		case !counted(a, now):
+			refs.Uncounted = append(refs.Uncounted, a.ID)
+		default:
+			use := a.usage.Keys[fp]
+			refs.Values += use.Values
+			refs.SealedSecrets += use.SealedSecrets
+			refs.Clusters = append(refs.Clusters, ClusterReferences{
+				Agent: a.ID, Cluster: a.Cluster, Values: use.Values, SealedSecrets: use.SealedSecrets, CountedAt: a.usage.CountedAt,
+			})
+		}
+	}
+	return refs
+}
+
+// deleteBlocked says, in one sentence, why a revoked key may not be
+// deleted at now, or returns "" when it may. A key any counted value is
+// sealed with is never deleted, nor one that values a cluster without it
+// cannot decrypt may be sealed with, nor one with no escrowed copy to undo
+// the deletion from. Every in-scope cluster must also have counted the
+// values its SealedSecrets hold since the key was revoked (so no new value
+// can be sealed with it), within UsageFresh, and found none sealed with the
+// key.
+func deleteBlocked(agents []Agent, k Key, r store.RevokedKey, now time.Time) string {
+	refs := k.References
+	if refs.Values > 0 {
+		var where []string
+		for _, c := range refs.Clusters {
+			if c.Values > 0 {
+				where = append(where, c.Agent)
+			}
+		}
+		return fmt.Sprintf("%s in %s %s it (%s).",
+			count(refs.Values, "value"), count(refs.SealedSecrets, "SealedSecret"), plural(refs.Values, "uses", "use"), strings.Join(where, ", "))
+	}
+	if s := unmatchedElsewhere(agents, k.Fingerprint, now); s != "" {
+		return s
+	}
+	if k.EscrowCopies == 0 {
+		return "It has no escrowed copy, so deleting it could not be undone."
+	}
+	var scoped, noCleanup, failed, waiting []string
+	for _, a := range agents {
+		if !a.CheckedIn {
+			continue
+		}
+		scoped = append(scoped, a.ID)
+		switch {
+		case !a.canCount:
+			noCleanup = append(noCleanup, a.ID)
+		case a.usage != nil && a.usage.Error != "":
+			failed = append(failed, a.ID)
+		case a.usage == nil || now.Sub(a.usage.CountedAt) > UsageFresh || !a.usage.CountedAt.After(r.At):
+			waiting = append(waiting, a.ID)
+		}
+	}
+	switch {
+	case len(scoped) == 0:
+		return "No cluster has checked in, so none has counted the values sealed with it."
+	case len(noCleanup) > 0:
+		return fmt.Sprintf("%s cannot count the values sealed with it: %s the cleanup capability.",
+			list(noCleanup), plural(len(noCleanup), "it needs", "they need"))
+	case len(failed) > 0:
+		return fmt.Sprintf("The last count of the values sealed with it failed in %s.", list(failed))
+	case len(waiting) > 0:
+		return fmt.Sprintf("Waiting for %s to count the values sealed with it since it was revoked; clusters count every few minutes.", list(waiting))
+	}
+	return ""
+}
+
+// unmatchedElsewhere says which in-scope clusters that do not hold key fp
+// have values none of their keys decrypts: those may be sealed with fp,
+// and could never be decrypted once its escrowed copies are purged. A
+// cluster that holds fp would have matched its values to it. It returns ""
+// when there are none.
+func unmatchedElsewhere(agents []Agent, fp string, now time.Time) string {
+	var parts []string
+	total := 0
+	for _, a := range agents {
+		if a.CheckedIn && counted(a, now) && a.usage.Unmatched > 0 && !holds(a, fp) {
+			parts = append(parts, a.ID+" has "+count(a.usage.Unmatched, "value"))
+			total += a.usage.Unmatched
+		}
+	}
+	switch {
+	case len(parts) == 0:
+		return ""
+	case len(parts) == 1:
+		return fmt.Sprintf("%s none of its keys decrypts; %s be sealed with this key.", parts[0], plural(total, "it may", "they may"))
+	}
+	return fmt.Sprintf("%s that none of their keys decrypts; they may be sealed with this key.", list(parts))
+}
+
+// usageView is what the fleet view shows of an agent's count.
+func usageView(u store.KeyUsage) *KeyUsage {
+	v := &KeyUsage{
+		CountedAt: u.CountedAt, SealedSecrets: u.SealedSecrets, Values: u.Values, Unmatched: u.Unmatched, Error: u.Error,
+	}
+	if len(u.Namespaces) > 0 {
+		v.Namespaces = u.Namespaces
+	}
+	return v
+}
+
+// usageIssues describes problems an agent's count of key references found:
+// values none of its cluster's keys decrypts, or a count that failed.
+func usageIssues(a Agent) []string {
+	u := a.usage
+	switch {
+	case u == nil:
+		return nil
+	case u.Error != "" && a.canCount:
+		return []string{"its last count of the values sealed with each key failed: " + u.Error}
+	case u.Error == "" && u.Unmatched > 0:
+		return []string{fmt.Sprintf("%s in this cluster's SealedSecrets %s none of its keys: the controller cannot decrypt them",
+			count(u.Unmatched, "value"), plural(u.Unmatched, "matches", "match"))}
+	}
+	return nil
+}
+
+// count is n and a noun, plural unless n is 1.
+func count(n int, noun string) string {
+	return fmt.Sprintf("%d %s", n, plural(n, noun, noun+"s"))
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// list joins names for a sentence: "a", "a and b", "a, b and c".
+func list(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+// Key returns the key fp in the fleet view.
+func (f Fleet) Key(fp string) (Key, bool) {
+	for _, k := range f.Keys {
+		if k.Fingerprint == fp {
+			return k, true
+		}
+	}
+	return Key{}, false
 }
 
 // holds reports whether an agent's cluster reports a key.

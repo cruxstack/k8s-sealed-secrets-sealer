@@ -67,6 +67,49 @@ export interface FleetAgent {
   joining: boolean;
   joined_at?: string;
   issues?: string[] | null;
+  /** The agent's latest count; absent when it has never reported one. */
+  key_usage?: KeyUsage;
+}
+
+/**
+ * An agent's count of the values its controller's SealedSecrets hold, by
+ * the key that sealed them. Only agents with the `cleanup` capability count.
+ */
+export interface KeyUsage {
+  /** When the control plane received the count (its clock). */
+  counted_at: string;
+  /** The namespaces counted; null for every namespace. */
+  namespaces: string[] | null;
+  sealed_secrets: number;
+  values: number;
+  /** Values no key in the cluster decrypts: the controller cannot either. */
+  unmatched: number;
+  /** Why the count failed; the counts are absent then. */
+  error?: string;
+}
+
+/** One cluster's count of the values sealed with a key. */
+export interface KeyClusterReferences {
+  agent: string;
+  cluster: string;
+  values: number;
+  sealed_secrets: number;
+  counted_at: string;
+}
+
+/** The values sealed with a key, across the env's clusters. */
+export interface KeyReferences {
+  /** Values sealed with the key, summed over the clusters that counted. */
+  values: number;
+  /** SealedSecrets holding at least one of them. */
+  sealed_secrets: number;
+  /** One entry per in-scope cluster that counted, including those counting 0. */
+  clusters: KeyClusterReferences[] | null;
+  /**
+   * In-scope agents whose clusters did not count: no cleanup capability,
+   * never counted, a failed count, or a count older than an hour.
+   */
+  uncounted: string[] | null;
 }
 
 /** One of the env's sealing keys. */
@@ -75,11 +118,24 @@ export interface FleetKey extends KeyRef {
   holders: string[] | null;
   escrow_copies: number;
   env_key: boolean;
-  status: "active" | "revoked";
+  status: "active" | "revoked" | "deleted";
+  /** Kept on a deleted key, which was revoked first. */
   revoked_by?: string;
   revoked_at?: string;
+  /** On a deleted key: who deleted it and when. */
+  deleted_by?: string;
+  deleted_at?: string;
+  /** On a deleted key: when its escrowed copies are purged. */
+  purge_at?: string;
+  /** Set once purge_at has passed: the key cannot be reinstated. */
+  purged: boolean;
   /** Valid only from more than an hour ahead: not used until then. */
   future_dated: boolean;
+  references: KeyReferences;
+  /** Whether an admin may delete the key now (only a revoked key). */
+  deletable: boolean;
+  /** Why a revoked key cannot be deleted now, as a sentence. */
+  delete_blocked?: string;
 }
 
 /** GET /api/v1/fleet */
@@ -96,15 +152,19 @@ export interface Fleet {
   no_usable_key?: boolean;
   /** How many keys of a cluster the control plane keeps track of. */
   key_limit: number;
-  /** The keys clusters report and the revoked keys, newest first. */
+  /**
+   * The keys clusters report, the revoked keys, and the deleted keys until
+   * no cluster holds them and their escrowed copies are purged; newest
+   * first.
+   */
   keys: FleetKey[] | null;
   agents: FleetAgent[] | null;
 }
 
-/** POST /api/v1/keys/{fingerprint}/revoke and .../reinstate */
+/** POST /api/v1/keys/{fingerprint}/revoke, .../reinstate and .../delete */
 export interface KeyStatus {
   fingerprint: string;
-  status: "active" | "revoked";
+  status: "active" | "revoked" | "deleted";
   status_by?: string;
   status_at?: string;
 }
