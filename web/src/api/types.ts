@@ -527,3 +527,19 @@ export interface FileReseal {
   created_at: string;
   error?: string;
 }
+
+/** What the GitHub App setup page shows, while the App is not set up. */
+export interface SetupStatus {
+  org: string;
+  github_url: string;
+  public_url: string;
+  /** The name the App is offered under; it can be changed on GitHub. */
+  app_name: string;
+  permissions: { name: string; access: "read" | "write" }[];
+}
+
+/** The form the setup page posts to GitHub to create the App. */
+export interface SetupForm {
+  action: string;
+  manifest: string;
+}

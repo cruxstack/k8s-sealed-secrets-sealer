@@ -214,6 +214,49 @@ func TestLoadAgent_RequiresHTTPSUnlessAllowed(t *testing.T) {
 	}
 }
 
+// APP_GITHUB_APP_PARAMETER holds the GitHub App's credentials instead of
+// the four settings, which may then not be set.
+func TestLoadControlPlane_GitHubAppParameter(t *testing.T) {
+	const arn = "arn:aws:ssm:us-east-1:123456789012:parameter/sealer/github-app"
+	vars := controlPlaneEnv(map[string]string{"APP_GITHUB_APP_PARAMETER": arn, "APP_SSM_ENDPOINT": "http://localhost:4105"})
+	for _, k := range gitHubAppSettings {
+		delete(vars, k)
+	}
+	cfg, err := loadControlPlane(env(vars))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubAppParameter != arn || cfg.SSMEndpoint != "http://localhost:4105" {
+		t.Errorf("parameter %q, endpoint %q", cfg.GitHubAppParameter, cfg.SSMEndpoint)
+	}
+	if cfg.GitHubAppID != "" || len(cfg.GitHubAppPrivateKey) != 0 || cfg.GitHubOAuthClientID != "" || cfg.GitHubOAuthClientSecret != "" {
+		t.Errorf("credentials set from the environment: %+v", cfg)
+	}
+
+	// beside the four settings, or not an ARN, it is refused
+	_, err = loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_GITHUB_APP_PARAMETER": "sealer/github-app"})))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range append([]string{"APP_GITHUB_APP_PARAMETER must be an SSM parameter ARN"}, gitHubAppSettings...) {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
+
+	// without it, the four settings are required
+	vars = controlPlaneEnv(nil)
+	for _, k := range gitHubAppSettings {
+		delete(vars, k)
+	}
+	_, err = loadControlPlane(env(vars))
+	for _, k := range gitHubAppSettings {
+		if err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("missing %s: %v", k, err)
+		}
+	}
+}
+
 func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	_, err := loadAgent(env(map[string]string{
 		"APP_CONTROLLER_NAME":    "Not_A_Label",

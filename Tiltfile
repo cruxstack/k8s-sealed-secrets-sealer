@@ -115,6 +115,7 @@ for image, binary in [
     ("local.invalid/sealer-control-plane", "server"),
     ("local.invalid/sealer-agent", "agent"),
     ("local.invalid/sealer-mock-github", "mock-github"),
+    ("local.invalid/sealer-mock-ssm", "mock-ssm"),
 ]:
     docker_build(
         image,
@@ -184,13 +185,33 @@ def github_app_key_pair():
 
 GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PUBLIC_KEY = github_app_key_pair()
 
-def control_plane_secret():
-    objs = decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml"))
-    for obj in objs:
-        obj["stringData"]["APP_GITHUB_APP_PRIVATE_KEY"] = GITHUB_APP_PRIVATE_KEY
-    return objs
+setup_objects.extend(decode_yaml_stream(read_file("dev/k3d/control-plane-secret.yaml")))
 
-setup_objects.extend(control_plane_secret())
+def mock_ssm_seed():
+    # The control plane reads its GitHub App's credentials from the SSM
+    # mock (github.appParameter), seeded here with the GitHub mock's App
+    # and its generated key. SEALER_GITHUB_APP_SETUP=true seeds nothing, so
+    # the control plane starts on its setup page and an App is created from
+    # its manifest there (the e2e suite does).
+    parameters = {}
+    if os.getenv("SEALER_GITHUB_APP_SETUP", "") != "true":
+        parameters["/sealer/github-app"] = str(encode_json({
+            "app_id": "1",
+            "slug": "sealer-local",
+            "client_id": "local-client-id",
+            "client_secret": "local-only-client-secret",
+            "private_key": GITHUB_APP_PRIVATE_KEY,
+        }))
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "mock-ssm-seed", "namespace": SYSTEM_NAMESPACE},
+        "type": "Opaque",
+        "stringData": {"parameters.json": str(encode_json(parameters))},
+    }
+
+setup_objects.append(mock_ssm_seed())
+add(decode_yaml_stream(read_file("dev/k3d/mock-ssm.yaml")))
 add(decode_yaml_stream(read_file("dev/k3d/emulators.yaml")))
 def mock_github():
     # register this stack's callback URL with the mock, as an OAuth app
@@ -282,9 +303,14 @@ k8s_resource(
     labels=[LABEL_PLATFORM],
 )
 k8s_resource(
+    "mock-ssm",
+    resource_deps=["setup", "binaries"],
+    labels=[LABEL_PLATFORM],
+)
+k8s_resource(
     "sealer-control-plane",
     port_forwards=["%d:8080" % CONTROL_PLANE_PORT],
-    resource_deps=["setup", "binaries", "local-kms", "dynamodb-local", "mock-github"],
+    resource_deps=["setup", "binaries", "local-kms", "dynamodb-local", "mock-github", "mock-ssm"],
     labels=[LABEL_PLATFORM],
 )
 

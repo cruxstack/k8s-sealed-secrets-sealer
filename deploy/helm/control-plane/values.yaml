@@ -70,9 +70,18 @@ github:
   org: ""
   allowedTeams: []
   adminTeams: []
-  # the OAuth client ID (required); its secret goes in existingSecret
+  # The ARN of an SSM SecureString parameter that holds the GitHub App's
+  # credentials, as the setup page writes them. Until it exists the control
+  # plane serves its setup page, where an owner of org creates the App. Set
+  # it instead of oauthClientID and appID, and leave the private key and
+  # client secret out of existingSecret. The pod's role needs
+  # ssm:GetParameter and ssm:PutParameter on it.
+  appParameter: ""
+  # the OAuth client ID (required without appParameter); its secret goes in
+  # existingSecret
   oauthClientID: ""
-  # the GitHub App's ID (required); its private key goes in existingSecret
+  # the GitHub App's ID (required without appParameter); its private key goes
+  # in existingSecret
   appID: ""
   # the App's installation on org; looked up when empty
   installationID: ""
@@ -135,6 +144,11 @@ dynamodb:
   # local emulators only
   endpoint: ""
   createTable: false
+
+ssm:
+  # overrides the SSM endpoint github.appParameter is read and written at,
+  # for local emulators only
+  endpoint: ""
 
 aws:
   # AWS_REGION for the SDK; empty uses the SDK's own lookup

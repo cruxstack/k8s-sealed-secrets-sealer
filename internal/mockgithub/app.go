@@ -31,48 +31,98 @@ type installationToken struct {
 	expires     time.Time
 }
 
-// verifyAppJWT checks an App JWT the way GitHub does: RS256 under the App's
-// key, issued by the App, and valid for at most ten minutes.
-func (s *Server) verifyAppJWT(r *http.Request) error {
-	if s.opts.App.PublicKey == nil {
-		return errors.New("no app configured")
-	}
-	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return errors.New("missing bearer token")
-	}
-	var claims jwt.RegisteredClaims
-	_, err := jwt.ParseWithClaims(raw, &claims, func(*jwt.Token) (any, error) { return s.opts.App.PublicKey, nil },
-		jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(s.opts.App.ID), jwt.WithExpirationRequired(), jwt.WithIssuedAt())
-	if err != nil {
-		return err
-	}
-	if claims.IssuedAt == nil || claims.ExpiresAt.Sub(claims.IssuedAt.Time) > 10*time.Minute+time.Second {
-		return errors.New("token lifetime exceeds ten minutes")
+// registeredApp is a GitHub App the mock knows: the one Options configures,
+// or one created from a manifest. Each signs people in with its own client
+// and is installed on its owner org, once installed.
+type registeredApp struct {
+	id           string
+	name         string
+	slug         string
+	owner        string
+	publicKey    *rsa.PublicKey
+	clientID     string
+	clientSecret string
+	callbackURLs []string
+	setupURL     string
+	permissions  map[string]string
+	// installationID is 0 until the App is installed
+	installationID int64
+	tokenTTL       time.Duration
+}
+
+// grants reports whether the App holds a permission at level: write
+// covers read.
+func (a *registeredApp) grants(name, level string) bool {
+	held := a.permissions[name]
+	return held == "write" || (held == "read" && level == "read")
+}
+
+// app returns the App whose field matches, or nil; s.mu must not be held.
+func (s *Server) app(match func(*registeredApp) bool) *registeredApp {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.apps {
+		if match(a) {
+			return a
+		}
 	}
 	return nil
 }
 
-func (s *Server) withApp(next http.HandlerFunc) http.HandlerFunc {
+// verifyAppJWT checks an App JWT the way GitHub does: RS256 under the key
+// of the App that issued it, and valid for at most ten minutes. It returns
+// that App.
+func (s *Server) verifyAppJWT(r *http.Request) (*registeredApp, error) {
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return nil, errors.New("missing bearer token")
+	}
+	var claims jwt.RegisteredClaims
+	var app *registeredApp
+	_, err := jwt.ParseWithClaims(raw, &claims, func(t *jwt.Token) (any, error) {
+		iss, _ := t.Claims.GetIssuer()
+		app = s.app(func(a *registeredApp) bool { return a.id == iss && a.publicKey != nil })
+		if app == nil {
+			return nil, errors.New("no such app")
+		}
+		return app.publicKey, nil
+	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithExpirationRequired(), jwt.WithIssuedAt())
+	if err != nil {
+		return nil, err
+	}
+	if claims.IssuedAt == nil || claims.ExpiresAt.Sub(claims.IssuedAt.Time) > 10*time.Minute+time.Second {
+		return nil, errors.New("token lifetime exceeds ten minutes")
+	}
+	return app, nil
+}
+
+func (s *Server) withApp(next func(http.ResponseWriter, *http.Request, *registeredApp)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := s.verifyAppJWT(r); err != nil {
+		app, err := s.verifyAppJWT(r)
+		if err != nil {
 			writeError(w, http.StatusUnauthorized, "A JSON web token could not be decoded")
 			return
 		}
-		next(w, r)
+		next(w, r, app)
 	}
 }
 
-func (s *Server) orgInstallation(w http.ResponseWriter, r *http.Request) {
-	if r.PathValue("org") != s.opts.Org {
+func (s *Server) orgInstallation(w http.ResponseWriter, r *http.Request, app *registeredApp) {
+	s.mu.Lock()
+	id := app.installationID
+	s.mu.Unlock()
+	if !strings.EqualFold(r.PathValue("org"), app.owner) || id == 0 {
 		writeError(w, http.StatusNotFound, "Not Found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": s.opts.App.InstallationID, "account": map[string]string{"login": s.opts.Org}})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "account": map[string]string{"login": app.owner}})
 }
 
-func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
-	if r.PathValue("id") != strconv.FormatInt(s.opts.App.InstallationID, 10) {
+func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request, app *registeredApp) {
+	s.mu.Lock()
+	id := app.installationID
+	s.mu.Unlock()
+	if id == 0 || r.PathValue("id") != strconv.FormatInt(id, 10) {
 		writeError(w, http.StatusNotFound, "Not Found")
 		return
 	}
@@ -86,17 +136,23 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(in.Permissions) == 0 {
-		// like an unrestricted token: everything the app was granted
-		in.Permissions = map[string]string{"contents": "write", "metadata": "read", "pull_requests": "write"}
+		// like an unrestricted token: every repository permission the
+		// App was granted
+		in.Permissions = map[string]string{}
+		for name, level := range app.permissions {
+			if name != "members" {
+				in.Permissions[name] = level
+			}
+		}
 	}
 	for name, level := range in.Permissions {
-		if (level != "read" && level != "write") || !granted(name, level) {
+		if (level != "read" && level != "write") || !app.grants(name, level) {
 			writeError(w, http.StatusUnprocessableEntity, "The permissions requested are not granted to this installation.")
 			return
 		}
 	}
 	tok := "ghs_mock_" + random()
-	ttl := s.opts.App.TokenTTL
+	ttl := app.tokenTTL
 	if ttl <= 0 {
 		ttl = installationTokenTTL
 	}
@@ -105,18 +161,6 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 	s.installTokens[tok] = installationToken{permissions: in.Permissions, expires: expires}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{"token": tok, "expires_at": expires, "permissions": in.Permissions})
-}
-
-// granted reports whether the mock App holds a permission: what the sealer
-// needs, nothing more.
-func granted(name, level string) bool {
-	switch name {
-	case "metadata":
-		return level == "read"
-	case "contents", "pull_requests":
-		return true
-	}
-	return false
 }
 
 // defaultRateLimit is GitHub's hourly budget for an installation.

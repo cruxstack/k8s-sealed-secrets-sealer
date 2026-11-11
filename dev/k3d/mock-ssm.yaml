@@ -1,0 +1,79 @@
+# The SSM Parameter Store mock (cmd/mock-ssm), where the local control plane
+# keeps its GitHub App's credentials (github.appParameter in
+# dev/values/control-plane.yaml). Tilt seeds it with the GitHub mock's App
+# (the mock-ssm-seed Secret), unless SEALER_GITHUB_APP_SETUP=true leaves it
+# empty, so the control plane starts on its setup page.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-ssm
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: ssm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealer-emulator
+      app.kubernetes.io/component: ssm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sealer-emulator
+        app.kubernetes.io/component: ssm
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: mock-ssm
+          image: local.invalid/sealer-mock-ssm:dev
+          env:
+            - name: MOCK_SSM_SEED
+              value: /seed/parameters.json
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+      volumes:
+        - name: seed
+          secret:
+            secretName: mock-ssm-seed
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-ssm
+  namespace: sealer-system
+  labels:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: ssm
+spec:
+  selector:
+    app.kubernetes.io/name: sealer-emulator
+    app.kubernetes.io/component: ssm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

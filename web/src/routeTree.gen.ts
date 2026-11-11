@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as EnvRouteImport } from './routes/$env'
 import { Route as FleetRouteImport } from './routes/fleet'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as SetupRouteImport } from './routes/setup'
 import { Route as EnvIndexRouteImport } from './routes/$env.index'
 import { Route as EnvFleetRouteImport } from './routes/$env.fleet'
 import { Route as EnvResealRouteImport } from './routes/$env.reseal'
@@ -41,6 +42,11 @@ const FleetRoute = FleetRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SetupRoute = SetupRouteImport.update({
+  id: '/setup',
+  path: '/setup',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EnvIndexRoute = EnvIndexRouteImport.update({
@@ -94,6 +100,7 @@ export interface FileRoutesByFullPath {
   '/$env': typeof EnvRouteWithChildren
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
+  '/setup': typeof SetupRoute
   '/$env/fleet': typeof EnvFleetRoute
   '/$env/reseal': typeof EnvResealRoute
   '/$env/': typeof EnvIndexRoute
@@ -108,6 +115,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
+  '/setup': typeof SetupRoute
   '/$env/fleet': typeof EnvFleetRoute
   '/$env/reseal': typeof EnvResealRoute
   '/$env': typeof EnvIndexRoute
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/$env': typeof EnvRouteWithChildren
   '/fleet': typeof FleetRoute
   '/login': typeof LoginRoute
+  '/setup': typeof SetupRoute
   '/$env/fleet': typeof EnvFleetRoute
   '/$env/reseal': typeof EnvResealRoute
   '/$env/': typeof EnvIndexRoute
@@ -141,6 +150,7 @@ export interface FileRouteTypes {
     | '/$env'
     | '/fleet'
     | '/login'
+    | '/setup'
     | '/$env/fleet'
     | '/$env/reseal'
     | '/$env/'
@@ -155,6 +165,7 @@ export interface FileRouteTypes {
     | '/'
     | '/fleet'
     | '/login'
+    | '/setup'
     | '/$env/fleet'
     | '/$env/reseal'
     | '/$env'
@@ -170,6 +181,7 @@ export interface FileRouteTypes {
     | '/$env'
     | '/fleet'
     | '/login'
+    | '/setup'
     | '/$env/fleet'
     | '/$env/reseal'
     | '/$env/'
@@ -186,6 +198,7 @@ export interface RootRouteChildren {
   EnvRoute: typeof EnvRouteWithChildren
   FleetRoute: typeof FleetRoute
   LoginRoute: typeof LoginRoute
+  SetupRoute: typeof SetupRoute
   ReposIndexRoute: typeof ReposIndexRoute
   SecretsIndexRoute: typeof SecretsIndexRoute
   ReposOwnerRepoRoute: typeof ReposOwnerRepoRoute
@@ -220,6 +233,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/setup': {
+      id: '/setup'
+      path: '/setup'
+      fullPath: '/setup'
+      preLoaderRoute: typeof SetupRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$env/': {
@@ -311,6 +331,7 @@ const rootRouteChildren: RootRouteChildren = {
   EnvRoute: EnvRouteWithChildren,
   FleetRoute: FleetRoute,
   LoginRoute: LoginRoute,
+  SetupRoute: SetupRoute,
   ReposIndexRoute: ReposIndexRoute,
   SecretsIndexRoute: SecretsIndexRoute,
   ReposOwnerRepoRoute: ReposOwnerRepoRoute,

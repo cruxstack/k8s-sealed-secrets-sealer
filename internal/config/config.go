@@ -121,6 +121,17 @@ type ControlPlane struct {
 	GitHubAppID             string
 	GitHubAppPrivateKey     []byte
 	GitHubAppInstallationID int64
+	// GitHubAppParameter, when set, is the ARN of the SSM SecureString
+	// parameter that holds the GitHub App's credentials: its ID and private
+	// key, and the client ID and secret it signs people in with. The
+	// control plane reads them from it at start, and until the parameter
+	// exists serves the setup page, which creates the App on GitHub and
+	// writes the parameter. GitHubAppID, GitHubAppPrivateKey,
+	// GitHubOAuthClientID and GitHubOAuthClientSecret are then empty.
+	GitHubAppParameter string
+	// SSMEndpoint overrides the SSM endpoint the GitHub App's parameter is
+	// read and written at, for local emulators.
+	SSMEndpoint string
 	// EnvAnnotation and RegionAnnotation are the annotation keys that place
 	// a SealedSecret document in an env and a region.
 	EnvAnnotation    string
@@ -270,15 +281,31 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 			cfg.GitHubAdminTeams = append(cfg.GitHubAdminTeams, team)
 		}
 	}
-	cfg.GitHubOAuthClientID = r.required(r.str("APP_GITHUB_OAUTH_CLIENT_ID", ""), "APP_GITHUB_OAUTH_CLIENT_ID")
-	cfg.GitHubOAuthClientSecret = r.secret("APP_GITHUB_OAUTH_CLIENT_SECRET", 1, true)
 	cfg.UserSessionKey = []byte(r.secret("APP_USER_SESSION_KEY", MinSessionKeyBytes, true))
 	cfg.UserSessionTTL = r.duration("APP_USER_SESSION_TTL", 8*time.Hour, 15*time.Minute, 24*time.Hour)
-	cfg.GitHubAppID = r.required(r.str("APP_GITHUB_APP_ID", ""), "APP_GITHUB_APP_ID")
-	cfg.GitHubAppPrivateKey = []byte(r.secret("APP_GITHUB_APP_PRIVATE_KEY", 1, true))
-	if len(cfg.GitHubAppPrivateKey) > 0 && !strings.Contains(string(cfg.GitHubAppPrivateKey), "PRIVATE KEY-----") {
-		r.fail("APP_GITHUB_APP_PRIVATE_KEY must be a PEM private key")
+	cfg.GitHubAppParameter = strings.TrimSpace(r.str("APP_GITHUB_APP_PARAMETER", ""))
+	if cfg.GitHubAppParameter != "" {
+		// the App's credentials come from the parameter, or the setup page
+		// writes it; settings beside it would say which App twice
+		if !IsSSMParameterARN(cfg.GitHubAppParameter) {
+			r.fail("APP_GITHUB_APP_PARAMETER must be an SSM parameter ARN")
+		}
+		for _, k := range gitHubAppSettings {
+			if v, ok := r.lookup(k); ok && strings.TrimSpace(v) != "" {
+				r.fail("%s cannot be set with APP_GITHUB_APP_PARAMETER, which holds the GitHub App's credentials", k)
+			}
+		}
+	} else {
+		cfg.GitHubOAuthClientID = r.required(r.str("APP_GITHUB_OAUTH_CLIENT_ID", ""), "APP_GITHUB_OAUTH_CLIENT_ID")
+		cfg.GitHubOAuthClientSecret = r.secret("APP_GITHUB_OAUTH_CLIENT_SECRET", 1, true)
+		cfg.GitHubAppID = r.required(r.str("APP_GITHUB_APP_ID", ""), "APP_GITHUB_APP_ID")
+		cfg.GitHubAppPrivateKey = []byte(r.secret("APP_GITHUB_APP_PRIVATE_KEY", 1, true))
+		if len(cfg.GitHubAppPrivateKey) > 0 && !strings.Contains(string(cfg.GitHubAppPrivateKey), "PRIVATE KEY-----") {
+			r.fail("APP_GITHUB_APP_PRIVATE_KEY must be a PEM private key")
+		}
 	}
+	// local emulators only
+	cfg.SSMEndpoint = r.url("APP_SSM_ENDPOINT", true)
 	cfg.GitHubAppInstallationID = r.integer("APP_GITHUB_APP_INSTALLATION_ID", 0)
 	cfg.EnvAnnotation = r.qualifiedName("APP_ENV_ANNOTATION", "k8s-sealed-secrets-sealer/env")
 	cfg.RegionAnnotation = r.qualifiedName("APP_REGION_ANNOTATION", "k8s-sealed-secrets-sealer/region")
@@ -380,6 +407,12 @@ func (r *reader) err() error {
 		return nil
 	}
 	return fmt.Errorf("invalid configuration: %w", errors.Join(r.errs...))
+}
+
+// gitHubAppSettings are the GitHub App's credentials, which
+// APP_GITHUB_APP_PARAMETER holds instead.
+var gitHubAppSettings = []string{
+	"APP_GITHUB_APP_ID", "APP_GITHUB_APP_PRIVATE_KEY", "APP_GITHUB_OAUTH_CLIENT_ID", "APP_GITHUB_OAUTH_CLIENT_SECRET",
 }
 
 func (r *reader) str(key, fallback string) string {

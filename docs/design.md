@@ -1456,6 +1456,8 @@ fingerprint), never values or ciphertexts:
 |              | `reseal.pr_opened`, `reseal.pr_merged`, `reseal.pr_closed`,  |
 |              | `reseal.failed`; `reseal.done` from the agent                |
 | Rate limits  | `request.rate_limited`                                       |
+| Setup        | `github_app.setup_needed`, `github_app.created`,             |
+|              | `github_app.setup_refused`, `github_app.setup_failed`        |
 | Agents       | `agent.login`, `agent.session_renewed`,                      |
 |              | `agent.login_rejected`, `agent.login_throttled`,             |
 |              | `agent.checkin_rejected`, `agent.capability_ignored`,        |
@@ -1534,6 +1536,26 @@ for a run's, who created its schedule.
   signs users in, organization permission Members (read). One GitHub App can
   provide both: its client ID and secret sign users in, and its App ID and
   private key read repositories.
+- **GitHub App setup.** With `APP_GITHUB_APP_PARAMETER`, the App's
+  credentials (ID, private key, client ID and secret) are one SSM
+  SecureString parameter, read at start. While it does not exist the
+  control plane serves the agent API, health checks and its setup page
+  only: every other page redirects to `/setup`, sign-in answers `503`, and
+  that page's Content-Security-Policy also lets forms post to GitHub's web
+  host. The page creates the App with GitHub's manifest flow: a random
+  state goes in a short-lived HttpOnly cookie (`__Host-` over https), the
+  start of a setup must send `X-Requested-With`, and GitHub's redirect back
+  must carry the same state, compared in constant time. The code is
+  exchanged at most ten times a minute per instance (GitHub rate-limits
+  that unauthenticated call by address). An App GitHub says is owned by
+  anyone but the org (someone posting the same form to their own org) is
+  refused. The parameter is written with `Overwrite=false`, so the first
+  App set up is kept and a second is refused, and read back through its
+  ARN. Creating an App in the org takes an owner of it, so the page needs
+  no token of its own. The instance that wrote the parameter starts using
+  the App at once; others read the parameter at most every ten seconds as
+  requests come in. Neither the credentials nor the code are logged or
+  returned to the browser.
 - **Env allowlist.** An env can require membership in one or more GitHub
   teams of the org (`github.allowedTeams`). Use it for `prod`. Membership
   is checked at sign-in; removing someone from the team takes effect when
@@ -1704,7 +1726,9 @@ The simulated clusters are `dev-use1-blue`, `dev-use1-green` and
 `dev-use2-blue`: one env, two regions, two clusters in one region. Their
 agents have every capability, and count key references every 5 seconds;
 the control plane ticks every second, and holds off a key command's work
-for 15 seconds after it succeeds.
+for 15 seconds after it succeeds. Its GitHub App's credentials are in an
+SSM mock, seeded with the GitHub mock's App; the end-to-end tests leave it
+empty and set the App up through the setup page first.
 Agents use k8s-oidc identity; all three share the k3d cluster's issuer and
 are told apart by their service account subject. Each simulated cluster
 gets the same Helm chart and RBAC layout as a real one. The same control
@@ -1725,6 +1749,10 @@ all three. The end-to-end tests prove the same property another way:
   uses one key, so this proves all three hold it.
 - A value sealed with kubeseal and the env key's certificate, taken from
   one cluster, unseals in every cluster.
+- The control plane starts with no GitHub App: an App created in another
+  org is refused, and one created in the org through the setup page is
+  stored, used at once and installed, then signs everyone in for the
+  checks that follow.
 - Every controller starts with its own key and renewal off: the keys
   converge through escrow, and renewal is turned on in exactly one cluster.
 - Each cluster counts the values sealed with the env key in the SealedSecrets
@@ -1776,7 +1804,9 @@ registry, which can outgrow Lambda's 4 KB of environment variables, can be
 given the same way (`APP_REGISTRY`, an advanced-tier parameter up to 8 KB),
 and is then read again about once a minute (section 4), or packaged as a
 file. The function's role needs `ssm:GetParameter` on those parameters (and
-`kms:Decrypt` for SecureStrings), the table's DynamoDB actions and
+`kms:Decrypt` for SecureStrings), and `ssm:PutParameter` on the GitHub
+App's when the setup page creates it (section 12), the table's DynamoDB
+actions and
 `kms:Decrypt` on its KMS key, and `kms:GenerateDataKey` on the transit key.
 An EventBridge Scheduler schedule invokes the function every minute with
 `{"sealer": "tick"}` to run reseal schedules (section 16); its role needs

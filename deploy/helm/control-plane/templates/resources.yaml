@@ -122,10 +122,19 @@ spec:
             {{- end }}
             - name: APP_GITHUB_ORG
               value: {{ required "github.org is required" .Values.github.org | quote }}
+            {{- if .Values.github.appParameter }}
+            - name: APP_GITHUB_APP_PARAMETER
+              value: {{ .Values.github.appParameter | quote }}
+            {{- with .Values.ssm.endpoint }}
+            - name: APP_SSM_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- else }}
             - name: APP_GITHUB_OAUTH_CLIENT_ID
-              value: {{ required "github.oauthClientID is required" .Values.github.oauthClientID | quote }}
+              value: {{ required "github.oauthClientID is required (or github.appParameter)" .Values.github.oauthClientID | quote }}
             - name: APP_GITHUB_APP_ID
-              value: {{ required "github.appID is required" .Values.github.appID | quote }}
+              value: {{ required "github.appID is required (or github.appParameter)" .Values.github.appID | quote }}
+            {{- end }}
             {{- with .Values.github.installationID }}
             - name: APP_GITHUB_APP_INSTALLATION_ID
               value: {{ . | quote }}

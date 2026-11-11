@@ -78,7 +78,11 @@ type Server struct {
 	codes         map[string]string // code -> login
 	tokens        map[string]string // access token -> login
 	installTokens map[string]installationToken
-	repos         map[string]*repoState // lowercase "owner/name"
+	// apps are the GitHub Apps the mock knows, the configured one first;
+	// conversions are manifest codes not yet exchanged
+	apps        []*registeredApp
+	conversions map[string]conversion
+	repos       map[string]*repoState // lowercase "owner/name"
 	// calls counts installation token calls against Options.RateLimit in
 	// the window that started at window
 	calls  int
@@ -167,8 +171,22 @@ func New(opts Options) *Server {
 		tokens:        map[string]string{},
 		installTokens: map[string]installationToken{},
 		repos:         map[string]*repoState{},
+		conversions:   map[string]conversion{},
 		window:        time.Now(),
 	}
+	// the configured App, which signs people in with the configured client
+	s.apps = []*registeredApp{{
+		id:             opts.App.ID,
+		slug:           "sealer-local",
+		owner:          opts.Org,
+		publicKey:      opts.App.PublicKey,
+		clientID:       opts.ClientID,
+		clientSecret:   opts.ClientSecret,
+		callbackURLs:   opts.CallbackURLs,
+		permissions:    map[string]string{"contents": "write", "metadata": "read", "pull_requests": "write", "members": "read"},
+		installationID: opts.App.InstallationID,
+		tokenTTL:       opts.App.TokenTTL,
+	}}
 	for _, r := range opts.Repos {
 		s.repos[strings.ToLower(r.Owner+"/"+r.Name)] = newRepoState(r)
 	}
@@ -186,6 +204,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /orgs/{org}/teams/{team}/memberships/{username}", s.withUser(s.teamMembership))
 
 	mux.HandleFunc("GET /orgs/{org}/installation", s.withApp(s.orgInstallation))
+	// creating an App from a manifest, and installing it
+	mux.HandleFunc("POST /organizations/{org}/settings/apps/new", s.newAppFromManifest)
+	mux.HandleFunc("POST /_mock/organizations/{org}/apps", s.createApp)
+	mux.HandleFunc("POST /app-manifests/{code}/conversions", s.convertManifest)
+	mux.HandleFunc("GET /apps/{slug}/installations/new", s.installApp)
 	mux.HandleFunc("POST /app/installations/{id}/access_tokens", s.withApp(s.accessTokens))
 	mux.HandleFunc("GET /installation/repositories", s.withInstallation("metadata", "read", s.installationRepositories))
 	mux.HandleFunc("GET /repos/{owner}/{repo}", s.withInstallation("metadata", "read", s.getRepo))
@@ -236,11 +259,12 @@ var chooser = template.Must(template.New("authorize").Parse(`<!doctype html>
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Get("client_id") != s.opts.ClientID {
+	app := s.app(func(a *registeredApp) bool { return a.clientID != "" && a.clientID == q.Get("client_id") })
+	if app == nil {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return
 	}
-	callback, ok := s.callback(q.Get("redirect_uri"))
+	callback, ok := app.callback(q.Get("redirect_uri"))
 	if !ok {
 		http.Error(w, "redirect_uri is not a registered callback URL", http.StatusBadRequest)
 		return
@@ -284,9 +308,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, callback+"?"+back.Encode(), http.StatusFound)
 }
 
-// callback returns the registered callback URL equal to redirectURI.
-func (s *Server) callback(redirectURI string) (string, bool) {
-	for _, cb := range s.opts.CallbackURLs {
+// callback returns the App's registered callback URL equal to redirectURI.
+func (a *registeredApp) callback(redirectURI string) (string, bool) {
+	for _, cb := range a.callbackURLs {
 		if cb == redirectURI {
 			return cb, true
 		}
@@ -300,7 +324,8 @@ func (s *Server) accessToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if r.PostForm.Get("client_id") != s.opts.ClientID || r.PostForm.Get("client_secret") != s.opts.ClientSecret {
+	id, secret := r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
+	if s.app(func(a *registeredApp) bool { return a.clientID != "" && a.clientID == id && a.clientSecret == secret }) == nil {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "incorrect_client_credentials"})
 		return
 	}

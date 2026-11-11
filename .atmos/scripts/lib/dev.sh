@@ -106,7 +106,7 @@ build_web() {
 build_binaries() {
   local goarch="${SEALER_GOARCH:-$(go env GOARCH)}" bin
   mkdir -p "$BUILD_DIR"
-  for bin in server agent mock-github; do
+  for bin in server agent mock-github mock-ssm; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
       go build -trimpath -o "${BUILD_DIR}/${bin}" "./cmd/${bin}"
   done
