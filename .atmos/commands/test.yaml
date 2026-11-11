@@ -7,7 +7,7 @@ commands:
       - name: unit
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             jqlang/jq: 1.8.1
         description: |
           Run the Go unit tests with the race detector, and the tests of the
@@ -36,7 +36,7 @@ commands:
       - name: integration
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
         description: |
           Run the tests that need AWS service emulators but no cluster: the
           DynamoDB store against DynamoDB Local, and envelope encryption
@@ -50,7 +50,7 @@ commands:
       - name: e2e
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             k3d-io/k3d: 5.9.0
             tilt-dev/tilt: 0.37.8
             helm/helm: 3.22.1
