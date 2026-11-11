@@ -2,7 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 )
 
@@ -230,7 +233,7 @@ func TestResealRun_Cancelled(t *testing.T) {
 	sch := f.schedule([]string{"example-org/apps"}, nil)
 	// not due: only the run below is there to advance
 	sch.Enabled, sch.NextRunAt = false, nil
-	if ok, err := sh.store.UpdateResealSchedule(context.Background(), sch); err != nil || !ok {
+	if ok, err := sh.store.UpdateResealSchedule(context.Background(), sch, true); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	run := newRun(sch, store.TriggerManual, "alice", sh.clock())
@@ -262,5 +265,123 @@ func TestNextRunAfter(t *testing.T) {
 		if got := nextRunAfter(prev, 75, tc.now); !got.Equal(tc.want) {
 			t.Errorf("nextRunAfter(%s) = %s, want %s", tc.now, got, tc.want)
 		}
+	}
+}
+
+// A schedule of 100 repositories and an org needs 101 GitHub requests to
+// discover them, more than a minute's budget: discovery is one step that
+// runs alone in a minute, so the run gets past it.
+func TestResealRun_DiscoversMoreThanAMinutesBudget(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	var listed []string
+	for i := range maxScheduleRepos {
+		listed = append(listed, fmt.Sprintf("example-org/r%03d", i))
+	}
+	sch := f.schedule(listed, []string{"example-org"})
+	sh.tick()
+	got, _, _ := sh.store.ResealSchedule(context.Background(), sch.ID)
+	run := f.run(got.ActiveRunID)
+	// the 100 listed cannot be reached; the org's three can
+	if !run.Discovered || run.Total != maxScheduleRepos+3 {
+		t.Fatalf("run = %+v", run)
+	}
+	if r := f.repo(run.ID, "example-org/r042"); r.Status != store.RepoFailed || r.Reason != reasonUnreachable {
+		t.Fatalf("an unreachable repository = %+v", r)
+	}
+}
+
+// A run's pull request leaves out values resealed onto an env key that was
+// revoked after the agents answered: the key may be exposed.
+func TestResealRun_LeavesOutValuesOnARevokedKey(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	ctx := context.Background()
+	sch := f.schedule([]string{"example-org/apps"}, nil)
+	sh.tick()
+	got, _, _ := sh.store.ResealSchedule(ctx, sch.ID)
+	if n := f.runAgents(); n == 0 {
+		t.Fatal("no commands")
+	}
+	now := sh.clock()
+	k, _, _ := sh.store.GetKey(ctx, sh.key.Fingerprint)
+	k.Status, k.StatusBy, k.StatusAt = store.KeyRevoked, "alice", &now
+	if ok, err := sh.store.SetKeyStatus(ctx, k); !ok || err != nil {
+		t.Fatalf("revoke: %v %v", ok, err)
+	}
+	sh.tick()
+	apps := f.repo(got.ActiveRunID, "example-org/apps")
+	if apps.Status != store.RepoFailed || apps.PullRequest != nil || apps.Values.Resealed != 0 ||
+		!slices.ContainsFunc(apps.Failures, func(fl store.ResealFailure) bool { return fl.Error == reasonKeyRevoked }) {
+		t.Fatalf("apps = %+v", apps)
+	}
+	if _, ok := sh.github.PullRequest("example-org", "apps", 1); ok {
+		t.Fatal("a pull request was opened with values on a revoked key")
+	}
+}
+
+// A run that makes no progress for an hour fails, so its schedule can run
+// again.
+func TestResealRun_FailsWhenStalled(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	ctx := context.Background()
+	sch := f.schedule([]string{"example-org/apps"}, nil)
+	// GitHub's budget is spent every minute: discovery never runs
+	spend := func() {
+		now := sh.clock()
+		end := now.Truncate(time.Minute).Add(time.Minute)
+		if _, err := sh.store.CountRequest(ctx, limitResealGitHub.name, 1000, 1000, end); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spend()
+	sh.tick()
+	got, _, _ := sh.store.ResealSchedule(ctx, sch.ID)
+	runID := got.ActiveRunID
+	if r := f.run(runID); r.Discovered || r.Status != store.RunRunning {
+		t.Fatalf("run = %+v", r)
+	}
+	sh.advance(runStallTimeout + time.Minute)
+	f.checkInAll()
+	spend()
+	sh.tick()
+	r := f.run(runID)
+	if r.Status != store.RunFailed || r.Error != reasonStalled || r.FinishedAt == nil {
+		t.Fatalf("stalled run = %+v", r)
+	}
+	if got, _, _ := sh.store.ResealSchedule(ctx, sch.ID); got.ActiveRunID != "" {
+		t.Fatalf("the schedule still has an active run: %+v", got)
+	}
+}
+
+// A pull request that cannot be opened is tried a few times, not for ever.
+func TestResealRun_PullRequestAttempts(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	sch := f.schedule([]string{"example-org/apps"}, nil)
+	sh.tick()
+	got, _, _ := sh.store.ResealSchedule(context.Background(), sch.ID)
+	f.runAgents()
+	for range maxOpenAttempts {
+		sh.github.FailNext(http.MethodPost, "/git/trees", mockgithub.ServerError)
+		sh.tick()
+	}
+	apps := f.repo(got.ActiveRunID, "example-org/apps")
+	if apps.Status != store.RepoFailed || !strings.Contains(apps.Reason, "could not be opened") {
+		t.Fatalf("apps = %+v", apps)
+	}
+}
+
+func TestLeaseUntil(t *testing.T) {
+	now := time.Now()
+	if got := leaseUntil(context.Background(), now); !got.Equal(now.Add(runLease)) {
+		t.Errorf("without a deadline = %s", got.Sub(now))
+	}
+	// a tick with fifteen minutes holds its run as long, and a minute more
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if got := leaseUntil(ctx, now).Sub(now); got < 15*time.Minute+50*time.Second {
+		t.Errorf("with a deadline in 15 minutes = %s", got)
 	}
 }

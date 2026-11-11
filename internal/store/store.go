@@ -273,13 +273,14 @@ type Store interface {
 	// ResealSchedule returns one schedule.
 	ResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error)
 	// UpdateResealSchedule records a schedule's name, scope, interval,
-	// whether it is enabled, its next run, and who changed it when,
-	// leaving its runs as they are. It reports whether the schedule
-	// exists.
-	UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bool, error)
-	// DeleteResealSchedule deletes a schedule and returns it as it was when
-	// deleted, its active run included, reporting whether it existed.
-	DeleteResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error)
+	// whether it is enabled, and who changed it when, and with setNext its
+	// next run: left alone, a next run a tick moved meanwhile stays. Its
+	// runs are left as they are. It reports whether the schedule exists.
+	UpdateResealSchedule(ctx context.Context, s ResealSchedule, setNext bool) (bool, error)
+	// DeleteResealSchedule deletes a schedule and, in the same write,
+	// cancels its active run, by by at now; it returns the schedule as it
+	// was, its active run included, and reports whether it existed.
+	DeleteResealSchedule(ctx context.Context, id, by string, now time.Time) (ResealSchedule, bool, error)
 
 	// StartResealRun records a new run of a schedule with no active run,
 	// as its active and latest run, in one write. With expectNext, the
@@ -299,13 +300,13 @@ type Store interface {
 	// SaveResealRun records a run's progress, while the lease that ends at
 	// held (epoch milliseconds) still holds it and it is active.
 	// run.LeaseUntil is the lease it keeps; 0 gives it up. A run that ends
-	// gives up its schedule's active run, and is kept ResealRetention. It
-	// reports whether it saved: not when the run was cancelled, or another
-	// tick leased it, meanwhile.
+	// gives up its schedule's active run in the same write, and is kept
+	// ResealRetention. It reports whether it saved: not when the run was
+	// cancelled, or another tick leased it, meanwhile.
 	SaveResealRun(ctx context.Context, run ResealRun, held int64) (bool, error)
 	// CancelResealRun cancels an active run, by by at now, giving up its
-	// schedule's active run, and returns it. It reports false for a run
-	// that is not active, or does not exist.
+	// schedule's active run in the same write, and returns it. It reports
+	// false for a run that is not active, or does not exist.
 	CancelResealRun(ctx context.Context, id, by string, now time.Time) (ResealRun, bool, error)
 
 	// PutResealRunRepos records repositories of runs, each replacing its

@@ -31,14 +31,26 @@ func TestStore_ResealSchedules(t *testing.T) {
 				t.Fatalf("ResealSchedule = %+v, %v, %v", got, ok, err)
 			}
 
-			// an update changes what people set, and keeps its runs
-			if err := s.StartResealRun(ctx, ResealRun{ID: ulid.Make().String(), ScheduleID: sch.ID, Status: RunQueued, StartedAt: now}, nil, nil); err != nil {
+			// a tick starts a due run and moves the next one on; an update
+			// read before, that does not change the next run, keeps it
+			moved := next.Add(75 * 24 * time.Hour)
+			active := ResealRun{ID: ulid.Make().String(), ScheduleID: sch.ID, Status: RunQueued, StartedAt: now}
+			if err := s.StartResealRun(ctx, active, &next, &moved); err != nil {
 				t.Fatal(err)
 			}
+			stale := sch
+			stale.Name = "renamed"
+			if ok, err := s.UpdateResealSchedule(ctx, stale, false); err != nil || !ok {
+				t.Fatalf("update: %v %v", ok, err)
+			}
+			if got, _, _ := s.ResealSchedule(ctx, sch.ID); got.Name != "renamed" || got.NextRunAt == nil || !got.NextRunAt.Equal(moved) {
+				t.Fatalf("after an update that keeps the next run = %+v", got)
+			}
+			// an update changes what people set, and keeps its runs
 			upd := sch
 			upd.Name, upd.Repos, upd.Orgs, upd.IntervalDays, upd.Enabled, upd.NextRunAt = "monthly", nil, []string{"other-org"}, 30, false, nil
 			upd.UpdatedBy, upd.UpdatedAt = "bob", ptr(now.Add(time.Minute))
-			if ok, err := s.UpdateResealSchedule(ctx, upd); err != nil || !ok {
+			if ok, err := s.UpdateResealSchedule(ctx, upd, true); err != nil || !ok {
 				t.Fatalf("update: %v %v", ok, err)
 			}
 			got, _, _ = s.ResealSchedule(ctx, sch.ID)
@@ -47,7 +59,7 @@ func TestStore_ResealSchedules(t *testing.T) {
 				got.CreatedBy != "alice" {
 				t.Fatalf("after update = %+v", got)
 			}
-			if ok, err := s.UpdateResealSchedule(ctx, ResealSchedule{ID: "missing"}); err != nil || ok {
+			if ok, err := s.UpdateResealSchedule(ctx, ResealSchedule{ID: "missing"}, true); err != nil || ok {
 				t.Fatalf("update of a missing schedule: %v %v", ok, err)
 			}
 
@@ -67,12 +79,16 @@ func TestStore_ResealSchedules(t *testing.T) {
 				t.Fatalf("ResealSchedules = %+v, %v", list, err)
 			}
 
-			// deleting one makes room
-			gone, ok, err := s.DeleteResealSchedule(ctx, sch.ID)
-			if err != nil || !ok || gone.Name != "monthly" {
+			// deleting one makes room, and cancels its active run in the
+			// same write
+			gone, ok, err := s.DeleteResealSchedule(ctx, sch.ID, "alice", now)
+			if err != nil || !ok || gone.Name != "monthly" || gone.ActiveRunID != active.ID {
 				t.Fatalf("delete = %+v, %v, %v", gone, ok, err)
 			}
-			if _, ok, err := s.DeleteResealSchedule(ctx, sch.ID); err != nil || ok {
+			if run, _, _ := s.ResealRun(ctx, active.ID); run.Status != RunCancelled || run.CancelledBy != "alice" || run.FinishedAt == nil {
+				t.Fatalf("the deleted schedule's run = %+v", run)
+			}
+			if _, ok, err := s.DeleteResealSchedule(ctx, sch.ID, "alice", now); err != nil || ok {
 				t.Fatalf("delete again: %v %v", ok, err)
 			}
 			if err := s.CreateResealSchedule(ctx, third, 2); err != nil {

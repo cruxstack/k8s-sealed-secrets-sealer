@@ -28,6 +28,18 @@ func (s *Service) AppRepository(ctx context.Context, owner, name string) (github
 	return r, err
 }
 
+// AppRepositoryCached returns a repository's details when they are cached,
+// so a caller that budgets GitHub requests knows AppRepository makes none.
+func (s *Service) AppRepositoryCached(owner, name string) (githubapp.Repository, bool) {
+	return s.cache.repos.get(strings.ToLower(owner+"/"+name), s.now())
+}
+
+// AppInstalledCached returns the repositories the App is installed on when
+// the list is cached.
+func (s *Service) AppInstalledCached() ([]githubapp.Repository, bool) {
+	return s.cache.installed.get("", s.now())
+}
+
 // AppInstalled returns the repositories the App is installed on. A list
 // GitHub cut short is returned with the error.
 func (s *Service) AppInstalled(ctx context.Context) ([]githubapp.Repository, error) {

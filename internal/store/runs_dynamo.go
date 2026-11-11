@@ -115,7 +115,7 @@ func (d *Dynamo) ResealSchedule(ctx context.Context, id string) (ResealSchedule,
 	return item.ResealSchedule, found, nil
 }
 
-func (d *Dynamo) UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bool, error) {
+func (d *Dynamo) UpdateResealSchedule(ctx context.Context, s ResealSchedule, setNext bool) (bool, error) {
 	values := map[string]types.AttributeValue{}
 	sets := []string{}
 	for name, v := range map[string]any{
@@ -135,14 +135,18 @@ func (d *Dynamo) UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bo
 		names["#"+n] = n
 	}
 	update := "SET " + strings.Join(sets, ", ")
-	if s.NextRunAt != nil {
+	switch {
+	case !setNext:
+		// a tick may have moved it since it was read
+		delete(names, "#next_run_at")
+	case s.NextRunAt != nil:
 		av, err := attributevalue.Marshal(s.NextRunAt)
 		if err != nil {
 			return false, fmt.Errorf("failed to encode schedule %s: %w", s.ID, err)
 		}
 		values[":next_run_at"] = av
 		update += ", #next_run_at = :next_run_at"
-	} else {
+	default:
 		update += " REMOVE #next_run_at"
 	}
 	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
@@ -162,9 +166,11 @@ func (d *Dynamo) UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bo
 	return true, nil
 }
 
-func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error) {
-	// the active run returned must be the one deleted with it: a run
-	// started meanwhile makes it read again
+func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id, by string, now time.Time) (ResealSchedule, bool, error) {
+	// the active run returned must be the one deleted with it, and is
+	// cancelled in the same write: ticks advance runs through their
+	// schedules, so a run left active would never end
+	inactive := map[string]bool{}
 	for range maxReserveAttempts {
 		s, found, err := d.ResealSchedule(ctx, id)
 		if err != nil || !found {
@@ -176,7 +182,7 @@ func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id string) (ResealSch
 			condition = "active_run_id = :run"
 			values = map[string]types.AttributeValue{":run": &types.AttributeValueMemberS{Value: s.ActiveRunID}}
 		}
-		_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		items := []types.TransactWriteItem{
 			{Delete: &types.Delete{
 				TableName: &d.table, Key: itemKey(resealPK, schedulePrefix+id),
 				ConditionExpression: aws.String(condition), ExpressionAttributeValues: values,
@@ -188,8 +194,22 @@ func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id string) (ResealSch
 				ExpressionAttributeNames:  map[string]string{"#n": "schedules"},
 				ExpressionAttributeValues: map[string]types.AttributeValue{":less": number(-1)},
 			}},
-		}})
-		if failed, ok := failedConditions(err); ok && failed[0] {
+		}
+		cancel := s.ActiveRunID != "" && !inactive[s.ActiveRunID]
+		if cancel {
+			u, err := cancelRunUpdate(&d.table, s.ActiveRunID, by, now)
+			if err != nil {
+				return ResealSchedule{}, false, err
+			}
+			items = append(items, types.TransactWriteItem{Update: u})
+		}
+		_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
+		if failed, ok := failedConditions(err); ok {
+			if cancel && failed[2] && !failed[0] {
+				// the run ended without its schedule hearing of it: delete
+				// the schedule alone
+				inactive[s.ActiveRunID] = true
+			}
 			// deleted, or a run started or ended, meanwhile
 			continue
 		}
@@ -199,6 +219,42 @@ func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id string) (ResealSch
 		return s, true, nil
 	}
 	return ResealSchedule{}, false, fmt.Errorf("failed to delete schedule %s: it kept changing", id)
+}
+
+// cancelRunUpdate cancels an active run, by by at now. A tick that holds a
+// lease on it finds it cancelled when it saves.
+func cancelRunUpdate(table *string, id, by string, now time.Time) (*types.Update, error) {
+	at, err := attributevalue.Marshal(now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode cancellation time: %w", err)
+	}
+	return &types.Update{
+		TableName:                table,
+		Key:                      itemKey(resealPK, runPrefix+id),
+		UpdateExpression:         aws.String("SET #status = :cancelled, finished_at = :at, cancelled_by = :by, expires_at = :ttl REMOVE lease_until"),
+		ConditionExpression:      aws.String("attribute_exists(pk) AND #status IN (:queued, :running)"),
+		ExpressionAttributeNames: map[string]string{"#status": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":cancelled": &types.AttributeValueMemberS{Value: RunCancelled},
+			":at":        at,
+			":by":        &types.AttributeValueMemberS{Value: by},
+			":ttl":       number(now.Add(ResealRetention).Unix()),
+			":queued":    &types.AttributeValueMemberS{Value: RunQueued},
+			":running":   &types.AttributeValueMemberS{Value: RunRunning},
+		},
+	}, nil
+}
+
+// endActiveRunUpdate takes a run off its schedule's active run, if it is
+// still that.
+func (d *Dynamo) endActiveRunUpdate(scheduleID, runID string) *types.Update {
+	return &types.Update{
+		TableName:                 &d.table,
+		Key:                       itemKey(resealPK, schedulePrefix+scheduleID),
+		UpdateExpression:          aws.String("REMOVE active_run_id"),
+		ConditionExpression:       aws.String("active_run_id = :run"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":run": &types.AttributeValueMemberS{Value: runID}},
+	}
 }
 
 func (d *Dynamo) StartResealRun(ctx context.Context, run ResealRun, expectNext, next *time.Time) error {
@@ -355,12 +411,34 @@ func (d *Dynamo) SaveResealRun(ctx context.Context, run ResealRun, held int64) (
 		condition += "lease_until = :held"
 		values[":held"] = number(held)
 	}
-	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+	put := &types.Put{
 		TableName:                 &d.table,
 		Item:                      av,
 		ConditionExpression:       aws.String(condition),
 		ExpressionAttributeNames:  map[string]string{"#status": "status"},
 		ExpressionAttributeValues: values,
+	}
+	if !run.Active() {
+		// the run and its schedule's active run end in one write, so a
+		// finished run never leaves its schedule busy
+		_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			{Put: put}, {Update: d.endActiveRunUpdate(run.ScheduleID, run.ID)},
+		}})
+		failed, ok := failedConditions(err)
+		switch {
+		case ok && failed[0]:
+			return false, nil
+		case ok:
+			// the schedule is gone, or no longer names this run
+		case err != nil:
+			return false, fmt.Errorf("failed to save run %s: %w", run.ID, err)
+		default:
+			return true, nil
+		}
+	}
+	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: put.TableName, Item: put.Item, ConditionExpression: put.ConditionExpression,
+		ExpressionAttributeNames: put.ExpressionAttributeNames, ExpressionAttributeValues: put.ExpressionAttributeValues,
 	})
 	if conditionFailed(err) {
 		return false, nil
@@ -368,66 +446,44 @@ func (d *Dynamo) SaveResealRun(ctx context.Context, run ResealRun, held int64) (
 	if err != nil {
 		return false, fmt.Errorf("failed to save run %s: %w", run.ID, err)
 	}
-	if !run.Active() {
-		if err := d.endActiveRun(ctx, run.ScheduleID, run.ID); err != nil {
-			return true, err
-		}
-	}
 	return true, nil
 }
 
 func (d *Dynamo) CancelResealRun(ctx context.Context, id, by string, now time.Time) (ResealRun, bool, error) {
-	at, err := attributevalue.Marshal(now)
-	if err != nil {
-		return ResealRun{}, false, fmt.Errorf("failed to encode cancellation time: %w", err)
+	run, found, err := d.ResealRun(ctx, id)
+	if err != nil || !found || !run.Active() {
+		return ResealRun{}, false, err
 	}
-	res, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: &d.table,
-		Key:       itemKey(resealPK, runPrefix+id),
-		// a tick that holds a lease finds the run cancelled when it saves
-		UpdateExpression:         aws.String("SET #status = :cancelled, finished_at = :at, cancelled_by = :by, expires_at = :ttl REMOVE lease_until"),
-		ConditionExpression:      aws.String("attribute_exists(pk) AND #status IN (:queued, :running)"),
-		ExpressionAttributeNames: map[string]string{"#status": "status"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":cancelled": &types.AttributeValueMemberS{Value: RunCancelled},
-			":at":        at,
-			":by":        &types.AttributeValueMemberS{Value: by},
-			":ttl":       number(now.Add(ResealRetention).Unix()),
-			":queued":    &types.AttributeValueMemberS{Value: RunQueued},
-			":running":   &types.AttributeValueMemberS{Value: RunRunning},
-		},
-		ReturnValues: types.ReturnValueAllNew,
-	})
-	if conditionFailed(err) {
+	u, err := cancelRunUpdate(&d.table, id, by, now)
+	if err != nil {
+		return ResealRun{}, false, err
+	}
+	// the run and its schedule's active run end in one write
+	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		{Update: u}, {Update: d.endActiveRunUpdate(run.ScheduleID, id)},
+	}})
+	failed, ok := failedConditions(err)
+	switch {
+	case ok && failed[0]:
 		return ResealRun{}, false, nil
+	case ok:
+		// the schedule is gone, or no longer names this run
+		_, err = d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName: u.TableName, Key: u.Key, UpdateExpression: u.UpdateExpression, ConditionExpression: u.ConditionExpression,
+			ExpressionAttributeNames: u.ExpressionAttributeNames, ExpressionAttributeValues: u.ExpressionAttributeValues,
+		})
+		if conditionFailed(err) {
+			return ResealRun{}, false, nil
+		}
 	}
 	if err != nil {
 		return ResealRun{}, false, fmt.Errorf("failed to cancel run %s: %w", id, err)
 	}
-	var item runItem
-	if err := attributevalue.UnmarshalMap(res.Attributes, &item); err != nil {
-		return ResealRun{}, false, fmt.Errorf("failed to decode run %s: %w", id, err)
+	run, found, err = d.ResealRun(ctx, id)
+	if err != nil || !found {
+		return ResealRun{}, false, err
 	}
-	if err := d.endActiveRun(ctx, item.ScheduleID, id); err != nil {
-		return item.ResealRun, true, err
-	}
-	return item.ResealRun, true, nil
-}
-
-// endActiveRun takes a run off its schedule's active run, if it is still
-// that; a deleted schedule has none.
-func (d *Dynamo) endActiveRun(ctx context.Context, scheduleID, runID string) error {
-	_, err := d.api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 &d.table,
-		Key:                       itemKey(resealPK, schedulePrefix+scheduleID),
-		UpdateExpression:          aws.String("REMOVE active_run_id"),
-		ConditionExpression:       aws.String("active_run_id = :run"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":run": &types.AttributeValueMemberS{Value: runID}},
-	})
-	if err != nil && !conditionFailed(err) {
-		return fmt.Errorf("failed to end the active run of schedule %s: %w", scheduleID, err)
-	}
-	return nil
+	return run, true, nil
 }
 
 func (d *Dynamo) PutResealRunRepos(ctx context.Context, repos []ResealRunRepo) error {

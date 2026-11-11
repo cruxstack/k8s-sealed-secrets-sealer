@@ -60,9 +60,11 @@ type FileReseal struct {
 	Commands []FileResealCommand `dynamodbav:"commands"`
 	// Total counts the values of the file's documents for the env, Pending
 	// those left out because a pending change of the session sets them, and
-	// Failures those that failed before any was sent.
+	// Failed those that failed before any was sent; Failures names the
+	// first of those, at most 50, so the item stays small.
 	Total    int             `dynamodbav:"total"`
 	Pending  int             `dynamodbav:"pending"`
+	Failed   int             `dynamodbav:"failed"`
 	Failures []ResealFailure `dynamodbav:"failures,omitempty"`
 	// Outcomes holds what each finished command did, by command ID.
 	Outcomes map[string]ResealOutcome `dynamodbav:"outcomes"`
@@ -254,6 +256,9 @@ type ResealRun struct {
 	InFlight []string `dynamodbav:"in_flight,omitempty"`
 	// LeaseUntil (epoch milliseconds) is set while a tick advances the run.
 	LeaseUntil int64 `dynamodbav:"lease_until,omitempty"`
+	// ProgressAt is when a tick last moved the run on; a run that makes no
+	// progress for long fails, so its schedule can run again.
+	ProgressAt *time.Time `dynamodbav:"progress_at,omitempty"`
 }
 
 // ResealRunOutcomes counts a run's repositories that are done, by outcome.
@@ -359,8 +364,11 @@ type ResealBatch struct {
 	RepoKey   string `dynamodbav:"repo_key"`
 	CommandID string `dynamodbav:"command_id"`
 	// Status is the command's: CommandSucceeded or CommandFailed.
-	Status string            `dynamodbav:"status"`
-	Error  string            `dynamodbav:"error,omitempty"`
+	Status string `dynamodbav:"status"`
+	Error  string `dynamodbav:"error,omitempty"`
+	// EnvKey is the key its values were resealed onto: a pull request
+	// leaves them out once it is revoked.
+	EnvKey string            `dynamodbav:"env_key,omitempty"`
 	Items  []ResealBatchItem `dynamodbav:"items,omitempty"`
 }
 

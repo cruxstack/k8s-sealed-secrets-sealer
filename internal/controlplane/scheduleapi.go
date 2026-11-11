@@ -329,7 +329,11 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		sch.NextRunAt = intervalFrom(now, sch.IntervalDays)
 	}
 	sch.UpdatedBy, sch.UpdatedAt = user.Login, &now
-	updated, err := s.store.UpdateResealSchedule(ctx, sch)
+	// the next run is written only when this change moves it: a tick may
+	// have started a run and moved it since it was read
+	setNext := (sch.NextRunAt == nil) != (was.NextRunAt == nil) ||
+		(sch.NextRunAt != nil && !sch.NextRunAt.Equal(*was.NextRunAt))
+	updated, err := s.store.UpdateResealSchedule(ctx, sch, setNext)
 	if err != nil {
 		s.internalError(w, r, "failed to update schedule", err)
 		return
@@ -376,7 +380,9 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	user := userauth.UserFrom(ctx)
-	sch, found, err := s.store.DeleteResealSchedule(ctx, id)
+	// its active run is cancelled in the same write: ticks advance a
+	// schedule's run, so one left active would never end
+	sch, found, err := s.store.DeleteResealSchedule(ctx, id, user.Login, s.now().UTC())
 	if err != nil {
 		s.internalError(w, r, "failed to delete schedule", err)
 		return
@@ -386,10 +392,7 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sch.ActiveRunID != "" {
-		// ticks advance a schedule's run, so one left active would never end
-		if run, cancelled, err := s.store.CancelResealRun(ctx, sch.ActiveRunID, user.Login, s.now().UTC()); err != nil {
-			s.logger.ErrorContext(ctx, "failed to cancel the run of a deleted schedule", "env", s.env, "run_id", sch.ActiveRunID, "error", err)
-		} else if cancelled {
+		if run, found, err := s.store.ResealRun(ctx, sch.ActiveRunID); err == nil && found && run.Status == store.RunCancelled {
 			s.logRunCancelled(ctx, run, user)
 		}
 	}

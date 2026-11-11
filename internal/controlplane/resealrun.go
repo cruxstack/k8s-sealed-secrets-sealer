@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -58,6 +59,10 @@ const (
 	// about every 15 minutes at a tick a minute.
 	prRefreshPerTick = 10
 	prRefreshTicks   = 15
+	// runStallTimeout is how long a run may go without progress before it
+	// fails, so its schedule can run again: far longer than any wait a
+	// step makes (a command's 10 minutes, the GitHub budget's minute).
+	runStallTimeout = time.Hour
 	// agentWait is how long after a run starts it waits for an agent that
 	// can reseal, as one restarting comes back; after it, values that no
 	// agent can take fail, and a later run tries them again.
@@ -65,6 +70,8 @@ const (
 	// skipRecheck is how old a check of an open pull request may be when
 	// it skips a repository: older, it is checked again first.
 	skipRecheck = time.Minute
+	// discoverConcurrency bounds the repositories discovery reads at once.
+	discoverConcurrency = 8
 	// tickMargin is the time a tick keeps to record what it did.
 	tickMargin = 5 * time.Second
 	// defaultTickTime bounds a tick with no deadline of its own.
@@ -79,11 +86,14 @@ const (
 // as opening a pull request of many files, runs alone in a minute.
 var limitResealGitHub = rateLimit{name: "reseal-github", max: 100, window: time.Minute}
 
-// Reasons a repository is skipped or failed, as people read them.
+// Reasons a repository or value is skipped or failed, as people read
+// them.
 const (
 	reasonUnreachable = "The GitHub App cannot reach this repository."
 	reasonArchived    = "The repository is archived."
 	reasonDisabled    = "The repository is disabled."
+	reasonKeyRevoked  = "the key it was resealed onto was revoked; a later run reseals it again"
+	reasonStalled     = "The run made no progress for an hour and was stopped; the schedule's next run starts afresh."
 )
 
 // errWait stops a step that cannot go on this tick: the GitHub budget is
@@ -265,14 +275,18 @@ type runStep struct {
 	tick *tickState
 	run  *store.ResealRun
 	log  *slog.Logger
+	// progressed is set when the tick moved the run on
+	progressed bool
 }
 
 // advanceRun leases a run and advances it: it discovers its repositories,
 // works on those in flight, starts more while it can, and finishes the run
-// once every repository is done. It gives the lease up when it is done.
+// once every repository is done. It gives the lease up when it is done. The
+// lease lasts the tick and a margin, so it never lapses while the tick
+// works. A run that made no progress for runStallTimeout fails.
 func (s *Server) advanceRun(ctx context.Context, tick *tickState, id string) error {
 	now := s.now().UTC()
-	run, ok, err := s.store.LeaseResealRun(ctx, id, now.Add(runLease), now)
+	run, ok, err := s.store.LeaseResealRun(ctx, id, leaseUntil(ctx, now), now)
 	if err != nil || !ok {
 		return err
 	}
@@ -282,6 +296,18 @@ func (s *Server) advanceRun(ctx context.Context, tick *tickState, id string) err
 	workErr := step.advance(ctx)
 	if errors.Is(workErr, errWait) {
 		workErr = nil
+	}
+	now = s.now().UTC()
+	last := run.StartedAt
+	if run.ProgressAt != nil {
+		last = *run.ProgressAt
+	}
+	switch {
+	case step.progressed:
+		run.ProgressAt = &now
+	case run.Active() && now.Sub(last) > runStallTimeout:
+		step.log.WarnContext(ctx, "reseal run stalled", "event", "reseal.failed", "reason", reasonStalled, "error", workErr)
+		run.Status, run.FinishedAt, run.Error = store.RunFailed, &now, reasonStalled
 	}
 	run.LeaseUntil = 0
 	// the run's own record is saved even when the tick's time is up
@@ -303,11 +329,25 @@ func (s *Server) advanceRun(ctx context.Context, tick *tickState, id string) err
 	return workErr
 }
 
+// leaseUntil is when a tick's lease on a run ends: after the tick's own
+// deadline and a minute, and at least runLease from now, so it never lapses
+// while the tick works.
+func leaseUntil(ctx context.Context, now time.Time) time.Time {
+	until := now.Add(runLease)
+	if deadline, ok := ctx.Deadline(); ok {
+		if end := now.Add(time.Until(deadline) + time.Minute); end.After(until) {
+			until = end
+		}
+	}
+	return until
+}
+
 func (st *runStep) advance(ctx context.Context) error {
 	if !st.run.Discovered {
 		if err := st.discover(ctx); err != nil {
 			return err
 		}
+		st.progressed = true
 	}
 	var inFlight []string
 	var firstErr error
@@ -382,55 +422,88 @@ func (st *runStep) logFinished(ctx context.Context) {
 // every repository of the App's installation owned by one of its orgs,
 // leaving out archived and disabled ones. A listed repository the App
 // cannot reach fails. Past maxRunRepos, the rest are left out, and the run
-// says so.
+// says so. It is one step: the GitHub requests it needs, for what is not
+// cached, are taken from the budget at once, alone in a minute when they
+// are more than a minute's, and made a few at a time.
 func (st *runStep) discover(ctx context.Context) error {
 	r := st.run
-	found := map[string]store.ResealRunRepo{}
 	now := st.s.now().UTC()
-	add := func(full, status, reason string) {
-		key := strings.ToLower(full)
-		if _, ok := found[key]; !ok {
-			found[key] = store.ResealRunRepo{RunID: r.ID, Key: key, Repo: full, Status: status, Reason: reason, UpdatedAt: now}
-		}
+	type listed struct {
+		full string
+		repo githubapp.Repository
+		err  error
 	}
-	for _, full := range r.Repos {
+	found := make([]listed, len(r.Repos))
+	need := 0
+	for i, full := range r.Repos {
+		found[i].full = full
 		owner, name, _ := strings.Cut(full, "/")
-		if !st.tick.take(ctx, 1) {
-			return errWait
-		}
-		repo, err := st.s.repos.AppRepository(ctx, owner, name)
-		switch {
-		case errors.Is(err, repos.ErrNotFound):
-			add(full, store.RepoFailed, reasonUnreachable)
-			st.log.WarnContext(ctx, "repository not resealed", "event", "reseal.failed", "repository", full, "reason", reasonUnreachable)
-		case err != nil:
-			return st.githubError(ctx, err)
-		case repo.Archived:
-			add(repo.FullName, store.RepoSkipped, reasonArchived)
-		case repo.Disabled:
-			add(repo.FullName, store.RepoSkipped, reasonDisabled)
-		default:
-			add(repo.FullName, store.RepoPending, "")
+		if repo, ok := st.s.repos.AppRepositoryCached(owner, name); ok {
+			found[i].repo = repo
+		} else {
+			need++
 		}
 	}
-	if len(r.Orgs) > 0 {
-		if !st.tick.take(ctx, 1) {
-			return errWait
+	installed, cached := st.s.repos.AppInstalledCached()
+	if len(r.Orgs) > 0 && !cached {
+		need++
+	}
+	if need > 0 && !st.tick.take(ctx, need) {
+		return errWait
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, discoverConcurrency)
+	for i := range found {
+		if found[i].repo.FullName != "" {
+			continue
 		}
-		installed, err := st.s.repos.AppInstalled(ctx)
-		if err != nil {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			owner, name, _ := strings.Cut(found[i].full, "/")
+			found[i].repo, found[i].err = st.s.repos.AppRepository(ctx, owner, name)
+		})
+	}
+	wg.Wait()
+	if len(r.Orgs) > 0 && !cached {
+		var err error
+		if installed, err = st.s.repos.AppInstalled(ctx); err != nil {
 			// a list cut short would leave repositories out unsaid
 			return st.githubError(ctx, err)
 		}
-		for _, repo := range installed {
-			in := slices.ContainsFunc(r.Orgs, func(org string) bool { return strings.EqualFold(org, repo.Owner) })
-			if in && !repo.Archived && !repo.Disabled {
-				add(repo.FullName, store.RepoPending, "")
-			}
+	}
+
+	inScope := map[string]store.ResealRunRepo{}
+	add := func(full, status, reason string) {
+		key := strings.ToLower(full)
+		if _, ok := inScope[key]; !ok {
+			inScope[key] = store.ResealRunRepo{RunID: r.ID, Key: key, Repo: full, Status: status, Reason: reason, UpdatedAt: now}
 		}
 	}
-	keys := make([]string, 0, len(found))
-	for k := range found {
+	for _, l := range found {
+		switch {
+		case errors.Is(l.err, repos.ErrNotFound):
+			add(l.full, store.RepoFailed, reasonUnreachable)
+			st.log.WarnContext(ctx, "repository not resealed", "event", "reseal.failed", "repository", l.full, "reason", reasonUnreachable)
+		case l.err != nil:
+			// the next tick tries again; what was read is cached
+			return st.githubError(ctx, l.err)
+		case l.repo.Archived:
+			add(l.repo.FullName, store.RepoSkipped, reasonArchived)
+		case l.repo.Disabled:
+			add(l.repo.FullName, store.RepoSkipped, reasonDisabled)
+		default:
+			add(l.repo.FullName, store.RepoPending, "")
+		}
+	}
+	for _, repo := range installed {
+		in := slices.ContainsFunc(r.Orgs, func(org string) bool { return strings.EqualFold(org, repo.Owner) })
+		if in && !repo.Archived && !repo.Disabled {
+			add(repo.FullName, store.RepoPending, "")
+		}
+	}
+	keys := make([]string, 0, len(inScope))
+	for k := range inScope {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -440,7 +513,7 @@ func (st *runStep) discover(ctx context.Context) error {
 	}
 	list := make([]store.ResealRunRepo, len(keys))
 	for i, k := range keys {
-		list[i] = found[k]
+		list[i] = inScope[k]
 	}
 	if err := st.s.store.PutResealRunRepos(ctx, list); err != nil {
 		return err
@@ -483,6 +556,7 @@ func (st *runStep) advanceRepoKey(ctx context.Context, key string) (bool, error)
 func (st *runStep) advanceRepo(ctx context.Context, repo store.ResealRunRepo) (bool, error) {
 	if repo.Done() {
 		st.count(repo)
+		st.progressed = true
 		return true, nil
 	}
 	var work store.ResealWork
@@ -496,6 +570,12 @@ func (st *runStep) advanceRepo(ctx context.Context, repo store.ResealRunRepo) (b
 		}
 		work = w
 	}
+	before, read, sent := repo.Status, work.Next, len(work.Commands)
+	defer func() {
+		if repo.Status != before || work.Next != read || len(work.Commands) != sent {
+			st.progressed = true
+		}
+	}()
 	var err error
 	for err == nil && !repo.Done() && !st.tick.late(ctx) {
 		status := repo.Status
@@ -560,7 +640,7 @@ func (st *runStep) count(repo store.ResealRunRepo) {
 // request an earlier run opened still open.
 func (st *runStep) startRepo(ctx context.Context, repo *store.ResealRunRepo, work *store.ResealWork) error {
 	owner, name, _ := strings.Cut(repo.Repo, "/")
-	if !st.tick.take(ctx, 1) {
+	if _, cached := st.s.repos.AppRepositoryCached(owner, name); !cached && !st.tick.take(ctx, 1) {
 		return errWait
 	}
 	r, err := st.s.repos.AppRepository(ctx, owner, name)
@@ -780,9 +860,14 @@ type collected struct {
 
 // collect reads what the repository's commands did: the values they
 // resealed, and the counts and failures of the rest. A command that never
-// answered fails its values.
+// answered fails its values, and so does a value resealed onto a key
+// revoked since: it may be exposed.
 func (st *runStep) collect(ctx context.Context, repoKey string, work *store.ResealWork) (collected, error) {
 	var out collected
+	revoked, err := st.s.store.RevokedKeys(ctx)
+	if err != nil {
+		return collected{}, err
+	}
 	path := func(file int) string {
 		if file >= 0 && file < len(work.Files) {
 			return work.Files[file].Path
@@ -805,8 +890,12 @@ func (st *runStep) collect(ctx context.Context, repoKey string, work *store.Rese
 				out.counts.Failed++
 				continue
 			}
-			switch it.Status {
-			case protocol.ResealResealed:
+			_, onRevoked := revoked[b.EnvKey]
+			switch {
+			case it.Status == protocol.ResealResealed && onRevoked:
+				out.counts.Failed++
+				out.failures = append(out.failures, store.ResealFailure{Path: path(file), Key: key, Document: doc, Error: reasonKeyRevoked})
+			case it.Status == protocol.ResealResealed:
 				out.counts.Resealed++
 				out.resealed = append(out.resealed, resealedValue{
 					file: file, key: key, ciphertext: it.Ciphertext,
@@ -815,7 +904,7 @@ func (st *runStep) collect(ctx context.Context, repoKey string, work *store.Rese
 				if !slices.Contains(out.from, it.From) {
 					out.from = append(out.from, it.From)
 				}
-			case protocol.ResealCurrent:
+			case it.Status == protocol.ResealCurrent:
 				out.counts.Current++
 			default:
 				out.counts.Failed++
@@ -882,6 +971,21 @@ func (st *runStep) openPull(ctx context.Context, repo *store.ResealRunRepo, work
 	if err != nil {
 		return err
 	}
+	// values whose key was revoked since they were gathered fail now
+	if dropped := repo.Values.Resealed - len(c.resealed); dropped > 0 {
+		repo.Values.Resealed -= dropped
+		repo.Values.Failed += dropped
+		for _, f := range c.failures {
+			if f.Error == reasonKeyRevoked && len(repo.Failures) < maxResealFailures {
+				repo.Failures = append(repo.Failures, f)
+			}
+		}
+	}
+	if len(c.resealed) == 0 {
+		repo.Status = store.RepoFailed
+		repo.Reason = "The key its values were resealed onto was revoked before its pull request opened; a later run reseals them again."
+		return nil
+	}
 	byKey := map[[2]string]*repos.Value{}
 	var order [][2]string
 	files := map[int]bool{}
@@ -919,14 +1023,18 @@ func (st *runStep) openPull(ctx context.Context, repo *store.ResealRunRepo, work
 		repo.Status, repo.Reason = store.RepoFailed, "Its pull request could not be opened: "+err.Error()
 		return nil
 	case err != nil:
-		if werr := st.githubError(ctx, err); errors.Is(werr, errWait) {
-			return werr
+		// a rate limit is waited out; anything else, a time limit
+		// included, counts as an attempt, so a pull request too large to
+		// open in a tick does not retry for ever
+		var limited *githubapp.RateLimitError
+		if errors.As(err, &limited) {
+			return st.githubError(ctx, err)
 		}
 		work.Attempts++
 		work.LastError = err.Error()
 		st.log.WarnContext(ctx, "failed to open a reseal pull request", "repository", repo.Repo, "attempt", work.Attempts, "error", err)
 		if work.Attempts >= maxOpenAttempts {
-			repo.Status, repo.Reason = store.RepoFailed, "Its pull request could not be opened: GitHub failed."
+			repo.Status, repo.Reason = store.RepoFailed, "Its pull request could not be opened: GitHub failed, or did not answer in time."
 			return nil
 		}
 		return errWait
@@ -1025,7 +1133,7 @@ func capitalize(s string) string {
 // request from it once every command answered. A command that failed fails
 // each of its values.
 func (s *Server) recordRunResult(ctx context.Context, cmd store.CommandRecord, p protocol.ResealPayload, res protocol.ResealResult, status, errMsg string, _ time.Time) error {
-	b := store.ResealBatch{RunID: cmd.RunID, RepoKey: cmd.RunRepo, CommandID: cmd.ID, Status: status, Error: errMsg}
+	b := store.ResealBatch{RunID: cmd.RunID, RepoKey: cmd.RunRepo, CommandID: cmd.ID, Status: status, Error: errMsg, EnvKey: p.EnvKey}
 	for i, it := range p.Items {
 		item := store.ResealBatchItem{ID: it.ID, Namespace: it.Namespace, Name: it.Name, Scope: it.Scope, Status: protocol.ResealFailed, Error: errMsg}
 		if status == protocol.CommandSucceeded && i < len(res.Items) {

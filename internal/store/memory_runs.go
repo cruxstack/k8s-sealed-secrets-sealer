@@ -73,7 +73,7 @@ func (m *Memory) ResealSchedule(_ context.Context, id string) (ResealSchedule, b
 	return cloneSchedule(s), ok, nil
 }
 
-func (m *Memory) UpdateResealSchedule(_ context.Context, s ResealSchedule) (bool, error) {
+func (m *Memory) UpdateResealSchedule(_ context.Context, s ResealSchedule, setNext bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.runs()
@@ -82,19 +82,29 @@ func (m *Memory) UpdateResealSchedule(_ context.Context, s ResealSchedule) (bool
 		return false, nil
 	}
 	cur.Name, cur.Repos, cur.Orgs = s.Name, slices.Clone(s.Repos), slices.Clone(s.Orgs)
-	cur.IntervalDays, cur.Enabled, cur.NextRunAt = s.IntervalDays, s.Enabled, s.NextRunAt
+	cur.IntervalDays, cur.Enabled = s.IntervalDays, s.Enabled
+	if setNext {
+		cur.NextRunAt = s.NextRunAt
+	}
 	cur.UpdatedBy, cur.UpdatedAt = s.UpdatedBy, s.UpdatedAt
 	r.schedules[s.ID] = cur
 	return true, nil
 }
 
-func (m *Memory) DeleteResealSchedule(_ context.Context, id string) (ResealSchedule, bool, error) {
+func (m *Memory) DeleteResealSchedule(_ context.Context, id, by string, now time.Time) (ResealSchedule, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.runs()
 	s, ok := r.schedules[id]
+	if !ok {
+		return ResealSchedule{}, false, nil
+	}
 	delete(r.schedules, id)
-	return s, ok, nil
+	if run, found := r.runs[s.ActiveRunID]; found && run.Active() {
+		run.Status, run.FinishedAt, run.CancelledBy, run.LeaseUntil = RunCancelled, &now, by, 0
+		r.runs[run.ID] = run
+	}
+	return s, true, nil
 }
 
 func (m *Memory) StartResealRun(_ context.Context, run ResealRun, expectNext, next *time.Time) error {
