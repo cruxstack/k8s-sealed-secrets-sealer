@@ -1,7 +1,11 @@
 package agent
 
 import (
+	"errors"
+	"fmt"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,22 +175,134 @@ func keyPrefixOf(s setting) string {
 	return s.value
 }
 
+// watchScope is which SealedSecrets a controller watches.
+type watchScope struct {
+	// namespaces are the namespaces it watches, sorted; nil for every one.
+	namespaces []string
+	// labelSelector is its --label-selector: only SealedSecrets it selects
+	// are the controller's. Empty selects every one.
+	labelSelector string
+}
+
+// readWatchScope reads which SealedSecrets the controller of d watches, as
+// the controller decides (sealed-secrets v0.41, pkg/controller/main.go):
+// every namespace, unless --all-namespaces is false or
+// --additional-namespaces is set at all; then its own namespace and each
+// additional one, trimmed, empty ones left out. Its own namespace is its
+// POD_NAMESPACE variable when set, else its pod's. It fails when a setting
+// it needs is set where the agent cannot read it.
+func readWatchScope(d *appsv1.Deployment) (watchScope, error) {
+	i, err := controllerContainerIndex(d)
+	if err != nil {
+		return watchScope{}, err
+	}
+	c := d.Spec.Template.Spec.Containers[i]
+	all, err := boolSetting(c, "all-namespaces", true)
+	if err != nil {
+		return watchScope{}, err
+	}
+	additional := lookupSetting(c, "additional-namespaces")
+	selector := lookupSetting(c, "label-selector")
+	for _, s := range []struct {
+		name string
+		setting
+	}{{"additional-namespaces", additional}, {"label-selector", selector}} {
+		if s.set && !s.known {
+			return watchScope{}, fmt.Errorf("cannot tell which SealedSecrets the controller watches: --%s is set where the agent cannot read it", s.name)
+		}
+	}
+	scope := watchScope{labelSelector: selector.value}
+	if all && additional.value == "" {
+		return scope, nil
+	}
+	own, err := podNamespace(c, d.Namespace)
+	if err != nil {
+		return watchScope{}, err
+	}
+	scope.namespaces = []string{own}
+	for _, ns := range strings.Split(additional.value, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" && !slices.Contains(scope.namespaces, ns) {
+			scope.namespaces = append(scope.namespaces, ns)
+		}
+	}
+	sort.Strings(scope.namespaces)
+	return scope, nil
+}
+
+// boolSetting reads a boolean controller setting: a flag on the command
+// line wins, then its variable, which the controller's flag parser sets to
+// false when it is not a boolean (and the controller goes on).
+func boolSetting(c corev1.Container, name string, fallback bool) (bool, error) {
+	unknown := fmt.Errorf("cannot tell which SealedSecrets the controller watches: --%s is set where the agent cannot read it", name)
+	if v, ok := lastFlag(append(slices.Clone(c.Command), c.Args...), []string{name}); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil || strings.Contains(v, "$(") {
+			// the controller refuses to start with it, or the kubelet
+			// expands it
+			return false, unknown
+		}
+		return b, nil
+	}
+	s := envSetting(c, flagEnvPrefix+strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
+	switch {
+	case !s.set:
+		return fallback, nil
+	case !s.known:
+		return false, unknown
+	}
+	b, err := strconv.ParseBool(s.value)
+	return b && err == nil, nil
+}
+
+// podNamespaceVar overrides the controller's own namespace.
+const podNamespaceVar = "POD_NAMESPACE"
+
+// podNamespace returns the controller's own namespace: its POD_NAMESPACE
+// variable when set and not empty, else the namespace its pod runs in.
+func podNamespace(c corev1.Container, own string) (string, error) {
+	unknown := errors.New("cannot tell which SealedSecrets the controller watches: its " + podNamespaceVar + " is set where the agent cannot read it")
+	for i := len(c.Env) - 1; i >= 0; i-- {
+		e := c.Env[i]
+		if e.Name != podNamespaceVar {
+			continue
+		}
+		switch {
+		case e.ValueFrom != nil && e.ValueFrom.FieldRef != nil && e.ValueFrom.FieldRef.FieldPath == "metadata.namespace":
+			return own, nil
+		case e.ValueFrom != nil || strings.Contains(e.Value, "$("):
+			return "", unknown
+		case e.Value != "":
+			return e.Value, nil
+		}
+		return own, nil
+	}
+	for _, from := range c.EnvFrom {
+		if strings.HasPrefix(podNamespaceVar, from.Prefix) {
+			return "", unknown
+		}
+	}
+	return own, nil
+}
+
 // flagArg is one long flag with a value on a command line.
 type flagArg struct {
 	name  string
 	value string
 	// at is the flag's index in argv; its value is at at+1 unless inline
-	// (--name=value).
+	// (--name=value) or bare.
 	at     int
 	inline bool
+	// bare is a boolean flag given alone, which sets it to true.
+	bare bool
 }
 
 // parseFlags reads a command line as the controller's flag parser (pflag)
 // does: "--name=value", or "--name value" for a flag that is not boolean;
 // nothing after "--" is a flag; and an argument with a single dash is never
-// a long flag. It returns the flags that have a value, in order, and the
-// index of "--" (len(argv) when there is none). A flag the agent does not
-// know is taken as boolean when the next argument is another flag.
+// a long flag. It returns the flags that have a value, a boolean flag given
+// alone with "true", in order, and the index of "--" (len(argv) when there
+// is none). A flag the agent does not know is taken as boolean when the
+// next argument is another flag.
 func parseFlags(argv []string) ([]flagArg, int) {
 	var out []flagArg
 	for i := 0; i < len(argv); i++ {
@@ -202,7 +318,11 @@ func parseFlags(argv []string) ([]flagArg, int) {
 			out = append(out, flagArg{name: name, value: value, at: i, inline: true})
 			continue
 		}
-		if slices.Contains(controllerBoolFlags, name) || i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
+		if slices.Contains(controllerBoolFlags, name) {
+			out = append(out, flagArg{name: name, value: "true", at: i, bare: true})
+			continue
+		}
+		if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
 			continue
 		}
 		out = append(out, flagArg{name: name, value: argv[i+1], at: i})

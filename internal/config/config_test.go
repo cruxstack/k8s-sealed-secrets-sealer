@@ -143,7 +143,7 @@ func TestLoadAgent_Defaults(t *testing.T) {
 	if cfg.ControllerName != "sealed-secrets-controller" || cfg.ControllerDeployment != cfg.ControllerName {
 		t.Errorf("controller = %q / %q", cfg.ControllerName, cfg.ControllerDeployment)
 	}
-	if cfg.CheckInInterval != 15*time.Second || cfg.HTTPAddr != ":8081" || cfg.TokenFile != DefaultTokenFile {
+	if cfg.CheckInInterval != 15*time.Second || cfg.KeyUsageInterval != 5*time.Minute || cfg.HTTPAddr != ":8081" || cfg.TokenFile != DefaultTokenFile {
 		t.Errorf("cfg = %+v", cfg)
 	}
 	if len(cfg.Capabilities) != 1 || !cfg.HasCapability("seal") {
@@ -196,11 +196,12 @@ func TestLoadAgent_RequiresHTTPSUnlessAllowed(t *testing.T) {
 
 func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	_, err := loadAgent(env(map[string]string{
-		"APP_CONTROLLER_NAME":  "Not_A_Label",
-		"APP_CHECKIN_INTERVAL": "1s",
-		"APP_CAPABILITIES":     "seal,root",
-		"APP_LOG_LEVEL":        "loud",
-		"APP_LOG_FORMAT":       "xml",
+		"APP_CONTROLLER_NAME":    "Not_A_Label",
+		"APP_CHECKIN_INTERVAL":   "1s",
+		"APP_KEY_USAGE_INTERVAL": "30s",
+		"APP_CAPABILITIES":       "seal,root,cleanup",
+		"APP_LOG_LEVEL":          "loud",
+		"APP_LOG_FORMAT":         "xml",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
@@ -211,7 +212,9 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_CONTROL_PLANE_URL is required",
 		"APP_ENV_NAME is required",
 		"APP_CHECKIN_INTERVAL must be between",
+		"APP_KEY_USAGE_INTERVAL must be between",
 		`unknown capability "root"`,
+		"APP_CAPABILITIES: cleanup needs keys",
 		"APP_LOG_LEVEL must be",
 		"APP_LOG_FORMAT must be",
 	} {
@@ -222,12 +225,13 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 }
 
 func TestLoadAgent_Capabilities(t *testing.T) {
-	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal", "APP_KMS_ESCROW_KEY_ID": "alias/escrow"})))
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal,cleanup", "APP_KMS_ESCROW_KEY_ID": "alias/escrow",
+		"APP_KEY_USAGE_INTERVAL": "30m"})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal" {
-		t.Errorf("Capabilities = %q", got)
+	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal,cleanup" || cfg.KeyUsageInterval != 30*time.Minute {
+		t.Errorf("Capabilities = %q, key usage interval %s", got, cfg.KeyUsageInterval)
 	}
 }
 

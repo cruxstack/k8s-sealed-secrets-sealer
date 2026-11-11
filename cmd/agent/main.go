@@ -14,6 +14,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agent"
@@ -98,12 +99,13 @@ func run() error {
 	}
 	var escrow agent.Escrower
 	var loader agent.KeyLoader
+	var keySync *agent.KeySync
 	if cfg.HasCapability(protocol.CapabilityKeys) {
 		kmsClient, err := newKMS(cfg, cfg.KMSEscrowKeyID)
 		if err != nil {
 			return err
 		}
-		keySync := agent.NewKeySync(agent.KeySyncOptions{
+		keySync = agent.NewKeySync(agent.KeySyncOptions{
 			Kube:        kube,
 			Namespace:   cfg.ControllerNamespace,
 			Deployment:  cfg.ControllerDeployment,
@@ -120,6 +122,27 @@ func run() error {
 		renewal := agent.NewRenewal(kube, cfg.ControllerNamespace, cfg.ControllerDeployment, logger)
 		commands.Handle(protocol.CommandRenewalEnable, renewal.Enable)
 	}
+	// cleanup needs keys (config.LoadAgent refuses it alone): it counts with
+	// the key Secrets and removes keys as key sync restarts the controller
+	var usage *agent.Usage
+	var usageReporter agent.UsageReporter
+	if cfg.HasCapability(protocol.CapabilityCleanup) {
+		sealedSecrets, err := dynamic.NewForConfig(restCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create kubernetes client: %w", err)
+		}
+		usage = agent.NewUsage(agent.UsageOptions{
+			Kube:          kube,
+			SealedSecrets: sealedSecrets,
+			Namespace:     cfg.ControllerNamespace,
+			Deployment:    cfg.ControllerDeployment,
+			Interval:      cfg.KeyUsageInterval,
+			Logger:        logger,
+		})
+		usageReporter = usage // only here: a nil *Usage would make a non-nil interface
+		cleanup := agent.NewCleanup(keySync, usage, certs, logger)
+		commands.Handle(protocol.CommandKeysDelete, cleanup.Delete)
+	}
 
 	a := agent.New(agent.Options{
 		Inventory:    inventory,
@@ -129,6 +152,7 @@ func run() error {
 		Commands:     commands.Types(),
 		Escrow:       escrow,
 		Loader:       loader,
+		Usage:        usageReporter,
 		Logger:       logger,
 		Version:      version.Version,
 	})
@@ -145,6 +169,9 @@ func run() error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return a.Run(ctx) })
 	g.Go(func() error { return commands.Run(ctx) })
+	if usage != nil {
+		g.Go(func() error { return usage.Run(ctx) })
+	}
 	g.Go(func() error { return httpserver.Serve(ctx, cfg.HTTPAddr, a.Handler(), logger) })
 	return g.Wait()
 }

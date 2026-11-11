@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -134,5 +136,105 @@ func TestReadSettings_ControllerContainerOnly(t *testing.T) {
 	unnamed.Spec.Template.Spec.Containers = []corev1.Container{{Name: "a"}, {Name: "b"}}
 	if got := readSettings(unnamed); got != (controllerSettings{keyPrefix: defaultKeyPrefix}) {
 		t.Fatalf("settings without a controller container = %+v, want unknown", got)
+	}
+}
+
+// The agent must read which SealedSecrets the controller watches as the
+// controller does (sealed-secrets v0.41, pkg/controller/main.go): every
+// namespace unless --all-namespaces is false or --additional-namespaces is
+// set at all, and then its own and the additional ones.
+func TestReadWatchScope(t *testing.T) {
+	envVar := func(name, value string) corev1.EnvVar { return corev1.EnvVar{Name: name, Value: value} }
+	fieldRef := func(path string) corev1.EnvVar {
+		return corev1.EnvVar{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: path}}}
+	}
+	fromConfigMap := []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}
+	cases := map[string]struct {
+		args       []string
+		env        []corev1.EnvVar
+		envFrom    []corev1.EnvFromSource
+		namespaces []string
+		selector   string
+		err        string
+	}{
+		"every namespace by default": {},
+		"its own namespace only": {
+			args: []string{"--all-namespaces=false"}, namespaces: []string{ns},
+		},
+		// the local stack's controllers
+		"its own and an additional one": {
+			args:       []string{"--update-status", "--key-renew-period=0", "--all-namespaces=false", "--additional-namespaces", "apps"},
+			namespaces: []string{"apps", ns},
+		},
+		"additional namespaces alone narrow it": {
+			args: []string{"--additional-namespaces= b, a,,b"}, namespaces: []string{"a", "b", ns},
+		},
+		"additional namespaces of blanks narrow it to its own": {
+			args: []string{"--additional-namespaces= "}, namespaces: []string{ns},
+		},
+		"the flag alone is true, and the last occurrence wins": {
+			args: []string{"--all-namespaces=false", "--all-namespaces"},
+		},
+		// pflag takes "false" as an argument, not the flag's value
+		"a boolean flag takes no separate value": {
+			args: []string{"--all-namespaces", "false"},
+		},
+		"variables when no flag is set": {
+			env:        []corev1.EnvVar{envVar("SEALED_SECRETS_ALL_NAMESPACES", "false"), envVar("SEALED_SECRETS_ADDITIONAL_NAMESPACES", "apps"), envVar("SEALED_SECRETS_LABEL_SELECTOR", "team=a")},
+			namespaces: []string{"apps", ns}, selector: "team=a",
+		},
+		"a flag overrides its variable": {
+			args: []string{"--all-namespaces=true"}, env: []corev1.EnvVar{envVar("SEALED_SECRETS_ALL_NAMESPACES", "false")},
+		},
+		// pflag sets the flag false, and the controller ignores the error
+		"a variable that is not a boolean is false": {
+			env: []corev1.EnvVar{envVar("SEALED_SECRETS_ALL_NAMESPACES", "no thanks")}, namespaces: []string{ns},
+		},
+		"a label selector": {
+			args: []string{"--label-selector", "team=a"}, selector: "team=a",
+		},
+		"POD_NAMESPACE names its own namespace": {
+			args: []string{"--all-namespaces=false"}, env: []corev1.EnvVar{envVar("POD_NAMESPACE", "elsewhere")}, namespaces: []string{"elsewhere"},
+		},
+		"POD_NAMESPACE from the pod's namespace": {
+			args: []string{"--all-namespaces=false"}, env: []corev1.EnvVar{fieldRef("metadata.namespace")}, namespaces: []string{ns},
+		},
+		"POD_NAMESPACE empty": {
+			args: []string{"--all-namespaces=false"}, env: []corev1.EnvVar{envVar("POD_NAMESPACE", "")}, namespaces: []string{ns},
+		},
+		"POD_NAMESPACE from elsewhere": {
+			args: []string{"--all-namespaces=false"}, env: []corev1.EnvVar{fieldRef("metadata.name")},
+			err: "POD_NAMESPACE is set where the agent cannot read it",
+		},
+		"a flag the controller refuses": {
+			args: []string{"--all-namespaces=maybe"}, err: "--all-namespaces is set where the agent cannot read it",
+		},
+		"envFrom may set anything": {
+			envFrom: fromConfigMap, err: "--all-namespaces is set where the agent cannot read it",
+		},
+		"additional namespaces from a variable it cannot read": {
+			env: []corev1.EnvVar{{Name: "SEALED_SECRETS_ADDITIONAL_NAMESPACES", ValueFrom: &corev1.EnvVarSource{}}},
+			err: "--additional-namespaces is set where the agent cannot read it",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := controllerDeployment(tc.args...)
+			d.Spec.Template.Spec.Containers[0].Env = tc.env
+			d.Spec.Template.Spec.Containers[0].EnvFrom = tc.envFrom
+			got, err := readWatchScope(d)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err = %v, want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.namespaces, tc.namespaces) || (got.namespaces == nil) != (tc.namespaces == nil) || got.labelSelector != tc.selector {
+				t.Fatalf("scope = %+v, want namespaces %v, selector %q", got, tc.namespaces, tc.selector)
+			}
+		})
 	}
 }
