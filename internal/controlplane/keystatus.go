@@ -184,10 +184,15 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// the deletion holds only for the revocation the gate checked
+	var revokedAt time.Time
+	if key.StatusAt != nil {
+		revokedAt = *key.StatusAt
+	}
 	by := actor(ctx)
 	purge := now.Add(deletedKeyRetention)
 	key.Status, key.StatusBy, key.StatusAt, key.PurgeAt = store.KeyDeleted, by, &now, &purge
-	err = s.store.DeleteKey(ctx, key)
+	err = s.store.DeleteKey(ctx, key, revokedAt)
 	switch {
 	case errors.Is(err, store.ErrKeyChanged):
 		writeError(w, http.StatusConflict, refuseKeyChanged)

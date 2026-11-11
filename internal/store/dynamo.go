@@ -269,13 +269,18 @@ func (d *Dynamo) SetKeyStatus(ctx context.Context, k KeyRecord) (bool, error) {
 	return true, nil
 }
 
-func (d *Dynamo) DeleteKey(ctx context.Context, k KeyRecord) error {
+func (d *Dynamo) DeleteKey(ctx context.Context, k KeyRecord, revokedAt time.Time) error {
 	if k.StatusAt == nil || k.PurgeAt == nil {
 		return fmt.Errorf("failed to delete key %s: deletion and purge times are required", k.Fingerprint)
 	}
 	at, err := attributevalue.Marshal(k.StatusAt)
 	if err != nil {
 		return fmt.Errorf("failed to encode deletion time of key %s: %w", k.Fingerprint, err)
+	}
+	// status times are written UTC, as SetKeyStatus's caller gives them
+	revoked, err := attributevalue.Marshal(revokedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("failed to encode revocation time of key %s: %w", k.Fingerprint, err)
 	}
 	purge, err := attributevalue.Marshal(k.PurgeAt)
 	if err != nil {
@@ -288,16 +293,16 @@ func (d *Dynamo) DeleteKey(ctx context.Context, k KeyRecord) error {
 	deleted := &types.AttributeValueMemberS{Value: KeyDeleted}
 	by := &types.AttributeValueMemberS{Value: k.StatusBy}
 	items := []types.TransactWriteItem{
-		// only a revoked key, and only once
+		// only the revocation the caller checked, and only once
 		{Update: &types.Update{
 			TableName:                &d.table,
 			Key:                      itemKey(keyPrefix+k.Fingerprint, skMeta),
 			UpdateExpression:         aws.String("SET #status = :deleted, status_by = :by, status_at = :at, purge_at = :purge"),
-			ConditionExpression:      aws.String("#status = :revoked"),
+			ConditionExpression:      aws.String("#status = :revoked AND status_at = :revokedAt"),
 			ExpressionAttributeNames: map[string]string{"#status": "status"},
 			ExpressionAttributeValues: map[string]types.AttributeValue{
 				":deleted": deleted, ":by": by, ":at": at, ":purge": purge,
-				":revoked": &types.AttributeValueMemberS{Value: KeyRevoked},
+				":revoked": &types.AttributeValueMemberS{Value: KeyRevoked}, ":revokedAt": revoked,
 			},
 		}},
 		// the revoked record keeps who revoked it
@@ -321,6 +326,51 @@ func (d *Dynamo) DeleteKey(ctx context.Context, k KeyRecord) error {
 		return ErrKeyChanged
 	case err != nil:
 		return fmt.Errorf("failed to delete key %s: %w", k.Fingerprint, err)
+	}
+	return nil
+}
+
+func (d *Dynamo) UndeleteKey(ctx context.Context, r RevokedKey) error {
+	at, err := attributevalue.Marshal(r.At.UTC())
+	if err != nil {
+		return fmt.Errorf("failed to encode revocation time of key %s: %w", r.Fingerprint, err)
+	}
+	sks, copies, err := d.escrowItems(ctx, r.Fingerprint)
+	if err != nil {
+		return err
+	}
+	deleted := &types.AttributeValueMemberS{Value: KeyDeleted}
+	items := []types.TransactWriteItem{
+		{Update: &types.Update{
+			TableName:                &d.table,
+			Key:                      itemKey(keyPrefix+r.Fingerprint, skMeta),
+			UpdateExpression:         aws.String("SET #status = :revoked, status_by = :by, status_at = :at REMOVE purge_at"),
+			ConditionExpression:      aws.String("#status = :deleted"),
+			ExpressionAttributeNames: map[string]string{"#status": "status"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":revoked": &types.AttributeValueMemberS{Value: KeyRevoked},
+				":by":      &types.AttributeValueMemberS{Value: r.By},
+				":at":      at,
+				":deleted": deleted,
+			},
+		}},
+		{Update: &types.Update{
+			TableName:                 &d.table,
+			Key:                       itemKey(revokedPK, revokedPrefix+r.Fingerprint),
+			UpdateExpression:          aws.String("REMOVE #status, deleted_by, deleted_at, purge_at"),
+			ConditionExpression:       aws.String("#status = :deleted"),
+			ExpressionAttributeNames:  map[string]string{"#status": "status"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":deleted": deleted},
+		}},
+	}
+	// copies past their purge time but not yet removed are kept again
+	items = append(items, escrowExpiry(d.table, r.Fingerprint, sks, copies, "REMOVE "+attrExpiresAt, nil)...)
+	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
+	switch {
+	case conditionFailed(err):
+		return ErrKeyChanged
+	case err != nil:
+		return fmt.Errorf("failed to undo the deletion of key %s: %w", r.Fingerprint, err)
 	}
 	return nil
 }
@@ -547,6 +597,23 @@ func (d *Dynamo) KeyUsages(ctx context.Context, ids []string) (map[string]KeyUsa
 		return nil, fmt.Errorf("failed to read key usage: %w", err)
 	}
 	return out, nil
+}
+
+// failedConditions returns, for a transaction that was canceled only
+// because conditions did not hold, which of its items' conditions failed,
+// and whether that was the case.
+func failedConditions(err error) (map[int]bool, bool) {
+	var canceled *types.TransactionCanceledException
+	if !conditionFailed(err) || !errors.As(err, &canceled) {
+		return nil, false
+	}
+	failed := map[int]bool{}
+	for i, r := range canceled.CancellationReasons {
+		if aws.ToString(r.Code) == "ConditionalCheckFailed" {
+			failed[i] = true
+		}
+	}
+	return failed, true
 }
 
 // conditionFailed reports whether a write failed only because a condition
@@ -848,17 +915,28 @@ func (d *Dynamo) PutEscrow(ctx context.Context, rec protocol.EscrowRecord, maxCo
 	if err != nil {
 		return false, false, fmt.Errorf("failed to encode escrow of key %s: %w", rec.Fingerprint, err)
 	}
-	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName:           &d.table,
-		Item:                primary,
-		ConditionExpression: aws.String("attribute_not_exists(pk)"),
+	// a deleted key gets no copy: its copies expire together, and one stored
+	// as it is deleted would outlive the rest
+	notDeleted := types.TransactWriteItem{ConditionCheck: &types.ConditionCheck{
+		TableName:                 &d.table,
+		Key:                       itemKey(keyPrefix+rec.Fingerprint, skMeta),
+		ConditionExpression:       aws.String("attribute_not_exists(#status) OR #status <> :deleted"),
+		ExpressionAttributeNames:  map[string]string{"#status": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":deleted": &types.AttributeValueMemberS{Value: KeyDeleted}},
+	}}
+	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{Put: &types.Put{TableName: &d.table, Item: primary, ConditionExpression: aws.String("attribute_not_exists(pk)")}},
+			notDeleted,
+		},
 	})
+	failed, conditional := failedConditions(err)
 	switch {
 	case err == nil:
 		return true, true, nil
-	case !conditionFailed(err):
+	case !conditional:
 		return false, false, fmt.Errorf("failed to store escrow of key %s: %w", rec.Fingerprint, err)
-	case maxCopies <= 1:
+	case failed[1] || maxCopies <= 1:
 		return false, false, nil
 	}
 
@@ -888,6 +966,7 @@ func (d *Dynamo) PutEscrow(ctx context.Context, rec protocol.EscrowRecord, maxCo
 					":others": &types.AttributeValueMemberN{Value: strconv.Itoa(maxCopies - 1)},
 				},
 			}},
+			notDeleted,
 		},
 	})
 	switch {

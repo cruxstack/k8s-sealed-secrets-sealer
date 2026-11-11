@@ -293,7 +293,7 @@ func TestSeal_FailsWithADeletedKey(t *testing.T) {
 		t.Fatalf("revoke: %v %v", ok, err)
 	}
 	k.Status, k.PurgeAt = store.KeyDeleted, &purge
-	if err := sh.store.DeleteKey(ctx, k); err != nil {
+	if err := sh.store.DeleteKey(ctx, k, at); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	sh.runAgent(queued.Agent.ID)

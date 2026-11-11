@@ -96,12 +96,18 @@ type Store interface {
 	// fails with ErrKeyChanged when the key is deleted: DeleteKey and
 	// ReinstateDeletedKey change those.
 	SetKeyStatus(ctx context.Context, k KeyRecord) (bool, error)
-	// DeleteKey marks a revoked key deleted, by k.StatusBy at k.StatusAt,
-	// and sets its escrowed copies to expire at k.PurgeAt, all in one
-	// write; its RevokedKey record keeps who revoked it. It fails with
-	// ErrKeyChanged when the key is not revoked (it is active, already
-	// deleted or has no record), or its escrowed copies changed meanwhile.
-	DeleteKey(ctx context.Context, k KeyRecord) error
+	// DeleteKey marks a key revoked at revokedAt deleted, by k.StatusBy at
+	// k.StatusAt, and sets its escrowed copies to expire at k.PurgeAt, all
+	// in one write; its RevokedKey record keeps who revoked it. It fails
+	// with ErrKeyChanged when the key is not that revocation any more (it
+	// is active, already deleted, revoked again or has no record), or its
+	// escrowed copies changed meanwhile.
+	DeleteKey(ctx context.Context, k KeyRecord, revokedAt time.Time) error
+	// UndeleteKey returns a deleted key to revoked, as r says it was
+	// revoked: it takes the deletion off its records and the expiry off
+	// whatever escrowed copies remain, all in one write. It fails with
+	// ErrKeyChanged when the key is not deleted.
+	UndeleteKey(ctx context.Context, r RevokedKey) error
 	// ReinstateDeletedKey makes a deleted key active, by k.StatusBy at
 	// k.StatusAt: it keeps its escrowed copies, takes it off the revoked
 	// keys and lists it as reinstated (KeyLists), all in one write. It
@@ -154,8 +160,8 @@ type Store interface {
 	// PutEscrow stores an agent's escrowed copy of a key: the first upload
 	// as the key's primary record, a later one from another agent as a
 	// further copy, up to maxCopies in all. It reports whether this call
-	// stored one (not when the uploader has a copy already or the key has
-	// maxCopies), and whether it was the key's first.
+	// stored one (not when the uploader has a copy already, the key has
+	// maxCopies or the key is deleted), and whether it was the key's first.
 	PutEscrow(ctx context.Context, rec protocol.EscrowRecord, maxCopies int) (stored, first bool, err error)
 	// Escrow returns a key's escrowed copies, the primary record first and
 	// the others by uploader; none when the key has no escrowed copy. Copies

@@ -121,12 +121,12 @@ func (m *Memory) SetKeyStatus(_ context.Context, k KeyRecord) (bool, error) {
 	return true, nil
 }
 
-func (m *Memory) DeleteKey(_ context.Context, k KeyRecord) error {
+func (m *Memory) DeleteKey(_ context.Context, k KeyRecord, revokedAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.keys[k.Fingerprint]
 	r, listed := m.revoked[k.Fingerprint]
-	if !ok || rec.Status != KeyRevoked || !listed {
+	if !ok || rec.Status != KeyRevoked || !listed || rec.StatusAt == nil || !rec.StatusAt.Equal(revokedAt) {
 		return ErrKeyChanged
 	}
 	rec.Status, rec.StatusBy, rec.StatusAt, rec.PurgeAt = KeyDeleted, k.StatusBy, k.StatusAt, k.PurgeAt
@@ -134,6 +134,24 @@ func (m *Memory) DeleteKey(_ context.Context, k KeyRecord) error {
 	r.Status, r.DeletedBy, r.DeletedAt, r.PurgeAt = KeyDeleted, k.StatusBy, k.StatusAt, k.PurgeAt
 	m.revoked[k.Fingerprint] = r
 	m.escrowExpires[k.Fingerprint] = *k.PurgeAt
+	return nil
+}
+
+func (m *Memory) UndeleteKey(_ context.Context, r RevokedKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.keys[r.Fingerprint]
+	listed, isListed := m.revoked[r.Fingerprint]
+	if !ok || rec.Status != KeyDeleted || !isListed {
+		return ErrKeyChanged
+	}
+	at := r.At
+	rec.Status, rec.StatusBy, rec.StatusAt, rec.PurgeAt = KeyRevoked, r.By, &at, nil
+	m.keys[r.Fingerprint] = rec
+	listed.Status, listed.DeletedBy, listed.DeletedAt, listed.PurgeAt = "", "", nil, nil
+	m.revoked[r.Fingerprint] = listed
+	m.escrowGone(r.Fingerprint)
+	delete(m.escrowExpires, r.Fingerprint)
 	return nil
 }
 
@@ -195,10 +213,15 @@ func (m *Memory) KeyUsages(_ context.Context, ids []string) (map[string]KeyUsage
 }
 
 // escrowGone reports whether a key's escrowed copies are past their purge
-// time, as the table's TTL would remove them. The caller holds m.mu.
+// time, and removes them then, as the table's TTL does. The caller holds
+// m.mu.
 func (m *Memory) escrowGone(fingerprint string) bool {
 	at, ok := m.escrowExpires[fingerprint]
-	return ok && !time.Now().Before(at)
+	if !ok || time.Now().Before(at) {
+		return false
+	}
+	delete(m.escrow, fingerprint)
+	return true
 }
 
 func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.Time) (bool, error) {
@@ -303,7 +326,7 @@ func (m *Memory) PutEscrow(_ context.Context, rec protocol.EscrowRecord, maxCopi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	recs := m.escrow[rec.Fingerprint]
-	if _, deleted := m.escrowExpires[rec.Fingerprint]; deleted && len(recs) > 0 {
+	if m.keys[rec.Fingerprint].Status == KeyDeleted {
 		// a deleted key's copies expire together: none is added
 		return false, false, nil
 	}
