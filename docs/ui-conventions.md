@@ -172,7 +172,15 @@ People who use this every day use it from the keyboard:
 Pages that show live state refresh on their own with TanStack Query
 (`refetchInterval`) and say how often in small muted text beside the section
 title ("Refreshes every 15 seconds"). Never make people reload to see an agent
-come back.
+come back. Poll faster only while something is changing (runs every 10
+seconds while one is active, every minute otherwise), and say the rate in
+force. A failed poll backs off: none after a 403 or 404, which asking again
+won't change, and no sooner than a 429's `Retry-After`. Following a job the
+server keeps running (a file reseal) survives a dropped connection: it says
+it is trying again and never starts the job twice on its own. A control
+that waits on a status that could not be read says so, never "Checking…"
+for good. A row action stays busy until the list it changed is read again,
+so it can't be used twice in between.
 
 ## Headings
 
