@@ -16,6 +16,7 @@ type resealMemory struct {
 	fileReseals map[string]map[string]FileReseal
 	// pull requests by sort key (pullSortKey)
 	pulls map[string]ResealPullRequest
+	runs  runMemory
 }
 
 func (m *Memory) PutFileReseal(_ context.Context, r FileReseal) error {

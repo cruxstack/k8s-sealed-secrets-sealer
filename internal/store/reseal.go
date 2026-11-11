@@ -167,3 +167,213 @@ const (
 	pullOpenPrefix = "PR#OPEN#"
 	pullDonePrefix = "PR#DONE#"
 )
+
+// Errors of schedules and runs.
+var (
+	// ErrTooManySchedules is returned when an env has the most schedules
+	// allowed.
+	ErrTooManySchedules = errors.New("too many reseal schedules")
+	// ErrRunActive is returned when a schedule's run is queued or running
+	// already.
+	ErrRunActive = errors.New("a run of this schedule is active")
+	// ErrScheduleChanged is returned when a schedule was deleted, or its
+	// next run moved, since it was read.
+	ErrScheduleChanged = errors.New("the schedule changed")
+)
+
+// ResealSchedule reseals the values in a scope every IntervalDays: listed
+// repositories, and every repository the GitHub App can reach of the listed
+// orgs.
+type ResealSchedule struct {
+	ID           string   `dynamodbav:"schedule_id"`
+	Name         string   `dynamodbav:"name"`
+	Repos        []string `dynamodbav:"repos"`
+	Orgs         []string `dynamodbav:"orgs"`
+	IntervalDays int      `dynamodbav:"interval_days"`
+	Enabled      bool     `dynamodbav:"enabled"`
+	// NextRunAt is when the tick starts its next run; nil while disabled.
+	NextRunAt *time.Time `dynamodbav:"next_run_at,omitempty"`
+	// CreatedBy and CreatedByID name who created it: its pull requests
+	// name them as who requested them.
+	CreatedBy   string     `dynamodbav:"created_by"`
+	CreatedByID int64      `dynamodbav:"created_by_id"`
+	CreatedAt   time.Time  `dynamodbav:"created_at"`
+	UpdatedBy   string     `dynamodbav:"updated_by,omitempty"`
+	UpdatedAt   *time.Time `dynamodbav:"updated_at,omitempty"`
+	// ActiveRunID is the run queued or running, at most one; LastRunID the
+	// latest run, active or not.
+	ActiveRunID string `dynamodbav:"active_run_id,omitempty"`
+	LastRunID   string `dynamodbav:"last_run_id,omitempty"`
+}
+
+// Run triggers and statuses.
+const (
+	TriggerSchedule = "schedule"
+	TriggerManual   = "manual"
+
+	RunQueued    = "queued"
+	RunRunning   = "running"
+	RunSucceeded = "succeeded"
+	RunPartial   = "partial"
+	RunFailed    = "failed"
+	RunCancelled = "cancelled"
+)
+
+// ResealRun is one execution of a schedule: its summary, and how far it
+// got. Its repositories are ResealRunRepo records.
+type ResealRun struct {
+	ID           string `dynamodbav:"run_id"`
+	ScheduleID   string `dynamodbav:"schedule_id"`
+	ScheduleName string `dynamodbav:"schedule_name"`
+	// CreatedBy and CreatedByID are the schedule's creator, whom the run's
+	// pull requests name.
+	CreatedBy   string `dynamodbav:"created_by"`
+	CreatedByID int64  `dynamodbav:"created_by_id"`
+	// Repos and Orgs are the schedule's scope when the run started.
+	Repos       []string   `dynamodbav:"repos"`
+	Orgs        []string   `dynamodbav:"orgs"`
+	Trigger     string     `dynamodbav:"trigger"`
+	RequestedBy string     `dynamodbav:"requested_by"`
+	Status      string     `dynamodbav:"status"`
+	StartedAt   time.Time  `dynamodbav:"started_at"`
+	FinishedAt  *time.Time `dynamodbav:"finished_at,omitempty"`
+	CancelledBy string     `dynamodbav:"cancelled_by,omitempty"`
+	Error       string     `dynamodbav:"error,omitempty"`
+
+	// Discovered is set once its repositories are recorded; Total counts
+	// them.
+	Discovered bool `dynamodbav:"discovered"`
+	Total      int  `dynamodbav:"total"`
+	// Outcomes counts the repositories done, by outcome.
+	Outcomes     ResealRunOutcomes `dynamodbav:"outcomes"`
+	Values       ResealCounts      `dynamodbav:"values"`
+	PullRequests int               `dynamodbav:"pull_requests"`
+	// Cursor is the key of the last repository started, in key order;
+	// InFlight the keys of those started and not done.
+	Cursor   string   `dynamodbav:"cursor,omitempty"`
+	InFlight []string `dynamodbav:"in_flight,omitempty"`
+	// LeaseUntil (epoch milliseconds) is set while a tick advances the run.
+	LeaseUntil int64 `dynamodbav:"lease_until,omitempty"`
+}
+
+// ResealRunOutcomes counts a run's repositories that are done, by outcome.
+type ResealRunOutcomes struct {
+	Opened    int `dynamodbav:"opened"`
+	Unchanged int `dynamodbav:"unchanged"`
+	Skipped   int `dynamodbav:"skipped"`
+	Failed    int `dynamodbav:"failed"`
+}
+
+// Done counts the repositories done.
+func (o ResealRunOutcomes) Done() int { return o.Opened + o.Unchanged + o.Skipped + o.Failed }
+
+// Active reports whether the run is queued or running.
+func (r ResealRun) Active() bool { return r.Status == RunQueued || r.Status == RunRunning }
+
+// Repository statuses in a run.
+const (
+	RepoPending   = "pending"
+	RepoResealing = "resealing"
+	RepoOpening   = "opening"
+	RepoOpened    = "opened"
+	RepoUnchanged = "unchanged"
+	RepoSkipped   = "skipped"
+	RepoFailed    = "failed"
+)
+
+// ResealRunRepo is one repository of a run, as people see it.
+type ResealRunRepo struct {
+	RunID string `dynamodbav:"run_id"`
+	// Key is the repository's RepoKey; Repo names it as GitHub does.
+	Key         string          `dynamodbav:"repo_key"`
+	Repo        string          `dynamodbav:"repo"`
+	Status      string          `dynamodbav:"status"`
+	Reason      string          `dynamodbav:"reason,omitempty"`
+	Files       int             `dynamodbav:"files"`
+	Values      ResealCounts    `dynamodbav:"values"`
+	PullRequest *ResealRunPull  `dynamodbav:"pull_request,omitempty"`
+	Failures    []ResealFailure `dynamodbav:"failures,omitempty"`
+	FromKeys    []string        `dynamodbav:"from_keys,omitempty"`
+	UpdatedAt   time.Time       `dynamodbav:"updated_at"`
+}
+
+// Done reports whether the repository's part of the run is over.
+func (r ResealRunRepo) Done() bool {
+	switch r.Status {
+	case RepoOpened, RepoUnchanged, RepoSkipped, RepoFailed:
+		return true
+	}
+	return false
+}
+
+// ResealRunPull is the pull request a run opened in a repository.
+type ResealRunPull struct {
+	Number int    `dynamodbav:"number" json:"number"`
+	URL    string `dynamodbav:"url" json:"url"`
+}
+
+// ResealWork is what a run needs to carry on with a repository: the commit
+// it read, the files it found and the commands it queued. It is apart from
+// ResealRunRepo, which run views read for every repository.
+type ResealWork struct {
+	RunID  string `dynamodbav:"run_id"`
+	Key    string `dynamodbav:"repo_key"`
+	Owner  string `dynamodbav:"owner"`
+	Name   string `dynamodbav:"name"`
+	Branch string `dynamodbav:"branch"`
+	Commit string `dynamodbav:"commit"`
+	// Candidates are the files the discovery globs match at Commit; Next
+	// is the first not read yet.
+	Candidates []ResealFile `dynamodbav:"candidates"`
+	Next       int          `dynamodbav:"next"`
+	// Files are those with documents for the env, in the order read; a
+	// value names its file by its place here.
+	Files    []ResealFile    `dynamodbav:"files"`
+	Commands []ResealCommand `dynamodbav:"commands"`
+	// Attempts counts the tries to open its pull request that failed;
+	// LastError is the last one's.
+	Attempts  int       `dynamodbav:"attempts"`
+	LastError string    `dynamodbav:"last_error,omitempty"`
+	UpdatedAt time.Time `dynamodbav:"updated_at"`
+}
+
+// ResealFile is a file of a run's repository at the commit it read.
+type ResealFile struct {
+	Path string `dynamodbav:"path"`
+	SHA  string `dynamodbav:"sha"`
+	Mode string `dynamodbav:"mode"`
+}
+
+// ResealCommand is a reseal.v1 command a run queued.
+type ResealCommand struct {
+	ID        string    `dynamodbav:"id"`
+	AgentID   string    `dynamodbav:"agent_id"`
+	Items     int       `dynamodbav:"items"`
+	ExpiresAt time.Time `dynamodbav:"expires_at"`
+}
+
+// ResealBatch is what one of a run's reseal.v1 commands did with each value
+// it carried: kept until the run's pull request is opened from it.
+type ResealBatch struct {
+	RunID     string `dynamodbav:"run_id"`
+	RepoKey   string `dynamodbav:"repo_key"`
+	CommandID string `dynamodbav:"command_id"`
+	// Status is the command's: CommandSucceeded or CommandFailed.
+	Status string            `dynamodbav:"status"`
+	Error  string            `dynamodbav:"error,omitempty"`
+	Items  []ResealBatchItem `dynamodbav:"items,omitempty"`
+}
+
+// ResealBatchItem is what a command did with one value: a reseal.v1
+// result's item.
+type ResealBatchItem struct {
+	ID         string `dynamodbav:"id"`
+	Status     string `dynamodbav:"status"`
+	Ciphertext string `dynamodbav:"ciphertext,omitempty"`
+	From       string `dynamodbav:"from,omitempty"`
+	Error      string `dynamodbav:"error,omitempty"`
+}
+
+// resealWorkRetention keeps a run's work and command results this long:
+// longer than any run lasts, and they are of no use once it is done.
+const resealWorkRetention = 30 * 24 * time.Hour
