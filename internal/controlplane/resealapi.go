@@ -83,6 +83,18 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	user := userauth.UserFrom(ctx)
 
+	// a seal still running has no change yet to leave out; a seal that
+	// lands later wins over the reseal anyway (store.Outranks)
+	sealing, err := s.sessionCommandRunning(ctx, sess.ID, s.now().UTC(), func(c store.CommandRecord) bool { return c.Type == protocol.CommandSeal })
+	if err != nil {
+		s.internalError(w, r, "failed to read seal commands", err)
+		return
+	}
+	if sealing {
+		writeError(w, http.StatusConflict, "A seal is still running in this session; reseal once it finishes.")
+		return
+	}
+
 	// write access is checked again, as for a seal
 	file, values, err := s.repos.FileValues(ctx, user, sess.Owner, sess.Repo, sess.Commit, in.Path)
 	if err != nil {

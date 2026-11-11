@@ -452,3 +452,65 @@ func TestResealFile_Expires(t *testing.T) {
 		t.Fatalf("status = %+v", got)
 	}
 }
+
+// A file is not resealed while a seal of the session runs: the seal has no
+// change yet to leave out.
+func TestResealFile_RefusedWhileASealRuns(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	sess := sh.openSession()
+	rec := sh.seal(sess.ID, resealPath, "old-token", "rotated")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("seal = %d %s", rec.Code, rec.Body)
+	}
+	seal := decode[sealView](t, rec)
+	rec = sh.reseal("alice", sess.ID, resealPath)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "A seal is still running") {
+		t.Fatalf("reseal while a seal runs = %d %s", rec.Code, rec.Body)
+	}
+	sh.runAgent(seal.Agent.ID)
+	rec = sh.reseal("alice", sess.ID, resealPath)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("reseal after the seal = %d %s", rec.Code, rec.Body)
+	}
+	// the sealed key is left out in every document
+	if got := decode[fileResealView](t, rec); got.Values.Pending != 3 {
+		t.Fatalf("reseal = %+v", got)
+	}
+}
+
+// In the pull request, a value sealed in the session wins over a reseal of
+// the same key and document, even a newer one.
+func TestResealFile_SealWinsInThePullRequest(t *testing.T) {
+	f := newResealFixture(t)
+	sh := f.sh
+	ctx := context.Background()
+	sess := sh.openSession()
+	var docs []store.Target
+	for i, ns := range []string{"dev-use1-blue-apps", "dev-use1-green-apps", "dev-use2-blue-apps"} {
+		docs = append(docs, store.Target{Index: &i, Namespace: ns, Name: "reseal", Scope: "strict"})
+	}
+	base := store.Change{SessionID: sess.ID, Path: resealPath, Key: "old-token", AgentID: "dev-use1-blue",
+		Fingerprint: sh.key.Fingerprint, UserID: 1001, UserLogin: "alice", SealedAt: sh.clock(), ExpiresAt: sess.EndsAt}
+	// sealed for every document, then resealed in the first by a newer
+	// command
+	seal := base
+	seal.ID, seal.CommandID, seal.Targets = changeID(resealPath, "old-token", nil), "01J0000000000000000000000A", docs
+	seal.Ciphertexts = []string{"AgSEALED", "AgSEALED", "AgSEALED"}
+	reseal := base
+	reseal.ID, reseal.CommandID, reseal.Targets = resealChangeID(resealPath, "old-token", "x"), "01J0000000000000000000000B", docs[:1]
+	reseal.Ciphertexts = []string{"AgRESEALED"}
+	reseal.Kind, reseal.ResealedFrom = store.ChangeReseal, []string{f.old.Fingerprint}
+	for _, c := range []store.Change{reseal, seal} {
+		if ok, err := sh.store.PutChange(ctx, c); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+	}
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+	pull, _ := sh.github.PullRequest("example-org", "apps", 1)
+	if got := encryptedData(t, pull.Files[0].After)[0]["old-token"]; got != "AgSEALED" {
+		t.Fatalf("document 0 old-token = %q, want the sealed value", got)
+	}
+}

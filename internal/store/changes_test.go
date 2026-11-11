@@ -164,3 +164,35 @@ func TestSuperseded(t *testing.T) {
 		})
 	}
 }
+
+// A value sealed in the session wins over a reseal of the same key and
+// document, whichever came first: the reseal moved the value the file held
+// before.
+func TestEffective_SealWinsOverReseal(t *testing.T) {
+	seal := Change{ID: "seal", Path: "a.yaml", Key: "token", CommandID: "01A",
+		Targets: targets("use1-blue"), Ciphertexts: []string{"sealed"}}
+	reseal := Change{ID: "reseal", Path: "a.yaml", Key: "token", CommandID: "01B", Kind: ChangeReseal,
+		Targets: targets("use1-blue", "use2-blue"), Ciphertexts: []string{"r1", "r2"}}
+	want := []Change{seal, reseal}
+	want[1].Targets, want[1].Ciphertexts = targets("use2-blue"), []string{"r2"}
+	if got := Effective([]Change{seal, reseal}); !reflect.DeepEqual(got, want) {
+		t.Errorf("an older seal under a newer reseal = %+v", got)
+	}
+	// a newer reseal never supersedes a seal; a seal covering a reseal
+	// does, older or newer
+	covered := reseal
+	covered.Targets, covered.Ciphertexts = targets("use1-blue"), []string{"r1"}
+	if got := Superseded([]Change{seal, covered}); len(got) != 1 || got[0].ID != "reseal" {
+		t.Errorf("Superseded = %+v", got)
+	}
+	// reseals among themselves: the newer wins
+	newer := covered
+	newer.ID, newer.CommandID = "reseal-2", "01C"
+	if got := Superseded([]Change{covered, newer}); len(got) != 1 || got[0].ID != "reseal" {
+		t.Errorf("Superseded of two reseals = %+v", got)
+	}
+	// written in this order, the seal is written last
+	if CompareRank(seal, reseal) != 1 || CompareRank(reseal, seal) != -1 || CompareRank(covered, newer) != -1 {
+		t.Error("CompareRank does not put the change that wins last")
+	}
+}

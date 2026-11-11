@@ -122,9 +122,10 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := s.pullRequestText(sess, user, effective)
-	// values are written in the order they were sealed, so where changes of
-	// a key overlap, the newest wins
-	slices.SortFunc(changes, func(a, b store.Change) int { return strings.Compare(a.CommandID, b.CommandID) })
+	// values are written in the order they apply, so where changes of a
+	// key overlap, the one that wins is written last: the newest, and a
+	// seal over a reseal
+	slices.SortStableFunc(changes, store.CompareRank)
 	values := make([]repos.Value, len(changes))
 	for i, c := range changes {
 		targets := make([]repos.Target, len(c.Targets))
@@ -208,16 +209,22 @@ func sealedWithRevokedKeys(changes []store.Change, revoked map[string]store.Revo
 	return out
 }
 
-// sealsRunning reports whether any seal of the session is queued or being
-// sealed.
+// sealsRunning reports whether any seal or reseal of the session is queued
+// or running.
 func (s *Server) sealsRunning(ctx context.Context, sessionID string, now time.Time) (bool, error) {
+	return s.sessionCommandRunning(ctx, sessionID, now, func(store.CommandRecord) bool { return true })
+}
+
+// sessionCommandRunning reports whether any command of the session that
+// match selects is queued or running.
+func (s *Server) sessionCommandRunning(ctx context.Context, sessionID string, now time.Time, match func(store.CommandRecord) bool) (bool, error) {
 	for _, a := range s.currentRegistry().Agents {
 		cmds, err := s.openCommands(ctx, a.ID, now)
 		if err != nil {
 			return false, err
 		}
 		for _, c := range cmds {
-			if c.SessionID == sessionID {
+			if c.SessionID == sessionID && match(c) {
 				return true, nil
 			}
 		}

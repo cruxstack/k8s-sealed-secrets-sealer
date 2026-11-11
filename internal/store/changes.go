@@ -2,9 +2,21 @@ package store
 
 import "slices"
 
+// Outranks reports whether change a wins over change b where both set a
+// document's key: a value sealed in the session always wins over a reseal,
+// whatever their order, since the reseal moved the value the file held
+// before; otherwise the newer wins (command IDs are ULIDs).
+func Outranks(a, b Change) bool {
+	if a.Resealed() != b.Resealed() {
+		return !a.Resealed()
+	}
+	return a.CommandID > b.CommandID
+}
+
 // Effective returns pending changes as they apply. Changes of one file and
 // key may overlap, when values were sealed for some regions and then others
-// or all: for each document, the newest seal wins. A change keeps only the
+// or all: for each document, the newest seal wins, and a seal wins over a
+// reseal (Outranks). A change keeps only the
 // targets no newer change of its file and key also targets, with their
 // ciphertexts when they were read; a change left without targets is left
 // out. The result keeps the input's order.
@@ -52,7 +64,7 @@ func Superseded(changes []Change) []Change {
 			continue
 		}
 		for _, c := range changes {
-			if c.CommandID <= old.CommandID || c.Path != old.Path || c.Key != old.Key {
+			if !Outranks(c, old) || c.Path != old.Path || c.Key != old.Key {
 				continue
 			}
 			covers := docSet{}
@@ -68,23 +80,27 @@ func Superseded(changes []Change) []Change {
 	return out
 }
 
-// newestFirst returns the changes' indexes, newest seal first: command IDs
-// are ULIDs, so they sort by time.
+// newestFirst returns the changes' indexes, the change that wins first
+// (Outranks).
 func newestFirst(changes []Change) []int {
 	order := make([]int, len(changes))
 	for i := range order {
 		order[i] = i
 	}
-	slices.SortStableFunc(order, func(a, b int) int {
-		switch ca, cb := changes[a].CommandID, changes[b].CommandID; {
-		case ca > cb:
-			return -1
-		case ca < cb:
-			return 1
-		}
-		return 0
-	})
+	slices.SortStableFunc(order, func(a, b int) int { return -CompareRank(changes[a], changes[b]) })
 	return order
+}
+
+// CompareRank orders changes the way they apply: a change before those
+// that win over it (Outranks), so writing them in order leaves the winner.
+func CompareRank(a, b Change) int {
+	switch {
+	case Outranks(a, b):
+		return 1
+	case Outranks(b, a):
+		return -1
+	}
+	return 0
 }
 
 // docRef names one document of a file for one key: by its position in the
