@@ -54,6 +54,11 @@ type statusView struct {
 		Ready int `json:"ready"`
 		Total int `json:"total"`
 	} `json:"clusters"`
+	// CanReseal says whether values can be resealed now: there is an env
+	// key, and an agent with the reseal capability holds it. ResealBlocked
+	// says why not, in one sentence.
+	CanReseal     bool   `json:"can_reseal"`
+	ResealBlocked string `json:"reseal_blocked,omitempty"`
 }
 
 // status serves whether values can be sealed in the env right now.
@@ -92,5 +97,21 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	default:
 		v.Sealing, v.Message = "ready", fmt.Sprintf("Sealing works in all %d clusters.", v.Clusters.Total)
 	}
+	v.CanReseal, v.ResealBlocked = canReseal(f)
 	httpserver.WriteJSON(w, http.StatusOK, v)
+}
+
+// canReseal says whether values can be resealed in the fleet now, and why
+// not.
+func canReseal(f fleet.Fleet) (bool, string) {
+	_, err := fleet.ChooseResealer(f, nil, nil)
+	switch {
+	case err == nil:
+		return true, ""
+	case errors.Is(err, fleet.ErrNoResealer):
+		return false, "No healthy agent with the reseal capability holds the env key."
+	case errors.Is(err, fleet.ErrEnvKeyNotActive):
+		return false, "No agent with the reseal capability runs a controller that seals with the env key yet."
+	}
+	return false, "There is no env key to reseal with: sealing is paused."
 }

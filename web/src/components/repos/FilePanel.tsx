@@ -28,7 +28,14 @@ import {
 import { FilePath, fileStatus } from "./FileList";
 import { fileHints } from "./hints";
 import { KeyList } from "./KeyList";
-import { NO_PENDING, keyStatuses, pendingDocs, revokedDocs } from "./keys";
+import {
+  NO_PENDING,
+  keyStatuses,
+  pendingDocs,
+  resealedDocs,
+  revokedDocs,
+} from "./keys";
+import { ResealAll, type FileResealer } from "./ResealFile";
 import { SealForm, type SealFormHandle } from "./SealForm";
 
 const SCOPES: Record<
@@ -194,7 +201,8 @@ function Panel({
       aria-label={file.path}
       className="overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
-      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
+      {/* on a phone the actions go under the path, which needs the width */}
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0 space-y-1">
           <h2 className="flex items-center gap-1 text-[15px] leading-6">
             <FilePath path={file.path} />
@@ -225,6 +233,7 @@ export function FilePanel({
   onBusyChange,
   focusForm = false,
   round = 0,
+  resealer,
 }: {
   owner: string;
   repo: string;
@@ -239,6 +248,8 @@ export function FilePanel({
   focusForm?: boolean;
   /** Changes when the session ends, to start the seal form afresh. */
   round?: number;
+  /** "Reseal all", for the env's admins; absent for everyone else. */
+  resealer?: FileResealer;
 }) {
   const status = fileStatus(file);
   const docs = file.documents ?? [];
@@ -246,6 +257,7 @@ export function FilePanel({
   const changes = session?.changes ?? [];
   const pending = pendingDocs(changes, file.path);
   const revoked = revokedDocs(changes, file.path);
+  const resealed = resealedDocs(changes, file.path);
   const form = useRef<SealFormHandle>(null);
   const [current, setCurrent] = useState("");
   // the regions the form's seal is limited to; null for every document
@@ -280,6 +292,7 @@ export function FilePanel({
     file,
     sealing ? pending : NO_PENDING,
     sealing ? revoked : NO_PENDING,
+    sealing ? resealed : NO_PENDING,
   );
 
   return (
@@ -298,18 +311,33 @@ export function FilePanel({
         </>
       }
       actions={
-        hints.docs && (
-          <Button asChild variant="outline" size="sm">
-            <a href={hints.docs} target="_blank" rel="noopener noreferrer">
-              <BookOpen className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-              Docs
-              <ExternalLink
-                className="ml-1.5 h-3 w-3 text-muted-foreground"
-                aria-hidden="true"
+        (hints.docs || resealer) && (
+          <div className="flex flex-wrap items-center gap-2">
+            {hints.docs && (
+              <Button asChild variant="outline" size="sm">
+                <a href={hints.docs} target="_blank" rel="noopener noreferrer">
+                  <BookOpen className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  Docs
+                  <ExternalLink
+                    className="ml-1.5 h-3 w-3 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </a>
+              </Button>
+            )}
+            {resealer && (
+              <ResealAll
+                file={file}
+                env={env}
+                session={session}
+                commit={commit}
+                canWrite={canWrite}
+                sealing={busy}
+                resealer={resealer}
               />
-              <span className="sr-only"> (opens in a new tab)</span>
-            </a>
-          </Button>
+            )}
+          </div>
         )
       }
     >

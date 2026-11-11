@@ -68,6 +68,21 @@ env key, the banner says why and what happens next: keys out of sync (and
 whether any agent has checked in), or a new key needed when every key the
 clusters share is revoked or not valid yet.
 
+Resealing (`/{env}/reseal`) is for the env's admins too, beside Fleet in
+the account menu and the palette, and in the navigation from a laptop's
+width (below it the header has room for two items). Others who open it are
+told it is for admins. It opens with one note on what resealing does and
+does not do (it moves values to the env key so old keys can be deleted; it
+does not rotate them), and a warning when the env cannot reseal now. Then
+come the reseal pull requests, like a maintenance queue: the open ones,
+oldest first, with merged, closed and all a toggle away, an open one's age
+in the warning color once it is a week old, and a count of those in
+repositories the viewer cannot read. Then the schedules, with Run now,
+Edit, Pause or Resume, and Delete as row icons, and their runs, newest
+first, each opening in a row under it with what it did per repository. The
+schedule and the open run are in the URL (`?schedule=`, `?run=`), so the
+pull requests and the schedules link to a run.
+
 Someone who may use several envs gets a switcher in place of the badge: the
 same dot and name, opening a menu of their envs (the current one checked,
 those they administer marked), the env's sealing summary, and Fleet for
@@ -108,6 +123,16 @@ say "not in this seal", and the pending change carries its regions as tags.
 The regions chosen stay for the next value, since values that differ by
 region usually come several at a time.
 
+The file's header holds its actions: Docs, and for the env's admins
+"Reseal all", which moves the file's values on older keys to the env key as
+pending changes (on a phone they go under the path). Its dialog says what
+it does and does not do, then shows its progress and what it did: values
+resealed, already current, failed with why, and left out because a change
+is pending. A resealed change is the file's own value, not a new one, so
+it says so wherever it shows: a neutral "Resealed" badge and the key it
+came off in the cart, "Resealed" in its key's row, and "resealed values" in
+the pull request dialog.
+
 A pending change sealed with a key an admin has since revoked is amber "Seal
 again" everywhere it shows: its badge in the cart, its key's row and region
 chips, and its file in the list. "Seal again" means only that; a key whose
@@ -147,7 +172,15 @@ People who use this every day use it from the keyboard:
 Pages that show live state refresh on their own with TanStack Query
 (`refetchInterval`) and say how often in small muted text beside the section
 title ("Refreshes every 15 seconds"). Never make people reload to see an agent
-come back.
+come back. Poll faster only while something is changing (runs every 10
+seconds while one is active, every minute otherwise), and say the rate in
+force. A failed poll backs off: none after a 403 or 404, which asking again
+won't change, and no sooner than a 429's `Retry-After`. Following a job the
+server keeps running (a file reseal) survives a dropped connection: it says
+it is trying again and never starts the job twice on its own. A control
+that waits on a status that could not be read says so, never "Checking…"
+for good. A row action stays busy until the list it changed is read again,
+so it can't be used twice in between.
 
 ## Headings
 
@@ -262,7 +295,9 @@ content with `p-10`.
   Where text under it does not fit (a row's icons), give `IconButton` a
   `reason`: it stays focusable (`aria-disabled`, not `disabled`), its
   reason is its description, its tooltip shows the reason on hover, focus
-  and a tap, and a click does nothing else.
+  and a tap, and a click does nothing else. A labelled button where text
+  under it does not fit either (a section's heading row, a card's header)
+  is a `ReasonButton`, which does the same with its label visible.
 - Destructive or irreversible actions use the `destructive` variant and
   confirm in a dialog that names what will happen.
 - Navigation that leaves the app (signing in with GitHub) is a link styled as

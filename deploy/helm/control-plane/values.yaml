@@ -105,6 +105,11 @@ discovery:
 # cluster in the env renews its sealing key
 keyRenewPeriod: 720h
 
+# How often the control plane ticks: starts the reseal schedules that are
+# due, advances their runs a bounded step, and checks open reseal pull
+# requests (each about every 15 ticks). From 1s to 10m.
+tickInterval: 1m
+
 # The KMS transit key values are encrypted under on their way to an agent.
 # The control plane's IAM role needs only kms:GenerateDataKey on it: it can
 # never decrypt. Each agent's role may decrypt only with its own agent_id in

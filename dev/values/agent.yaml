@@ -20,6 +20,7 @@ capabilities:
   keys: true
   renewal: true
   cleanup: true
+  reseal: true
 
 kms:
   transitKeyId: alias/sealer-transit

@@ -63,6 +63,7 @@ type GitHub interface {
 	Tree(ctx context.Context, owner, repo, commit string) (githubapp.Tree, error)
 	Blob(ctx context.Context, owner, repo, sha string) ([]byte, error)
 	CreatePullRequest(ctx context.Context, owner, repo string, pr githubapp.NewPullRequest) (githubapp.PullRequest, error)
+	PullRequestState(ctx context.Context, owner, repo string, number int) (githubapp.PullState, error)
 }
 
 // Options configures a Service.
@@ -480,6 +481,47 @@ func (s *Service) File(ctx context.Context, user *userauth.User, owner, name, co
 		return File{}, ErrFileNotFound
 	}
 	return s.file(ctx, r, snap.candidates[i])
+}
+
+// FileValues checks the user's write access and returns a discovered
+// file's documents for the env at a commit, with the values in each
+// document's spec.encryptedData, in the same order: what resealing it
+// sends. Its content is read from GitHub again, not from the cache, which
+// holds no values.
+func (s *Service) FileValues(ctx context.Context, user *userauth.User, owner, name, commit, filePath string) (File, []map[string]string, error) {
+	r, _, err := s.repository(ctx, user, owner, name, true)
+	if err != nil {
+		return File{}, nil, err
+	}
+	snap, err := s.snapshot(ctx, r, commit)
+	if err != nil {
+		return File{}, nil, err
+	}
+	i := sort.Search(len(snap.candidates), func(i int) bool { return snap.candidates[i].Path >= filePath })
+	if i == len(snap.candidates) || snap.candidates[i].Path != filePath {
+		return File{}, nil, ErrFileNotFound
+	}
+	return s.fileValues(ctx, r, snap.candidates[i])
+}
+
+// fileValues reads a candidate and returns its documents for the env and
+// their values, or with its Error set, why its content cannot be parsed.
+func (s *Service) fileValues(ctx context.Context, r githubapp.Repository, e githubapp.TreeEntry) (File, []map[string]string, error) {
+	content, err := s.gh.Blob(ctx, r.Owner, r.Name, e.SHA)
+	if err != nil {
+		return File{}, nil, err
+	}
+	f := File{Path: e.Path, Blob: e.SHA}
+	docs, values, err := manifest.EncryptedData(content, s.ann, s.env)
+	if reason, ok := contentError(err); ok {
+		f.Error = reason
+		return f, nil, nil
+	}
+	if err != nil {
+		return File{}, nil, err
+	}
+	f.Documents = docs
+	return f, values, nil
 }
 
 // repository checks the user's access and returns the repository and that

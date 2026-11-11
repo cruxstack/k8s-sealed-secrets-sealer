@@ -22,6 +22,8 @@ type Repo struct {
 	Name          string            `json:"name"`
 	Private       bool              `json:"private"`
 	DefaultBranch string            `json:"defaultBranch"`
+	Archived      bool              `json:"archived,omitempty"`
+	Disabled      bool              `json:"disabled,omitempty"`
 	Permissions   map[string]string `json:"permissions"` // login -> admin, write or read
 	Files         map[string]string `json:"-"`
 }
@@ -99,7 +101,8 @@ func (st *repoState) json() map[string]any {
 		"name":           st.Name,
 		"full_name":      st.Owner + "/" + st.Name,
 		"private":        st.Private,
-		"archived":       false,
+		"archived":       st.Archived,
+		"disabled":       st.Disabled,
 		"default_branch": st.DefaultBranch,
 		"owner":          map[string]string{"login": st.Owner},
 	}

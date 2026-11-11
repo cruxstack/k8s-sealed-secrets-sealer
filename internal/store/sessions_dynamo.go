@@ -101,6 +101,7 @@ type changeItem struct {
 var changeListAttributes = []string{
 	"pk", "sk", "session_id", "change_id", "path", "key", "command_id", "agent_id",
 	"fingerprint", "regions", "targets", "user_id", "user_login", "sealed_at", "change_expires_at",
+	"kind", "resealed_from",
 }
 
 func itemKey(pk, sk string) map[string]types.AttributeValue {
@@ -433,23 +434,31 @@ func (d *Dynamo) Seal(ctx context.Context, sessionID, commandID string) (Seal, b
 }
 
 func (d *Dynamo) ReserveChange(ctx context.Context, sessionID, changeID, sealID string, existing []string, maxChanges int, until, now time.Time) error {
+	return d.ReserveChanges(ctx, sessionID, map[string]string{changeID: sealID}, existing, maxChanges, until, now)
+}
+
+func (d *Dynamo) ReserveChanges(ctx context.Context, sessionID string, places map[string]string, existing []string, maxChanges int, until, now time.Time) error {
 	err := d.updatePlaces(ctx, sessionID, func(reserved map[string]int64) (map[string]int64, bool, error) {
-		kept, err := reserveChange(reserved, changeID, sealID, existing, maxChanges, until, now)
+		kept, err := reserveChanges(reserved, places, existing, maxChanges, until, now)
 		return kept, err == nil, err
 	})
 	if err != nil && !errors.Is(err, ErrTooManyChanges) {
-		return fmt.Errorf("failed to reserve change %s in session %s: %w", changeID, sessionID, err)
+		return fmt.Errorf("failed to reserve %d changes in session %s: %w", len(places), sessionID, err)
 	}
 	return err
 }
 
 func (d *Dynamo) ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error {
+	return d.ReleaseChanges(ctx, sessionID, map[string]string{changeID: sealID}, now)
+}
+
+func (d *Dynamo) ReleaseChanges(ctx context.Context, sessionID string, places map[string]string, now time.Time) error {
 	err := d.updatePlaces(ctx, sessionID, func(reserved map[string]int64) (map[string]int64, bool, error) {
-		kept, held := releaseChange(reserved, changeID, sealID, now)
+		kept, held := releaseChanges(reserved, places, now)
 		return kept, held, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to release change %s in session %s: %w", changeID, sessionID, err)
+		return fmt.Errorf("failed to release %d changes in session %s: %w", len(places), sessionID, err)
 	}
 	return nil
 }

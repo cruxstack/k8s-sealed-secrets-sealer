@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -86,14 +87,14 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// a seal still running would finish after its change was read
+	// a seal or reseal still running would finish after its change was read
 	running, err := s.sealsRunning(ctx, sess.ID, now)
 	if err != nil {
 		s.internalError(w, r, "failed to read seal commands", err)
 		return
 	}
 	if running {
-		writeError(w, http.StatusConflict, "a seal is still running; open the pull request once it finishes")
+		writeError(w, http.StatusConflict, "a seal or reseal is still running; open the pull request once it finishes")
 		return
 	}
 	changes, err := s.store.Changes(ctx, sess.ID, true)
@@ -121,16 +122,21 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := s.pullRequestText(sess, user, effective)
-	// values are written in the order they were sealed, so where changes of
-	// a key overlap, the newest wins
-	slices.SortFunc(changes, func(a, b store.Change) int { return strings.Compare(a.CommandID, b.CommandID) })
+	// values are written in the order they apply, so where changes of a
+	// key overlap, the one that wins is written last: the newest, and a
+	// seal over a reseal
+	slices.SortStableFunc(changes, store.CompareRank)
 	values := make([]repos.Value, len(changes))
 	for i, c := range changes {
 		targets := make([]repos.Target, len(c.Targets))
 		for j, t := range c.Targets {
 			targets[j] = repos.Target{Namespace: t.Namespace, Name: t.Name, Scope: t.Scope}
+			if t.Index != nil {
+				targets[j].Index = *t.Index
+			}
 		}
-		values[i] = repos.Value{Path: c.Path, Key: c.Key, Regions: c.Regions, Targets: targets, Ciphertexts: c.Ciphertexts}
+		// a reseal's documents are those whose value it resealed
+		values[i] = repos.Value{Path: c.Path, Key: c.Key, Regions: c.Regions, Targets: targets, Ciphertexts: c.Ciphertexts, ByIndex: c.Resealed()}
 	}
 	branch := pullRequestBranch(s.env, user.Login, sess.ID)
 	pr, err := s.repos.OpenPullRequest(ctx, user, sess.Owner, sess.Repo, repos.NewPullRequest{
@@ -173,6 +179,9 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	log.InfoContext(ctx, "pull request opened",
 		"event", "pr.opened", "number", pr.Number, "url", pr.URL, "pr_commit", pr.Commit,
 		"files", text.files, "changes", len(effective), "keys", text.keys)
+	if text.resealed > 0 {
+		s.recordSessionReseal(end, sess, user, pr, text, now, log)
+	}
 	httpserver.WriteJSON(w, http.StatusCreated, map[string]any{"pull_request": pullRequestView{
 		Number:  pr.Number,
 		URL:     pr.URL,
@@ -200,16 +209,22 @@ func sealedWithRevokedKeys(changes []store.Change, revoked map[string]store.Revo
 	return out
 }
 
-// sealsRunning reports whether any seal of the session is queued or being
-// sealed.
+// sealsRunning reports whether any seal or reseal of the session is queued
+// or running.
 func (s *Server) sealsRunning(ctx context.Context, sessionID string, now time.Time) (bool, error) {
+	return s.sessionCommandRunning(ctx, sessionID, now, func(store.CommandRecord) bool { return true })
+}
+
+// sessionCommandRunning reports whether any command of the session that
+// match selects is queued or running.
+func (s *Server) sessionCommandRunning(ctx context.Context, sessionID string, now time.Time, match func(store.CommandRecord) bool) (bool, error) {
 	for _, a := range s.currentRegistry().Agents {
 		cmds, err := s.openCommands(ctx, a.ID, now)
 		if err != nil {
 			return false, err
 		}
 		for _, c := range cmds {
-			if c.SessionID == sessionID {
+			if c.SessionID == sessionID && match(c) {
 				return true, nil
 			}
 		}
@@ -227,16 +242,58 @@ type prText struct {
 	title, body, message string
 	files                int
 	keys                 []string
+	// resealed counts the values reseals moved, in resealFiles files, off
+	// fromKeys
+	resealed, resealFiles int
+	fromKeys              []string
+}
+
+// recordSessionReseal records a pull request opened from a session with
+// reseal changes among the reseal pull requests. The pull request is open
+// whatever happens here.
+func (s *Server) recordSessionReseal(ctx context.Context, sess store.Session, user *userauth.User, pr githubapp.PullRequest, text prText, now time.Time, log *slog.Logger) {
+	rec := store.ResealPullRequest{
+		Repo:        sess.Owner + "/" + sess.Repo,
+		Number:      pr.Number,
+		URL:         pr.URL,
+		Title:       text.title,
+		Branch:      pr.Branch,
+		State:       store.PullOpen,
+		Source:      store.SourceSession,
+		RequestedBy: user.Login,
+		OpenedAt:    now,
+		CheckedAt:   now,
+		Values:      text.resealed,
+		Files:       text.resealFiles,
+		FromKeys:    text.fromKeys,
+	}
+	if err := s.store.PutResealPullRequest(ctx, rec); err != nil {
+		log.ErrorContext(ctx, "failed to record a reseal pull request", "number", pr.Number, "error", err)
+		return
+	}
+	log.InfoContext(ctx, "reseal pull request opened",
+		"event", "reseal.pr_opened", "source", store.SourceSession, "number", pr.Number, "url", pr.URL,
+		"values", text.resealed, "files", text.resealFiles, "from_keys", text.fromKeys)
 }
 
 // pullRequestText writes a pull request's title, description and commit
 // message from the changes as they apply. They name files, keys, regions
-// and documents, never values or ciphertexts.
+// and documents, never values or ciphertexts. Values a reseal moved onto
+// the env key are listed apart from values sealed in the session.
 func (s *Server) pullRequestText(sess store.Session, user *userauth.User, changes []store.Change) prText {
-	var paths []string
-	keysByPath := map[string][]string{}
-	var keys []string
+	var sealed, resealed []store.Change
 	for _, c := range changes {
+		if c.Resealed() {
+			resealed = append(resealed, c)
+		} else {
+			sealed = append(sealed, c)
+		}
+	}
+	text := prText{}
+	var paths, resealPaths []string
+	keysByPath := map[string][]string{}
+	resealKeysByPath := map[string][]string{}
+	for _, c := range sealed {
 		if _, ok := keysByPath[c.Path]; !ok {
 			paths = append(paths, c.Path)
 		}
@@ -246,56 +303,129 @@ func (s *Server) pullRequestText(sess store.Session, user *userauth.User, change
 			key += " (" + plain(strings.Join(c.Regions, ", ")) + ")"
 		}
 		keysByPath[c.Path] = append(keysByPath[c.Path], key)
-		keys = append(keys, c.Key)
+		text.keys = append(text.keys, c.Key)
 	}
-	values := plural(len(changes), "value")
-
-	title := fmt.Sprintf("Seal %s in %s for %s", values, plural(len(paths), "file"), s.env)
-	switch {
-	case len(changes) == 1:
-		title = fmt.Sprintf("Seal %s in %s for %s", changes[0].Key, plain(changes[0].Path), s.env)
-	case len(paths) == 1:
-		title = fmt.Sprintf("Seal %s in %s for %s", values, plain(paths[0]), s.env)
+	for _, c := range resealed {
+		if _, ok := resealKeysByPath[c.Path]; !ok {
+			resealPaths = append(resealPaths, c.Path)
+		}
+		resealKeysByPath[c.Path] = append(resealKeysByPath[c.Path], c.Key)
+		text.keys = append(text.keys, c.Key)
+		text.resealed += len(c.Targets)
+		for _, fp := range c.ResealedFrom {
+			if !slices.Contains(text.fromKeys, fp) {
+				text.fromKeys = append(text.fromKeys, fp)
+			}
+		}
 	}
-	if len(title) > maxTitleLength {
-		title = fmt.Sprintf("Seal %s in %s for %s", values, plural(len(paths), "file"), s.env)
+	slices.Sort(text.fromKeys)
+	text.resealFiles = len(resealPaths)
+	allPaths := slices.Clone(paths)
+	for _, p := range resealPaths {
+		if !slices.Contains(allPaths, p) {
+			allPaths = append(allPaths, p)
+		}
 	}
+	text.files = len(allPaths)
+	text.title = s.pullRequestTitle(sealed, paths, text.resealed, allPaths)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Sealed for the **%s** env with k8s-sealed-secrets-sealer, as requested by @%s.\n\n", s.env, user.Login)
-	b.WriteString("| File | Key | Documents | Sealed with |\n| --- | --- | --- | --- |\n")
-	regional := false
-	for _, c := range changes {
-		docs := make([]string, len(c.Targets))
-		for i, t := range c.Targets {
-			docs[i] = code(t.Namespace + "/" + t.Name)
-		}
-		key := code(c.Key)
-		if len(c.Regions) > 0 {
-			regional = true
-			regions := make([]string, len(c.Regions))
-			for i, r := range c.Regions {
-				regions[i] = code(r)
+	if len(sealed) > 0 {
+		b.WriteString("| File | Key | Documents | Sealed with |\n| --- | --- | --- | --- |\n")
+		regional := false
+		for _, c := range sealed {
+			key := code(c.Key)
+			if len(c.Regions) > 0 {
+				regional = true
+				regions := make([]string, len(c.Regions))
+				for i, r := range c.Regions {
+					regions[i] = code(r)
+				}
+				key += " in " + strings.Join(regions, ", ")
 			}
-			key += " in " + strings.Join(regions, ", ")
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(c.Path), key, documents(c.Targets), code(shortFingerprint(c.Fingerprint)))
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(c.Path), key, strings.Join(docs, ", "), code(shortFingerprint(c.Fingerprint)))
+		if regional {
+			fmt.Fprintf(&b, "\nEach value was sealed once for each %s document listed: every one in its file, or those in the regions named. Only `spec.encryptedData` changed. Based on `%s` at %s.\n",
+				s.env, sess.Branch, sess.Commit)
+		} else {
+			fmt.Fprintf(&b, "\nEach value was sealed once for every %s document in its file; only `spec.encryptedData` changed. Based on `%s` at %s.\n",
+				s.env, sess.Branch, sess.Commit)
+		}
 	}
-	if regional {
-		fmt.Fprintf(&b, "\nEach value was sealed once for each %s document listed: every one in its file, or those in the regions named. Only `spec.encryptedData` changed. Based on `%s` at %s.\n",
-			s.env, sess.Branch, sess.Commit)
-	} else {
-		fmt.Fprintf(&b, "\nEach value was sealed once for every %s document in its file; only `spec.encryptedData` changed. Based on `%s` at %s.\n",
-			s.env, sess.Branch, sess.Commit)
+	if len(resealed) > 0 {
+		if len(sealed) > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "Resealed: %s moved off older keys onto the env key, unchanged.\n\n", plural(text.resealed, "value"))
+		b.WriteString("| File | Key | Documents | From | To |\n| --- | --- | --- | --- | --- |\n")
+		for _, c := range resealed {
+			from := make([]string, len(c.ResealedFrom))
+			for i, fp := range c.ResealedFrom {
+				from[i] = code(shortFingerprint(fp))
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", code(c.Path), code(c.Key), documents(c.Targets),
+				strings.Join(from, ", "), code(shortFingerprint(c.Fingerprint)))
+		}
+		fmt.Fprintf(&b, "\n%s Only `spec.encryptedData` changed. Based on `%s` at %s.\n", resealNote, sess.Branch, sess.Commit)
 	}
 
 	var m strings.Builder
-	m.WriteString(title + "\n\n")
+	m.WriteString(text.title + "\n\n")
 	for _, p := range paths {
 		fmt.Fprintf(&m, "%s: %s\n", plain(p), strings.Join(keysByPath[p], ", "))
 	}
+	if len(resealPaths) > 0 {
+		if len(paths) > 0 {
+			m.WriteString("\n")
+		}
+		m.WriteString("Resealed onto the env key:\n")
+		for _, p := range resealPaths {
+			fmt.Fprintf(&m, "%s: %s\n", plain(p), strings.Join(resealKeysByPath[p], ", "))
+		}
+	}
 	fmt.Fprintf(&m, "\nRequested-by: %s <%d+%s@users.noreply.github.com>\n", user.Login, user.ID, user.Login)
-	return prText{title: title, body: b.String(), message: m.String(), files: len(paths), keys: keys}
+	text.body, text.message = b.String(), m.String()
+	return text
+}
+
+// resealNote says what resealing is not, wherever it is offered.
+const resealNote = "Resealing moves values off older keys so those keys can be deleted once nothing uses them. It does not rotate them: git history keeps the old ciphertext, so a value sealed with a key that may be exposed must be sealed again with a new value."
+
+// pullRequestTitle names what a session's pull request seals and reseals.
+func (s *Server) pullRequestTitle(sealed []store.Change, paths []string, resealed int, allPaths []string) string {
+	values := plural(len(sealed), "value")
+	if resealed == 0 {
+		title := fmt.Sprintf("Seal %s in %s for %s", values, plural(len(paths), "file"), s.env)
+		switch {
+		case len(sealed) == 1:
+			title = fmt.Sprintf("Seal %s in %s for %s", sealed[0].Key, plain(sealed[0].Path), s.env)
+		case len(paths) == 1:
+			title = fmt.Sprintf("Seal %s in %s for %s", values, plain(paths[0]), s.env)
+		}
+		if len(title) > maxTitleLength {
+			title = fmt.Sprintf("Seal %s in %s for %s", values, plural(len(paths), "file"), s.env)
+		}
+		return title
+	}
+	in := plural(len(allPaths), "file")
+	if len(allPaths) == 1 && len(plain(allPaths[0])) <= maxTitleLength/2 {
+		in = plain(allPaths[0])
+	}
+	if len(sealed) == 0 {
+		return fmt.Sprintf("Reseal %s in %s for %s", plural(resealed, "value"), in, s.env)
+	}
+	return fmt.Sprintf("Seal %s and reseal %s in %s for %s", values, plural(resealed, "value"), in, s.env)
+}
+
+// documents names a change's documents for a table cell.
+func documents(targets []store.Target) string {
+	docs := make([]string, len(targets))
+	for i, t := range targets {
+		docs[i] = code(t.Namespace + "/" + t.Name)
+	}
+	return strings.Join(docs, ", ")
 }
 
 func plural(n int, noun string) string {

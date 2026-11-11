@@ -102,6 +102,9 @@ describe("Header", () => {
     expect(
       within(nav).queryByRole("link", { name: "Fleet" }),
     ).not.toBeInTheDocument();
+    expect(
+      within(nav).queryByRole("link", { name: "Reseal" }),
+    ).not.toBeInTheDocument();
     // the icon-only theme toggle says what it does
     expect(
       screen.getByRole("button", { name: "Toggle theme" }),
@@ -111,6 +114,9 @@ describe("Header", () => {
     await screen.findByRole("menuitem", { name: /sign out/i });
     expect(
       screen.queryByRole("menuitem", { name: /fleet/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: /reseal/i }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: /sign out/i }));
 
@@ -125,14 +131,19 @@ describe("Header", () => {
     });
   });
 
-  it("leads admins to the fleet from the nav, the env badge and the account menu", async () => {
+  it("leads admins to the fleet and resealing from the nav, the env badge and the account menu", async () => {
     renderHeader(ADMIN);
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
-    expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute(
-      "href",
-      "/dev/fleet",
-    );
+    expect(
+      within(nav)
+        .getAllByRole("link")
+        .map((l) => [l.textContent, l.getAttribute("href")]),
+    ).toEqual([
+      ["Secrets", "/dev/secrets"],
+      ["Fleet", "/dev/fleet"],
+      ["Reseal", "/dev/reseal"],
+    ]);
 
     expect(
       await screen.findByRole("link", {
@@ -147,6 +158,10 @@ describe("Header", () => {
     expect(
       await screen.findByRole("menuitem", { name: /fleet/i }),
     ).toHaveAttribute("href", "/dev/fleet");
+    expect(screen.getByRole("menuitem", { name: /reseal/i })).toHaveAttribute(
+      "href",
+      "/dev/reseal",
+    );
   });
 
   it("switches between the envs a user may use, and leads to the fleets they administer", async () => {

@@ -169,3 +169,51 @@ func TestOpenPullRequest_Regions(t *testing.T) {
 		}
 	}
 }
+
+// A resealed value goes only into the documents, by position, whose value
+// was resealed.
+func TestOpenPullRequest_ByIndex(t *testing.T) {
+	s, gh, _ := newService(t, nil)
+	ctx := context.Background()
+	_, head, err := s.Head(ctx, alice, "example-org", "apps", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := gh.mock.File("example-org", "apps", "main", "deploy/billing/sealed-secret.yaml")
+	const path = "deploy/billing/sealed-secret.yaml"
+	at := func(i int) Target { t := billingTargets[i]; t.Index = i; return t }
+
+	_, err = s.OpenPullRequest(ctx, alice, "example-org", "apps", NewPullRequest{
+		Commit: head, Branch: "sealer/dev/alice-3", Title: "Reseal", Message: "Reseal\n",
+		Values: []Value{{Path: path, Key: "api-token", ByIndex: true, Targets: []Target{at(0), at(2)}, Ciphertexts: []string{"AgR1", "AgR3"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, _ := gh.mock.PullRequest("example-org", "apps", 1)
+	// the first and third dev documents change, the second does not
+	parts := strings.Split(before, "  encryptedData: {}\n")
+	want := parts[0] + "  encryptedData:\n    api-token: AgR1\n" + parts[1] + "  encryptedData: {}\n" + parts[2] +
+		"  encryptedData:\n    api-token: AgR3\n" + parts[3]
+	if view.Files[0].After != want {
+		t.Fatalf("file:\n%s\nwant:\n%s", view.Files[0].After, want)
+	}
+
+	// each position must still be the document the value came from
+	moved := at(1)
+	moved.Index = 2
+	for name, v := range map[string]Value{
+		"another document": {Path: path, Key: "k", ByIndex: true, Targets: []Target{moved}, Ciphertexts: []string{"AgA"}},
+		"no such document": {Path: path, Key: "k", ByIndex: true, Targets: []Target{{Namespace: "x", Name: "billing", Scope: "strict", Index: 9}}, Ciphertexts: []string{"AgA"}},
+		"cluster-wide": {Path: "deploy/legacy/sealed-secret.yaml", Key: "k", ByIndex: true,
+			Targets: []Target{{Namespace: "dev-use1-blue-apps", Name: "legacy", Scope: "cluster-wide"}}, Ciphertexts: []string{"AgA"}},
+	} {
+		_, err := s.OpenPullRequest(ctx, alice, "example-org", "apps", NewPullRequest{
+			Commit: head, Branch: "sealer/dev/x", Title: "t", Message: "m", Values: []Value{v},
+		})
+		var fe *FileError
+		if !errors.As(err, &fe) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 import { AxiosError, type AxiosAdapter } from "axios";
 import type {
   FileListing,
+  FileReseal,
   Fleet,
   FleetAgent,
   FleetKey,
@@ -11,6 +12,11 @@ import type {
   MeResponse,
   PendingChange,
   Repository,
+  ResealPullRequest,
+  ResealRun,
+  ResealRunSummary,
+  ResealSchedule,
+  ResealScheduleInput,
   Seal,
   SealSession,
   SealingStatus,
@@ -47,6 +53,7 @@ export const STATUS: SealingStatus = {
   sealing: "ready",
   message: "Sealing works in all 2 clusters.",
   clusters: { ready: 2, total: 2 },
+  can_reseal: true,
 };
 
 export interface Recorded {
@@ -64,6 +71,12 @@ export interface Recorded {
 export interface FakeApi {
   adapter: AxiosAdapter;
   calls: Recorded[];
+  /** The resealing state the routes serve and change; tests may change it. */
+  reseal: {
+    schedules: ResealSchedule[];
+    runs: ResealRunSummary[];
+    pullRequests: ResealPullRequest[];
+  };
 }
 
 /**
@@ -92,6 +105,19 @@ export function fakeApi(opts: {
   pullRequestError?: { status: number; error: string };
   /** Answers revoking, reinstating or deleting a key with this error. */
   keyStatusError?: { status: number; error: string };
+  /** The env's resealing; changed by its routes. Only admins may see it. */
+  reseal?: ResealFixtures;
+  /** What a file reseal's progress answers, in order; the last repeats. */
+  fileReseals?: FileReseal[];
+  /** Answers "Reseal all" with this error instead of starting. */
+  fileResealError?: { status: number; error: string };
+  /** The pending changes a file reseal adds once it is done. */
+  resealChanges?: PendingChange[];
+  /**
+   * Ends the session (as if it expired) once a file reseal's progress was
+   * read this many times: later calls about it answer 404.
+   */
+  endSessionAfterResealPolls?: number;
 }): FakeApi {
   const calls: Recorded[] = [];
   // copies, so the routes never change the caller's fixtures
@@ -102,6 +128,12 @@ export function fakeApi(opts: {
     ]),
   );
   let polls = 0;
+  let resealPolls = 0;
+  // as the control plane, a pull request waits for seals and reseals in
+  // flight, and a reseal for seals
+  let sealRunning = false;
+  let resealRunning = false;
+  const reseal = resealState(opts.reseal);
   const adapter: AxiosAdapter = async (config) => {
     // calls about an env come under /envs/{env}
     const scoped = /^\/envs\/([^/]+)(\/.*)$/.exec(config.url ?? "");
@@ -168,6 +200,20 @@ export function fakeApi(opts: {
         status_at: new Date().toISOString(),
       } satisfies KeyStatus);
     }
+    if (url.startsWith("/reseal/")) {
+      if (!opts.me?.envs.find((e) => e.name === env)?.admin) {
+        return reply(403, { error: "only admins can do this" });
+      }
+      const answer = resealRoute(
+        reseal,
+        method,
+        url,
+        config.params as Record<string, string> | undefined,
+        body,
+        opts.me.user.login,
+      );
+      return reply(answer.status, answer.body);
+    }
     if (url === "/status") {
       if (!opts.me) return reply(401, { error: "unauthorized" });
       return reply(200, opts.status ?? STATUS);
@@ -203,7 +249,9 @@ export function fakeApi(opts: {
         return reply(current ? 200 : 201, { session: created });
       }
       if (!current || current.id !== id) {
-        return reply(404, { error: "session not found" });
+        return reply(404, {
+          error: "session not found; it may have expired or been discarded",
+        });
       }
       if (method === "DELETE" && rest === "") {
         delete sessions[key];
@@ -211,6 +259,7 @@ export function fakeApi(opts: {
       }
       if (method === "POST" && rest === "/seals") {
         polls = 0;
+        sealRunning = true;
         return reply(202, {
           ...sealOf(body as SealRequest),
           status: "queued",
@@ -224,6 +273,7 @@ export function fakeApi(opts: {
         const last = calls.filter((c) => c.url.endsWith("/seals")).at(-1)
           ?.body as SealRequest;
         const seal: Seal = { ...sealOf(last), status };
+        sealRunning = status === "queued" || status === "sealing";
         if (status === "sealed") {
           const change = changeFor(seal);
           current.changes = [
@@ -238,6 +288,12 @@ export function fakeApi(opts: {
         return reply(200, seal);
       }
       if (method === "POST" && rest === "/pull-request") {
+        if (sealRunning || resealRunning) {
+          return reply(409, {
+            error:
+              "a seal or reseal is still running; open the pull request once it finishes",
+          });
+        }
         if (opts.pullRequestError) {
           return reply(opts.pullRequestError.status, {
             error: opts.pullRequestError.error,
@@ -255,6 +311,57 @@ export function fakeApi(opts: {
             changes: changes.length,
           },
         });
+      }
+      if (method === "POST" && rest === "/reseals") {
+        if (!opts.me?.envs.find((e) => e.name === env)?.admin) {
+          return reply(403, { error: "only admins can do this" });
+        }
+        if (sealRunning) {
+          return reply(409, {
+            error:
+              "a seal is still running in this session; reseal once it finishes",
+          });
+        }
+        if (opts.fileResealError) {
+          return reply(opts.fileResealError.status, {
+            error: opts.fileResealError.error,
+          });
+        }
+        resealPolls = 0;
+        resealRunning = true;
+        return reply(202, {
+          ...fileReseal({ path: (body as { path: string }).path }),
+          status: "queued",
+        });
+      }
+      const resealPoll = /^\/reseals\/([^/]+)$/.exec(rest);
+      if (method === "GET" && resealPoll) {
+        if (resealPolls >= (opts.endSessionAfterResealPolls ?? Infinity)) {
+          delete sessions[key];
+          resealRunning = false;
+          return reply(404, {
+            error: "session not found; it may have expired or been discarded",
+          });
+        }
+        const steps = opts.fileReseals ?? [fileReseal({ status: "done" })];
+        const step = steps[Math.min(resealPolls++, steps.length - 1)]!;
+        resealRunning = step.status === "queued" || step.status === "resealing";
+        const path = (
+          calls.filter((c) => c.url.endsWith("/reseals")).at(-1)?.body as {
+            path: string;
+          }
+        ).path;
+        if (step.status === "done") {
+          const added = opts.resealChanges ?? [];
+          current.changes = [
+            ...(current.changes ?? []).filter(
+              (c) => !added.some((a) => a.id === c.id),
+            ),
+            ...added,
+          ];
+          current.pending_changes = current.changes.length;
+        }
+        return reply(200, { ...step, path });
       }
       const change = /^\/changes\/([^/]+)$/.exec(rest);
       if (method === "DELETE" && change) {
@@ -280,7 +387,7 @@ export function fakeApi(opts: {
     }
     return reply(404, { error: "not found" });
   };
-  return { adapter, calls };
+  return { adapter, calls, reseal };
 }
 
 export function emptyFleet(): Fleet {
@@ -547,5 +654,247 @@ export function changeFor(seal: Seal): PendingChange {
     sealed_at: iso(500),
     sealed_by: seal.agent,
     fingerprint: seal.fingerprint,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Resealing
+// ---------------------------------------------------------------------------
+
+/** The env's resealing, as the fake serves it. */
+export interface ResealFixtures {
+  schedules?: ResealSchedule[];
+  /** Newest first. */
+  runs?: ResealRunSummary[];
+  /** A run's detail by ID; a run without one has no repositories. */
+  details?: Record<string, ResealRun>;
+  pullRequests?: ResealPullRequest[];
+  /** Pull requests in repositories the viewer cannot read, per listing. */
+  hidden?: number;
+  /** Answers creating or changing a schedule with this error. */
+  scheduleError?: { status: number; error: string };
+  /** Answers Run now with this error. */
+  runError?: { status: number; error: string };
+}
+
+interface ResealState {
+  schedules: ResealSchedule[];
+  runs: ResealRunSummary[];
+  details: Record<string, ResealRun>;
+  pullRequests: ResealPullRequest[];
+  hidden: number;
+  scheduleError?: { status: number; error: string };
+  runError?: { status: number; error: string };
+  created: number;
+}
+
+/** Copies, so the routes never change the caller's fixtures. */
+function resealState(f: ResealFixtures = {}): ResealState {
+  return {
+    schedules: structuredClone(f.schedules ?? []),
+    runs: structuredClone(f.runs ?? []),
+    details: structuredClone(f.details ?? {}),
+    pullRequests: structuredClone(f.pullRequests ?? []),
+    hidden: f.hidden ?? 0,
+    scheduleError: f.scheduleError,
+    runError: f.runError,
+    created: 0,
+  };
+}
+
+const DAY = 86_400_000;
+
+/** The reseal routes, as the control plane answers them. */
+function resealRoute(
+  state: ResealState,
+  method: string,
+  url: string,
+  params: Record<string, string> | undefined,
+  body: unknown,
+  login: string,
+): { status: number; body: unknown } {
+  const ok = (b: unknown, status = 200) => ({ status, body: b });
+  const fail = (status: number, error: string) => ({ status, body: { error } });
+  if (url === "/reseal/schedules") {
+    if (method === "GET") return ok({ schedules: state.schedules });
+    if (state.scheduleError) {
+      return fail(state.scheduleError.status, state.scheduleError.error);
+    }
+    const input = body as ResealScheduleInput;
+    const created: ResealSchedule = {
+      id: `sch-new-${++state.created}`,
+      ...input,
+      next_run_at: input.enabled
+        ? new Date(Date.now() + input.interval_days * DAY).toISOString()
+        : null,
+      created_by: login,
+      created_at: new Date().toISOString(),
+    };
+    state.schedules.push(created);
+    return ok(created, 201);
+  }
+  const one = /^\/reseal\/schedules\/([^/]+)(\/run)?$/.exec(url);
+  if (one) {
+    const id = decodeURIComponent(one[1]!);
+    const at = state.schedules.findIndex((s) => s.id === id);
+    const schedule = state.schedules[at];
+    if (!schedule) return fail(404, "schedule not found");
+    if (one[2] && method === "POST") {
+      if (state.runError) {
+        return fail(state.runError.status, state.runError.error);
+      }
+      if (schedule.active_run_id) {
+        return fail(409, "a run of this schedule is already in progress");
+      }
+      const started: ResealRunSummary = resealRun({
+        id: `run-new-${++state.created}`,
+        schedule_id: id,
+        schedule_name: schedule.name,
+        trigger: "manual",
+        requested_by: login,
+        status: "queued",
+        repos: { total: 0, done: 0, hidden: 0 },
+      });
+      state.runs.unshift(started);
+      schedule.active_run_id = started.id;
+      schedule.last_run = started;
+      return ok(started, 202);
+    }
+    if (method === "DELETE") {
+      // as the control plane, deleting a schedule cancels its active run
+      const active = state.runs.find((r) => r.id === schedule.active_run_id);
+      if (active) {
+        active.status = "cancelled";
+        active.finished_at = new Date().toISOString();
+      }
+      state.schedules.splice(at, 1);
+      return { status: 204, body: "" };
+    }
+    if (method === "PATCH") {
+      if (state.scheduleError) {
+        return fail(state.scheduleError.status, state.scheduleError.error);
+      }
+      const patch = body as Partial<ResealScheduleInput>;
+      const next = { ...schedule, ...patch, updated_by: login };
+      if (patch.enabled === false) next.next_run_at = null;
+      if (patch.enabled === true && !schedule.enabled) {
+        next.next_run_at = new Date(
+          Date.now() + next.interval_days * DAY,
+        ).toISOString();
+      }
+      state.schedules[at] = next;
+      return ok(next);
+    }
+  }
+  if (url === "/reseal/runs" && method === "GET") {
+    const runs = state.runs.filter(
+      (r) => !params?.schedule || r.schedule_id === params.schedule,
+    );
+    return ok({ runs: runs.slice(0, Number(params?.limit ?? 50)) });
+  }
+  const run = /^\/reseal\/runs\/([^/]+)(\/cancel)?$/.exec(url);
+  if (run) {
+    const id = decodeURIComponent(run[1]!);
+    const summary = state.runs.find((r) => r.id === id);
+    if (!summary) return fail(404, "run not found");
+    if (run[2] && method === "POST") {
+      if (summary.status !== "queued" && summary.status !== "running") {
+        return fail(409, "the run has finished");
+      }
+      summary.status = "cancelled";
+      summary.finished_at = new Date().toISOString();
+      for (const s of state.schedules) {
+        if (s.active_run_id === id) delete s.active_run_id;
+      }
+      return ok(summary);
+    }
+    if (method === "GET") {
+      return ok(state.details[id] ?? { ...summary, repositories: [] });
+    }
+  }
+  if (url === "/reseal/pull-requests" && method === "GET") {
+    const filter = params?.state ?? "open";
+    return ok({
+      pull_requests: state.pullRequests.filter(
+        (pr) => filter === "all" || pr.state === filter,
+      ),
+      hidden: state.hidden,
+    });
+  }
+  return fail(404, "not found");
+}
+
+/** A schedule of example-org/apps every 75 days, created by alice. */
+export function resealSchedule(
+  overrides: Partial<ResealSchedule> & { id: string },
+): ResealSchedule {
+  return {
+    name: "Apps",
+    repos: ["example-org/apps"],
+    orgs: [],
+    interval_days: 75,
+    enabled: true,
+    // an hour past 40 days, so it reads "in 40d" however long tests take
+    next_run_at: new Date(NOW + 40 * DAY + 3_600_000).toISOString(),
+    created_by: "alice",
+    created_at: iso(35 * DAY),
+    ...overrides,
+  };
+}
+
+/** A run of the Apps schedule that succeeded an hour ago. */
+export function resealRun(
+  overrides: Partial<ResealRunSummary> & { id: string },
+): ResealRunSummary {
+  return {
+    schedule_id: "sch-apps",
+    schedule_name: "Apps",
+    trigger: "schedule",
+    requested_by: "alice",
+    status: "succeeded",
+    started_at: iso(3_600_000),
+    finished_at: iso(3_600_000 - 252_000),
+    repos: { total: 2, done: 2, hidden: 0 },
+    values: { resealed: 3, current: 10, failed: 0 },
+    pull_requests: 1,
+    ...overrides,
+  };
+}
+
+/** An open reseal pull request a run of Apps opened two days ago. */
+export function resealPullRequest(
+  overrides: Partial<ResealPullRequest> & { number: number },
+): ResealPullRequest {
+  const repo = overrides.repo ?? "example-org/apps";
+  return {
+    repo,
+    url: `https://github.com/${repo}/pull/${overrides.number}`,
+    title: "Reseal 3 values in 2 files for dev",
+    branch: "sealer/dev/reseal-run-1",
+    state: "open",
+    source: "schedule",
+    schedule_id: "sch-apps",
+    schedule_name: "Apps",
+    run_id: "run-1",
+    requested_by: "alice",
+    opened_at: iso(2 * DAY),
+    checked_at: iso(5 * 60_000),
+    values: 3,
+    files: 2,
+    from_keys: [KEY_A.fingerprint],
+    ...overrides,
+  };
+}
+
+/** A file reseal of the billing file, done: 1 resealed, 1 current. */
+export function fileReseal(overrides: Partial<FileReseal> = {}): FileReseal {
+  return {
+    id: "01J00000000000000000000RES",
+    path: "deploy/billing/sealed-secret.yaml",
+    status: "done",
+    values: { total: 2, resealed: 1, current: 1, failed: 0, pending: 0 },
+    agent: { id: "dev-use1-blue", cluster: "dev-use1-blue", region: "use1" },
+    created_at: iso(1_000),
+    ...overrides,
   };
 }

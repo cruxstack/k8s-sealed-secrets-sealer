@@ -74,7 +74,7 @@ agents:
   - id: dup
     cluster: blue
     region: use1
-    capabilities: [seal, cleanup]
+    capabilities: [seal, cleanup, reseal]
     identity:
       k8s: {issuer: missing, subject: "user:alice"}
   - id: dup
@@ -95,6 +95,7 @@ agents:
 		`duplicate capability "seal"`,
 		`unknown capability "root"`,
 		`capability "cleanup" needs "keys"`,
+		`capability "reseal" needs "keys"`,
 		"set exactly one of identity.k8s and identity.aws",
 		`unknown issuer "missing"`,
 		"subject must be system:serviceaccount",

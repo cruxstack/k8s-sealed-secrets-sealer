@@ -81,6 +81,10 @@ type Options struct {
 	// PollInterval is how often a held commands poll checks for new
 	// commands. Zero means DefaultPollInterval.
 	PollInterval time.Duration
+	// TickInterval is how often Tick is called (on Lambda, by a schedule).
+	// Each open reseal pull request is checked about every 15 ticks. Zero
+	// means DefaultTickInterval.
+	TickInterval time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -119,6 +123,7 @@ type Server struct {
 
 	keyRenewPeriod time.Duration
 	pollInterval   time.Duration
+	tickInterval   time.Duration
 
 	// agents is the registry in force and the login verifiers built for it,
 	// replaced together when the registry is read again
@@ -164,6 +169,10 @@ func New(opts Options) *Server {
 	if pollInterval <= 0 {
 		pollInterval = DefaultPollInterval
 	}
+	tickInterval := opts.TickInterval
+	if tickInterval <= 0 {
+		tickInterval = DefaultTickInterval
+	}
 	s := &Server{
 		logger:     logger,
 		version:    opts.Version,
@@ -182,6 +191,7 @@ func New(opts Options) *Server {
 
 		keyRenewPeriod: keyRenewPeriod,
 		pollInterval:   pollInterval,
+		tickInterval:   tickInterval,
 		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
 		knownEscrow:    map[string]knownCopies{},
@@ -197,6 +207,9 @@ type agentAccess struct {
 	reg    *registry.Registry
 	logins map[string]LoginVerifier
 }
+
+// Env names the env the server serves.
+func (s *Server) Env() string { return s.env }
 
 // currentRegistry returns the registry in force. A handler reads it once
 // and uses that throughout.
@@ -287,6 +300,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/v1/admin"+revoke, keyChange(s.setKeyStatus(store.KeyRevoked)))
 		mux.HandleFunc("POST /api/v1/admin"+reinstate, keyChange(s.setKeyStatus(store.KeyActive)))
 		mux.HandleFunc("POST /api/v1/admin"+del, keyChange(s.deleteKey))
+		// the token reads resealing as it reads the fleet, every repository
+		// included, and changes nothing
+		mux.HandleFunc("GET /api/v1/admin/reseal/schedules", s.requireAdmin(s.listSchedules))
+		mux.HandleFunc("GET /api/v1/admin/reseal/runs", s.requireAdmin(s.listRuns))
+		mux.HandleFunc("GET /api/v1/admin/reseal/runs/{id}", s.requireAdmin(s.getRun))
+		mux.HandleFunc("GET /api/v1/admin/reseal/pull-requests", s.requireAdmin(s.listResealPulls))
 	}
 
 	if u := s.users; u != nil {
@@ -302,6 +321,22 @@ func (s *Server) Handler() http.Handler {
 		if s.repos != nil {
 			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.limit(s.listRepos, limitRepos)))
 			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.limit(s.listFiles, limitFiles)))
+
+			// resealing's schedules, runs and pull requests are for admins;
+			// views that name repositories show only those the admin can
+			// read
+			read := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireAdmin(h)) }
+			change := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireCSRF(u.RequireAdmin(h))) }
+			const schedules, runs = "/api/v1/reseal/schedules", "/api/v1/reseal/runs"
+			mux.HandleFunc("GET "+schedules, read(s.listSchedules))
+			mux.HandleFunc("POST "+schedules, change(s.createSchedule))
+			mux.HandleFunc("PATCH "+schedules+"/{id}", change(s.updateSchedule))
+			mux.HandleFunc("DELETE "+schedules+"/{id}", change(s.deleteSchedule))
+			mux.HandleFunc("POST "+schedules+"/{id}/run", change(s.runSchedule))
+			mux.HandleFunc("GET "+runs, read(s.listRuns))
+			mux.HandleFunc("GET "+runs+"/{id}", read(s.limit(s.getRun, limitResealViews)))
+			mux.HandleFunc("POST "+runs+"/{id}/cancel", change(s.cancelRun))
+			mux.HandleFunc("GET /api/v1/reseal/pull-requests", read(s.limit(s.listResealPulls, limitResealViews)))
 		}
 		if s.repos != nil && s.transit != nil {
 			// state-changing routes need the CSRF token
@@ -315,6 +350,10 @@ func (s *Server) Handler() http.Handler {
 			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
 			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
 			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.limit(s.createPullRequest, limitPulls)))
+			// resealing a file is for env admins, who must also be able to
+			// write to the repository, as for a seal
+			mux.HandleFunc("POST "+session+"/{id}/reseals", write(u.RequireAdmin(s.limit(s.requestReseal, limitReseals))))
+			mux.HandleFunc("GET "+session+"/{id}/reseals/{reseal}", u.RequireUser(s.getReseal))
 		}
 	}
 

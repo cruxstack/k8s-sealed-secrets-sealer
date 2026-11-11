@@ -98,4 +98,7 @@ func TestCapabilities(t *testing.T) {
 	if CommandCapability[CommandKeysDelete] != CapabilityCleanup {
 		t.Error("keys.delete.v1 is not cleanup's")
 	}
+	if CommandCapability[CommandReseal] != CapabilityReseal || CapabilityNeeds[CapabilityReseal] != CapabilityKeys {
+		t.Error("reseal.v1 is not reseal's, or reseal does not need keys")
+	}
 }

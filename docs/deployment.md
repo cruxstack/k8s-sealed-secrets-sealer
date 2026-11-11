@@ -193,6 +193,9 @@ capabilities:
   # count the values sealed with each key, so unused keys can be deleted,
   # and remove deleted keys; needs keys
   cleanup: true
+  # move values off older keys onto the env key, so they can be deleted;
+  # needs keys
+  reseal: true
 kms:
   # the replicas in this cluster's region
   transitKeyId: arn:aws:kms:us-east-2:333333333333:key/mrk-prod-transit
@@ -211,6 +214,20 @@ admin deleted. It needs `keys`, and the chart refuses it without.
 counts. An admin can delete a key only once every
 cluster's agent counts (design section 10), so turn `cleanup` on in every
 cluster of an env, in its values and its registry entry, or in none.
+
+`reseal` lets the agent move values sealed with older keys onto the env key
+(design section 16): it decrypts only the RSA-wrapped one-time key of each
+value, with the key Secrets `keys` lets it read, and wraps it again for the
+env key under the same label. It adds no RBAC, needs `keys`, and the chart
+refuses it without. An agent moves values only onto the key its own
+controller seals with, never onto an older one, so the control plane
+sends reseals only to agents whose controller seals with the env key; a
+value whose key the agent's cluster does not hold fails there. Key sync
+gives every cluster every key, so any such agent can reseal any value of
+the env: a few with `reseal`, in clusters that are always up, are
+enough. Clusters made in the same second may each seal with their own
+key; until a renewal gives them one newer key, only the cluster whose own
+key is the env key reseals, so give that one `reseal` too.
 
 Installed with `helm install sealer-agent ... --namespace sealer`, the chart
 creates the service account `sealer-agent` (the release's full name, unless
@@ -279,14 +296,14 @@ agents:
   - id: prod-use1-blue
     cluster: prod-use1-blue
     region: use1
-    capabilities: [seal, keys, renewal, cleanup]
+    capabilities: [seal, keys, renewal, cleanup, reseal]
     identity:
       aws:
         roleArn: arn:aws:iam::333333333333:role/sealer-agent-prod-use1-blue
   - id: prod-use2-blue
     cluster: prod-use2-blue
     region: use2
-    capabilities: [seal, keys, cleanup]
+    capabilities: [seal, keys, cleanup, reseal]
     identity:
       aws:
         roleArn: arn:aws:iam::333333333333:role/sealer-agent-prod-use2-blue
@@ -323,7 +340,7 @@ can seal for any of its clusters.
 | `agents[].region`             | The cluster's region label (`use1`), which documents'  |
 |                               | region annotations name.                               |
 | `agents[].capabilities`       | What the agent may do: `seal`, `keys`, `renewal`,      |
-|                               | `cleanup` (which needs `keys`).                        |
+|                               | `cleanup` and `reseal` (which need `keys`).            |
 | `agents[].identity.aws`       | `roleArn`, and optionally `roleId` (`AROA...`).        |
 | `agents[].identity.k8s`       | `issuer` (an issuer's `name`) and `subject`            |
 |                               | (`system:serviceaccount:<namespace>:<name>`).          |
@@ -444,6 +461,24 @@ Its role needs:
   `us-east-2`);
 - `ssm:GetParameter` on its parameters, and `kms:Decrypt` for those that are
   SecureStrings.
+
+Reseal schedules (design section 16) run on ticks. On Lambda, an
+EventBridge Scheduler schedule invokes the function every minute with the
+payload `{"sealer": "tick"}`; without it, schedules never start and runs
+never move on. The function ticks every env it serves within the time the
+invocation has, less 10 seconds, so give it a timeout of a minute or so.
+The schedule's role needs `lambda:InvokeFunction` on the function:
+
+```sh
+aws scheduler create-schedule --name sealer-tick \
+  --schedule-expression 'rate(1 minute)' --flexible-time-window Mode=OFF \
+  --target '{"Arn": "<function ARN>", "RoleArn": "<scheduler role ARN>", "Input": "{\"sealer\": \"tick\"}"}'
+```
+
+In a container, the control plane ticks on its own every
+`APP_TICK_INTERVAL` (the chart's `tickInterval`, a minute by default). On
+Lambda, set `APP_TICK_INTERVAL` to the schedule's rate if it is not a
+minute: each open reseal pull request is checked about every 15 ticks.
 
 Each env's table has a string partition key `pk` and a string sort key
 `sk`, TTL on `expires_at`, point-in-time recovery and a customer-managed

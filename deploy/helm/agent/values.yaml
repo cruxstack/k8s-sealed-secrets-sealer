@@ -61,6 +61,12 @@ capabilities:
   # not only the controller's. It also lets the agent delete Secrets in the
   # controller's namespace, so it can delete keys there. Needs keys.
   cleanup: false
+  # reseal values: move values sealed with older keys onto the env key, so
+  # those keys can be deleted once nothing uses them. The agent decrypts
+  # only the RSA-wrapped one-time key of each value, with the key Secrets
+  # keys lets it read, and wraps it again for the env key under the same
+  # label; it never decrypts a value. Adds no RBAC. Needs keys.
+  reseal: false
 
 # The control plane this agent checks in with (required). It must be https;
 # allowInsecure permits plain http for local stacks only.

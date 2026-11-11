@@ -51,6 +51,10 @@ kms:
 aws:
   region: us-east-1
 
+# faster than the 1m default, so reseal runs move on quickly here; each open
+# reseal pull request is checked about every 15 ticks (75s)
+tickInterval: 5s
+
 log:
   level: debug
   format: json

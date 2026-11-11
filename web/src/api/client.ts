@@ -1,4 +1,4 @@
-import axios, { type AxiosError } from "axios";
+import axios, { AxiosHeaders, type AxiosError } from "axios";
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
 
@@ -62,12 +62,31 @@ const GENERIC_ERROR_MESSAGE = "An unexpected error occurred. Please try again.";
  */
 export class ApiError extends Error {
   readonly status: number | undefined;
+  /** Seconds to wait before asking again, from a 429's or 503's Retry-After. */
+  readonly retryAfter: number | undefined;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, retryAfter?: number) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.retryAfter = retryAfter;
   }
+}
+
+/** A response header, whatever its case and however axios holds it. */
+function headerValue(headers: unknown, name: string): unknown {
+  if (headers instanceof AxiosHeaders) return headers.get(name);
+  if (!isRecord(headers)) return undefined;
+  const key = Object.keys(headers).find(
+    (k) => k.toLowerCase() === name.toLowerCase(),
+  );
+  return key === undefined ? undefined : headers[key];
+}
+
+/** Retry-After in seconds; only the delay form, which the API sends. */
+function retryAfterSeconds(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
 
 /** Messages for statuses whose bodies say nothing more useful. */
@@ -110,7 +129,7 @@ function messageFromEnvelope(status: number, data: unknown): string | null {
  */
 export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiError) {
-    return new ApiError(error.message, error.status);
+    return new ApiError(error.message, error.status, error.retryAfter);
   }
 
   if (axios.isAxiosError(error)) {
@@ -131,7 +150,11 @@ export function toApiError(error: unknown): ApiError {
       messageFromEnvelope(status, response.data) ??
       STATUS_MESSAGES[status] ??
       GENERIC_ERROR_MESSAGE;
-    return new ApiError(message, status);
+    return new ApiError(
+      message,
+      status,
+      retryAfterSeconds(headerValue(response.headers, "Retry-After")),
+    );
   }
 
   return new ApiError(GENERIC_ERROR_MESSAGE);

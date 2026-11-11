@@ -204,11 +204,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls", s.withInstallation("pull_requests", "read", s.listPulls))
 	mux.HandleFunc("POST /repos/{owner}/{repo}/pulls", s.withInstallation("pull_requests", "write", s.createPull))
 	mux.HandleFunc("PATCH /repos/{owner}/{repo}/pulls/{number}", s.withInstallation("pull_requests", "write", s.updatePull))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}", s.withInstallation("pull_requests", "read", s.getPull))
 
 	// not GitHub APIs: the data of a pull request for the end-to-end tests,
 	// and the page its html_url opens, which would overlap the API's paths
 	// in one mux
 	mux.HandleFunc("GET /_mock/repos/{owner}/{repo}/pulls/{number}", s.pullJSON)
+	// and what people do on GitHub, for the end-to-end tests: push files,
+	// close or merge a pull request
+	mux.HandleFunc("POST /_mock/repos/{owner}/{repo}/commits", s.pushFiles)
+	mux.HandleFunc("POST /_mock/repos/{owner}/{repo}/pulls/{number}/close", s.closePull(false))
+	mux.HandleFunc("POST /_mock/repos/{owner}/{repo}/pulls/{number}/merge", s.closePull(true))
 	pages := http.NewServeMux()
 	pages.HandleFunc("GET /{owner}/{repo}/pull/{number}", s.pullHTML)
 	return s.withFaults(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

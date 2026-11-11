@@ -17,6 +17,9 @@ type Target struct {
 	Namespace string
 	Name      string
 	Scope     string
+	// Index is the document's position in the file, for a value of
+	// documents named by position (Value.ByIndex).
+	Index int
 }
 
 // Value is a sealed value to write into a file: one ciphertext for each of
@@ -31,6 +34,10 @@ type Value struct {
 	// be exactly the file's documents for the env in its regions.
 	Targets     []Target
 	Ciphertexts []string
+	// ByIndex names the value's documents by position instead, each of
+	// which must still be that document: a resealed value goes only into
+	// the documents whose value was resealed.
+	ByIndex bool
 }
 
 // NewPullRequest is a pull request of sealed values.
@@ -67,6 +74,12 @@ func (s *Service) OpenPullRequest(ctx context.Context, user *userauth.User, owne
 	if err != nil {
 		return githubapp.PullRequest{}, err
 	}
+	return s.openPullRequest(ctx, r, pr)
+}
+
+// openPullRequest opens a pull request of values in a repository, whoever
+// it is for.
+func (s *Service) openPullRequest(ctx context.Context, r githubapp.Repository, pr NewPullRequest) (githubapp.PullRequest, error) {
 	snap, err := s.snapshot(ctx, r, pr.Commit)
 	if err != nil {
 		return githubapp.PullRequest{}, err
@@ -147,6 +160,9 @@ func (s *Service) render(ctx context.Context, r githubapp.Repository, snap snaps
 	at := map[slot]int{}
 	for _, v := range values {
 		want := inRegions(docs, v.Regions)
+		if v.ByIndex {
+			want = atIndexes(docs, v.Targets)
+		}
 		if !sameTargets(want, v.Targets) || len(v.Ciphertexts) != len(want) {
 			return githubapp.FileChange{}, &FileError{Path: filePath,
 				Reason: "its documents for the " + s.env + " env no longer match what " + v.Key + " was sealed for; seal it again"}
@@ -185,6 +201,21 @@ func inRegions(docs []manifest.Document, regions []string) []manifest.Document {
 	for _, d := range docs {
 		if slices.Contains(regions, d.Region) {
 			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// atIndexes returns the documents at the targets' positions, as many as it
+// finds.
+func atIndexes(docs []manifest.Document, targets []Target) []manifest.Document {
+	var out []manifest.Document
+	for _, t := range targets {
+		for _, d := range docs {
+			if d.Index == t.Index {
+				out = append(out, d)
+				break
+			}
 		}
 	}
 	return out

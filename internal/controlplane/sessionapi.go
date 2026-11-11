@@ -64,6 +64,10 @@ type changeView struct {
 	// KeyRevoked is set when the key it was sealed with has since been
 	// revoked: it must be sealed again, or removed, before a pull request.
 	KeyRevoked bool `json:"key_revoked,omitempty"`
+	// Kind is "seal", or "reseal" for values a reseal moved onto the env
+	// key (Fingerprint) off the keys in ResealedFrom.
+	Kind         string   `json:"kind"`
+	ResealedFrom []string `json:"resealed_from,omitempty"`
 }
 
 type targetView struct {
@@ -111,16 +115,22 @@ func viewSession(s store.Session, changes []store.Change, revoked map[string]sto
 	slices.SortFunc(changes, compareChanges)
 	for _, c := range changes {
 		_, keyRevoked := revoked[c.Fingerprint]
+		kind := store.ChangeSeal
+		if c.Resealed() {
+			kind = store.ChangeReseal
+		}
 		v.Changes = append(v.Changes, changeView{
-			ID:          c.ID,
-			Path:        c.Path,
-			Key:         c.Key,
-			Regions:     c.Regions,
-			Targets:     viewTargets(c.Targets),
-			SealedAt:    c.SealedAt,
-			SealedBy:    agent(c.AgentID),
-			Fingerprint: c.Fingerprint,
-			KeyRevoked:  keyRevoked,
+			ID:           c.ID,
+			Path:         c.Path,
+			Key:          c.Key,
+			Regions:      c.Regions,
+			Targets:      viewTargets(c.Targets),
+			SealedAt:     c.SealedAt,
+			SealedBy:     agent(c.AgentID),
+			Fingerprint:  c.Fingerprint,
+			KeyRevoked:   keyRevoked,
+			Kind:         kind,
+			ResealedFrom: c.ResealedFrom,
 		})
 	}
 	return v

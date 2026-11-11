@@ -16,7 +16,9 @@ request. They never pick a cluster, a region or a certificate.
 > (every agent, its controller's keys and the env's key state); everyone else
 > sees whether sealing works. Agents keep every cluster holding the same keys,
 > and can count how many values each key seals, so admins can delete the old
-> keys nothing uses.
+> keys nothing uses. Admins can reseal values still on old keys onto the env
+> key, a file at a time or on a schedule that opens one pull request per
+> repository; resealing does not rotate values.
 > One deployment can also serve several envs, such as dev and prod, on one
 > URL, with one sign-in and per-env teams.
 > Releases publish the control plane for Lambda, container images and Helm
@@ -61,8 +63,9 @@ controllers never talk to the control plane.
   Lambda behind API Gateway, or as a container. It has no Kubernetes client
   and knows nothing about the cluster it runs in.
 - **Agents:** one per cluster, beside the sealed-secrets controller. They only
-  make outbound calls. They report the controller's keys, seal values and keep
-  every cluster in the environment holding the same keys.
+  make outbound calls. They report the controller's keys, seal values, keep
+  every cluster in the environment holding the same keys, and can reseal
+  values onto the env key without decrypting them.
 - **Security:** values travel to agents encrypted with a KMS key the control
   plane can only encrypt with. Sealing keys are escrowed under a KMS key the
   control plane cannot use at all. Agents run with namespaced RBAC (the

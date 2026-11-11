@@ -31,12 +31,22 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/webui"
 )
 
-// NewControlPlane returns the control plane's HTTP handler for the envs it
-// serves on one URL (config.LoadControlPlanes): one sign-in and web UI for
-// all of them, and for each its own registry, store, transit key and
-// agents. It makes no network calls, except to create DynamoDB tables when
-// the configuration asks for it (local emulators only).
-func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *slog.Logger) (http.Handler, error) {
+// ControlPlane is the control plane for the envs it serves on one URL: their
+// HTTP handler, and their ticks, which advance reseal schedules and runs.
+type ControlPlane struct {
+	http.Handler
+	// TickInterval is how often Tick is to be called.
+	TickInterval time.Duration
+	envs         []*controlplane.Server
+	logger       *slog.Logger
+}
+
+// NewControlPlane returns the control plane for the envs it serves on one
+// URL (config.LoadControlPlanes): one sign-in and web UI for all of them,
+// and for each its own registry, store, transit key and agents. It makes no
+// network calls, except to create DynamoDB tables when the configuration
+// asks for it (local emulators only).
+func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *slog.Logger) (*ControlPlane, error) {
 	if len(cfgs) == 0 {
 		return nil, errors.New("no env to serve")
 	}
@@ -97,14 +107,60 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 		}
 	}
 	logger.InfoContext(ctx, "starting control plane",
-		"version", version.Version, "envs", len(cfgs), "github_org", shared.GitHubOrg)
-	return controlplane.NewHost(controlplane.HostOptions{
-		Version: version.Version,
-		Users:   users,
-		Envs:    envs,
-		WebUI:   webui.Handler(),
-		HSTS:    strings.HasPrefix(shared.PublicURL, "https://"),
-	}), nil
+		"version", version.Version, "envs", len(cfgs), "github_org", shared.GitHubOrg, "tick_interval", shared.TickInterval.String())
+	return &ControlPlane{
+		Handler: controlplane.NewHost(controlplane.HostOptions{
+			Version: version.Version,
+			Users:   users,
+			Envs:    envs,
+			WebUI:   webui.Handler(),
+			HSTS:    strings.HasPrefix(shared.PublicURL, "https://"),
+		}),
+		TickInterval: shared.TickInterval,
+		envs:         envs,
+		logger:       logger,
+	}, nil
+}
+
+// tickTime bounds a tick the ticker starts: ticks advance work a bounded
+// step, and one that runs long is followed by the next at once.
+const tickTime = 50 * time.Second
+
+// Tick advances every env's reseal schedules and runs once, each env in its
+// share of the time ctx leaves, and returns the errors it met.
+func (c *ControlPlane) Tick(ctx context.Context) error {
+	var errs []error
+	for i, env := range c.envs {
+		envCtx, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			envCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(c.envs)-i))
+		}
+		if err := env.Tick(envCtx); err != nil {
+			errs = append(errs, fmt.Errorf("env %s: %w", env.Env(), err))
+		}
+		cancel()
+	}
+	return errors.Join(errs...)
+}
+
+// RunTicker ticks every TickInterval until ctx ends, one tick at a time:
+// the container's way to advance reseal schedules and runs. Lambda is
+// invoked by a schedule instead (cmd/lambda).
+func (c *ControlPlane) RunTicker(ctx context.Context) error {
+	t := time.NewTicker(c.TickInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+		tickCtx, cancel := context.WithTimeout(ctx, tickTime)
+		if err := c.Tick(tickCtx); err != nil && ctx.Err() == nil {
+			c.logger.ErrorContext(ctx, "reseal tick failed", "event", "reseal.tick_failed", "error", err)
+		}
+		cancel()
+	}
 }
 
 // newEnv returns one env's server. Its registry must not register an
@@ -178,6 +234,7 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 		HSTS:         strings.HasPrefix(cfg.PublicURL, "https://"),
 
 		KeyRenewPeriod: cfg.KeyRenewPeriod,
+		TickInterval:   cfg.TickInterval,
 
 		AdminTokenKeyChanges: cfg.AdminTokenKeyChanges,
 	}), nil

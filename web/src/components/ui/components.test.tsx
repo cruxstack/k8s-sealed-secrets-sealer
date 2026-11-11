@@ -11,6 +11,7 @@ import { Lock } from "lucide-react";
 import { Alert } from "./alert";
 import { Badge } from "./badge";
 import { IconButton } from "./icon-button";
+import { ReasonButton } from "./reason-button";
 import { FilterInput } from "./filter-input";
 import { RegionTag } from "./region-tag";
 import { RelativeTime } from "./relative-time";
@@ -259,6 +260,52 @@ describe("IconButton", () => {
       expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
     );
     // a touch screen has no hover: a tap shows it
+    fireEvent.pointerDown(button, { pointerType: "touch" });
+    fireEvent.click(button);
+    await waitFor(() => expect(tooltipShown()).toContain(why));
+    expect(clicked).toBe(0);
+  });
+});
+
+describe("ReasonButton", () => {
+  const why = "An env has at most 50 schedules. Delete one first.";
+
+  it("acts on a click, with no tooltip, when it can be used", () => {
+    let clicked = 0;
+    render(
+      <TooltipProvider>
+        <ReasonButton onClick={() => clicked++}>New schedule</ReasonButton>
+      </TooltipProvider>,
+    );
+    const button = screen.getByRole("button", { name: "New schedule" });
+    expect(button).not.toHaveAttribute("aria-disabled");
+    fireEvent.click(button);
+    expect(clicked).toBe(1);
+  });
+
+  it("when it cannot be used, keeps its label, says why, and does nothing else", async () => {
+    let clicked = 0;
+    render(
+      <TooltipProvider>
+        <ReasonButton reason={why} onClick={() => clicked++}>
+          New schedule
+        </ReasonButton>
+      </TooltipProvider>,
+    );
+    const button = screen.getByRole("button", { name: "New schedule" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveClass("opacity-50", "cursor-not-allowed");
+    expect(button).toHaveAccessibleDescription(why);
+    fireEvent.focus(button);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(why);
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
+    // a tap shows why
     fireEvent.pointerDown(button, { pointerType: "touch" });
     fireEvent.click(button);
     await waitFor(() => expect(tooltipShown()).toContain(why));

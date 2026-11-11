@@ -117,7 +117,7 @@ describe("command palette", () => {
     ).toBeInTheDocument();
   });
 
-  it("offers the fleet to admins only", async () => {
+  it("offers the fleet and resealing to admins only", async () => {
     renderAt("/secrets");
     fireEvent.keyDown(
       await screen.findByRole("button", { name: /account menu/i }),
@@ -130,5 +130,28 @@ describe("command palette", () => {
     expect(
       within(dialog).queryByRole("option", { name: /^fleet/i }),
     ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("option", { name: /^reseal/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("goes to resealing, found by what it is for", async () => {
+    const router = renderAt("/secrets", ADMIN);
+    fireEvent.keyDown(
+      await screen.findByRole("button", { name: /account menu/i }),
+      { key: "k", ctrlKey: true },
+    );
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("combobox");
+    fireEvent.change(input, { target: { value: "schedules" } });
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByRole("option", { name: /^fleet/i }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/dev/reseal"),
+    );
   });
 });

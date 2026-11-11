@@ -63,7 +63,8 @@ namespace; the e2e suite checks that no agent can reach another cluster's
 controller. Agents have the `cleanup` capability, whose ClusterRole lets
 each read every simulated cluster's SealedSecrets; each counts only those
 in the namespaces its controller watches, read from the controller's
-arguments, every 30 seconds.
+arguments, every 30 seconds. They have `reseal` too, and the control plane
+ticks every 5 seconds, so reseal runs move on quickly.
 
 The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
@@ -147,14 +148,17 @@ write permissions. Pull requests the control plane opens get a page on the
 mock, which the UI links to (`http://localhost:4104/<owner>/<repo>/pull/<n>`
 by default), showing the description, the commit message and each file's
 diff. The end-to-end tests read the same pull request as JSON from
-`/_mock/repos/<owner>/<repo>/pulls/<n>`. Pull requests live in the mock's
-memory, so they are gone when it restarts. Tilt generates the App's key pair
-for each stack (`.tools/dev/<context>/github-app.pem`, never committed): the
-control plane signs App JWTs with the private key and the mock checks them
-with the public key. Calls with installation tokens get GitHub's rate limit
-headers. Go tests can give the mock a rate limit to refuse calls past
-(`Options.RateLimit`), or have it fail a request, after acting on it or not
-(`FailNext`).
+`/_mock/repos/<owner>/<repo>/pulls/<n>`, close or merge it with a `POST`
+to `.../pulls/<n>/close` or `.../merge`, and push files with a `POST` of
+`{"branch", "files": {path: content}}` to
+`/_mock/repos/<owner>/<repo>/commits`. Pull requests live in the mock's
+memory, so they are gone when it restarts. Tilt generates the App's key
+pair for each stack (`.tools/dev/<context>/github-app.pem`, never
+committed): the control plane signs App JWTs with the private key and the
+mock checks them with the public key. Calls with installation tokens get
+GitHub's rate limit headers. Go tests can give the mock a rate limit to
+refuse calls past (`Options.RateLimit`), or have it fail a request, after
+acting on it or not (`FailNext`).
 
 The UI is built into the control plane binary; Tilt rebuilds it when
 `web/` changes. For hot reload while working on the UI, run
@@ -238,7 +242,23 @@ the run for inspection. Besides bringing the stack up, it checks that:
   computed from each certificate with `openssl` and `ssh-keygen`) and the
   fleet shows it held by none; reinstated, it is restored to every cluster
   from escrow and the env key is unchanged. These checks take about two to
-  three minutes, and wait at most about nine.
+  three minutes, and wait at most about nine;
+- a file with one value sealed with an older key (by `kubeseal`, with that
+  key's certificate) and one with the env key, pushed to the mock: alice
+  reseals it in a session, which reseals the first in every document and
+  finds the second current; its pull request changes only the first's
+  `encryptedData` lines and says resealing does not rotate values; applied,
+  every controller unseals the resealed value, and counts it under the env
+  key and nothing more under the older one;
+- a schedule of `example-org/apps`, run now, opens one pull request on
+  `sealer/dev/reseal-<run>` changing only that value, listed among the
+  reseal pull requests with alice's from the session; a second run skips
+  the repository while it is open; closed in the mock, the tick marks it
+  closed; the agents and the control plane log resealing and no value;
+  dave gets `403` on schedules and on resealing a file; and the checks
+  remove the SealedSecrets they applied and the schedule they made, and
+  close the pull requests. These checks take about three to four minutes,
+  and wait at most about twelve.
 
 ## Local agent identity
 
@@ -350,6 +370,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_REGION_ANNOTATION`            | control plane | `k8s-sealed-secrets-sealer/region` |
 | `APP_DISCOVERY_FILE_GLOBS`         | control plane | `*sealed*.yaml,*sealed*.yml`       |
 | `APP_KEY_RENEW_PERIOD`             | control plane | `720h`                             |
+| `APP_TICK_INTERVAL`                | control plane | `1m` (1s to 10m)                   |
 | `APP_KMS_TRANSIT_KEY_ID`           | both          | required (agent: with `seal`)      |
 | `APP_KMS_ESCROW_KEY_ID`            | agent         | required with `keys`               |
 | `APP_KMS_REGION`                   | both          | a key ARN's region, else the SDK's |

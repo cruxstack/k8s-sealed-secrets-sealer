@@ -132,6 +132,10 @@ type ControlPlane struct {
 	// KeyRenewPeriod is the period the control plane asks a controller to
 	// renew its key with, when no cluster in the env renews.
 	KeyRenewPeriod time.Duration
+	// TickInterval is how often reseal schedules and runs advance: the
+	// container's ticker, or on Lambda, the schedule that invokes it. It is
+	// shared by every env.
+	TickInterval time.Duration
 
 	// KMSTransitKeyID is the KMS key (ID, ARN or alias) values are encrypted
 	// under on their way to an agent. The control plane only generates data
@@ -285,6 +289,7 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		cfg.DiscoveryFileGlobs = append(cfg.DiscoveryFileGlobs, g)
 	}
 	cfg.KeyRenewPeriod = r.duration("APP_KEY_RENEW_PERIOD", 720*time.Hour, time.Hour, 365*24*time.Hour)
+	cfg.TickInterval = r.duration("APP_TICK_INTERVAL", time.Minute, time.Second, 10*time.Minute)
 	cfg.KMSTransitKeyID = r.required(r.str("APP_KMS_TRANSIT_KEY_ID", ""), "APP_KMS_TRANSIT_KEY_ID")
 	cfg.KMSRegion = r.str("APP_KMS_REGION", "")
 	// local emulators only; the endpoint carries no credentials

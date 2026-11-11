@@ -7,19 +7,19 @@
 - **Entry points**:
   - `cmd/server/` - control plane as an HTTP server (containers, local stack)
   - `cmd/agent/` - the agent
-  - `cmd/lambda/` - control plane on Lambda: API Gateway HTTP API (payload 2.0) and function URL events to the same HTTP handler
-  - `internal/app/` - wires the control plane together from its configuration, for `cmd/server` and `cmd/lambda` alike
+  - `cmd/lambda/` - control plane on Lambda: API Gateway HTTP API (payload 2.0) and function URL events to the same HTTP handler, and `{"sealer": "tick"}` events from a schedule to ticks
+  - `internal/app/` - wires the control plane together from its configuration, for `cmd/server` and `cmd/lambda` alike, with the ticker that advances reseal schedules and runs in a container
 - **Packages**:
   - `internal/config/` - reads and validates all configuration; nothing else reads the environment
   - `internal/protocol/` - the agent API's messages and capabilities; a change here is a protocol change
-  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API, user API), shared by the server and Lambda entry points; key sync planning (escrow, restore, renewal) runs on each check-in; sessions, seal requests (transit encryption, agent choice) and seal results becoming pending changes
+  - `internal/controlplane/` - the control plane's HTTP handler (agent API, admin API, user API), shared by the server and Lambda entry points; key sync planning (escrow, restore, renewal) runs on each check-in; sessions, seal requests (transit encryption, agent choice) and seal results becoming pending changes; resealing: a file in a session, schedules and their runs driven by ticks (`Server.Tick`), and reseal pull requests
   - `internal/agentauth/` - agent login (k8s-oidc: projected service-account tokens via go-oidc; aws-sts: signed sts:GetCallerIdentity forwarded to STS, with a host allowlist and replay protection) and agent session tokens
   - `internal/registry/` - the agent registry file: who may log in, with which identity and capabilities
   - `internal/fleet/` - pure computation of agent health, the env key, missing keys and which agent seals (design section 7)
   - `internal/store/` - persistence: DynamoDB, plus an in-memory store for tests
   - `internal/keys/` - sealing key fingerprints (the controller's own format) from certificates
   - `internal/envelope/` - KMS envelope encryption (data key + AES-256-GCM, bound to an encryption context), with a fake KMS for tests
-  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes, the command runner, sealing (seal.v1), key escrow and restore, and turning on key renewal
+  - `internal/agent/` - controller access (cert via the API service proxy, key Secrets, Deployment flags), login identities (projected token or signed STS request), the control plane client, the agent loop and probes, the command runner, sealing (seal.v1), resealing (reseal.v1: rewrapping a value's one-time key for the env key), key escrow and restore, and turning on key renewal
   - `internal/httpserver/` - HTTP server with timeouts and graceful shutdown, JSON responses
   - `internal/testutil/testcerts/` - throwaway keys and certificates for tests
   - `internal/version/` - build version, set at link time

@@ -72,6 +72,15 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	if cfg.KeyRenewPeriod != 720*time.Hour {
 		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)
 	}
+	if cfg.TickInterval != time.Minute {
+		t.Errorf("TickInterval = %s, want 1m", cfg.TickInterval)
+	}
+	if cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_TICK_INTERVAL": "5s"}))); err != nil || cfg.TickInterval != 5*time.Second {
+		t.Errorf("tick interval = %v, %v", cfg, err)
+	}
+	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_TICK_INTERVAL": "1h"}))); err == nil || !strings.Contains(err.Error(), "APP_TICK_INTERVAL") {
+		t.Errorf("tick interval of an hour = %v", err)
+	}
 	if cfg.KMSTransitKeyID != "alias/sealer-transit" || cfg.KMSRegion != "" || cfg.KMSEndpoint != "" {
 		t.Errorf("KMS = %q %q %q", cfg.KMSTransitKeyID, cfg.KMSRegion, cfg.KMSEndpoint)
 	}
@@ -199,7 +208,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_CONTROLLER_NAME":    "Not_A_Label",
 		"APP_CHECKIN_INTERVAL":   "1s",
 		"APP_KEY_USAGE_INTERVAL": "10s",
-		"APP_CAPABILITIES":       "seal,root,cleanup",
+		"APP_CAPABILITIES":       "seal,root,cleanup,reseal",
 		"APP_LOG_LEVEL":          "loud",
 		"APP_LOG_FORMAT":         "xml",
 		"APP_MEMORY_LIMIT":       "128Mi",
@@ -216,6 +225,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_KEY_USAGE_INTERVAL must be between",
 		`unknown capability "root"`,
 		"APP_CAPABILITIES: cleanup needs keys",
+		"APP_CAPABILITIES: reseal needs keys",
 		"APP_MEMORY_LIMIT must be a non-negative whole number",
 		"APP_LOG_LEVEL must be",
 		"APP_LOG_FORMAT must be",
@@ -235,12 +245,12 @@ func TestLoadAgent_KeyUsageIntervalBound(t *testing.T) {
 }
 
 func TestLoadAgent_Capabilities(t *testing.T) {
-	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal,cleanup", "APP_KMS_ESCROW_KEY_ID": "alias/escrow",
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal,cleanup,reseal", "APP_KMS_ESCROW_KEY_ID": "alias/escrow",
 		"APP_KEY_USAGE_INTERVAL": "30m", "APP_MEMORY_LIMIT": "134217728"})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal,cleanup" || cfg.KeyUsageInterval != 30*time.Minute || cfg.MemoryLimit != 128<<20 {
+	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal,cleanup,reseal" || cfg.KeyUsageInterval != 30*time.Minute || cfg.MemoryLimit != 128<<20 {
 		t.Errorf("Capabilities = %q, key usage interval %s, memory limit %d", got, cfg.KeyUsageInterval, cfg.MemoryLimit)
 	}
 }

@@ -139,8 +139,12 @@ type Store interface {
 	// the limit is reached.
 	CountRequest(ctx context.Context, key string, n, limit int, windowEnd time.Time) (bool, error)
 
-	// PutCommand queues a command.
+	// PutCommand queues a command, its payload apart when it has
+	// ExternalPayload set.
 	PutCommand(ctx context.Context, c CommandRecord) error
+	// CommandPayload returns the payload of a command with an external
+	// payload, until the command is removed.
+	CommandPayload(ctx context.Context, id string) (string, bool, error)
 	// Commands returns an agent's commands, oldest first.
 	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
 	// CommandsSince returns an agent's commands whose IDs (ULIDs) were made
@@ -215,6 +219,12 @@ type Store interface {
 	// stored (the change then counts itself, and removing it frees its
 	// place) or the seal failed.
 	ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error
+	// ReserveChanges holds places, as ReserveChange does, for several
+	// changes at once, each for its seal (places maps change IDs to seal
+	// IDs): all of them, or with ErrTooManyChanges none.
+	ReserveChanges(ctx context.Context, sessionID string, places map[string]string, existing []string, max int, until, now time.Time) error
+	// ReleaseChanges gives up the places ReserveChanges held.
+	ReleaseChanges(ctx context.Context, sessionID string, places map[string]string, now time.Time) error
 	// PutChange stores a pending change, replacing the one for the same
 	// file and key unless that came from a newer seal, and reports whether
 	// it did.
@@ -231,4 +241,97 @@ type Store interface {
 	// commandID, and reports whether it did. A change a newer seal
 	// replaced in the meantime stays.
 	PruneChange(ctx context.Context, sessionID, id, commandID string) (bool, error)
+
+	// PutFileReseal records a file's values sent for resealing in a
+	// session.
+	PutFileReseal(ctx context.Context, r FileReseal) error
+	// FileReseal returns a file reseal of a session.
+	FileReseal(ctx context.Context, sessionID, id string) (FileReseal, bool, error)
+	// RecordResealOutcome records what one of a file reseal's commands did,
+	// once, and reports whether this call did.
+	RecordResealOutcome(ctx context.Context, sessionID, id, commandID string, o ResealOutcome) (bool, error)
+
+	// PutResealPullRequest records an open reseal pull request, replacing
+	// an earlier record of it.
+	PutResealPullRequest(ctx context.Context, p ResealPullRequest) error
+	// ResealPullRequests returns the open reseal pull requests, or with
+	// open false the merged and closed ones, of one repository (a RepoKey)
+	// when given, by repository and number.
+	ResealPullRequests(ctx context.Context, open bool, repoKey string) ([]ResealPullRequest, error)
+	// UpdateResealPullRequest records what GitHub said of an open reseal
+	// pull request: when it was checked and, once it is merged or closed,
+	// that, keeping it for ResealRetention among the ended ones. It reports
+	// whether the pull request was still recorded open.
+	UpdateResealPullRequest(ctx context.Context, p ResealPullRequest) (bool, error)
+
+	// CreateResealSchedule stores a new schedule. It fails with
+	// ErrTooManySchedules when the env has max already, even with
+	// concurrent calls.
+	CreateResealSchedule(ctx context.Context, s ResealSchedule, max int) error
+	// ResealSchedules returns the env's schedules, by ID.
+	ResealSchedules(ctx context.Context) ([]ResealSchedule, error)
+	// ResealSchedule returns one schedule.
+	ResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error)
+	// UpdateResealSchedule records a schedule's name, scope, interval,
+	// whether it is enabled, and who changed it when, and with setNext its
+	// next run: left alone, a next run a tick moved meanwhile stays. Its
+	// runs are left as they are. It reports whether the schedule exists.
+	UpdateResealSchedule(ctx context.Context, s ResealSchedule, setNext bool) (bool, error)
+	// DeleteResealSchedule deletes a schedule and, in the same write,
+	// cancels its active run, by by at now; it returns the schedule as it
+	// was, its active run included, and reports whether it existed.
+	DeleteResealSchedule(ctx context.Context, id, by string, now time.Time) (ResealSchedule, bool, error)
+
+	// StartResealRun records a new run of a schedule with no active run,
+	// as its active and latest run, in one write. With expectNext, the
+	// schedule's next run must still be then, and it moves to next: of
+	// ticks that start the same due run, one does. It fails with
+	// ErrRunActive when the schedule has an active run, and with
+	// ErrScheduleChanged when it is gone or its next run moved.
+	StartResealRun(ctx context.Context, run ResealRun, expectNext, next *time.Time) error
+	// ResealRun returns one run.
+	ResealRun(ctx context.Context, id string) (ResealRun, bool, error)
+	// ResealRuns returns at most limit runs, newest first, of one schedule
+	// when given.
+	ResealRuns(ctx context.Context, scheduleID string, limit int) ([]ResealRun, error)
+	// LeaseResealRun leases an active run until until, unless another
+	// lease holds it at now, and returns it with the lease.
+	LeaseResealRun(ctx context.Context, id string, until, now time.Time) (ResealRun, bool, error)
+	// SaveResealRun records a run's progress, while the lease that ends at
+	// held (epoch milliseconds) still holds it and it is active.
+	// run.LeaseUntil is the lease it keeps; 0 gives it up. A run that ends
+	// gives up its schedule's active run in the same write, and is kept
+	// ResealRetention. It reports whether it saved: not when the run was
+	// cancelled, or another tick leased it, meanwhile.
+	SaveResealRun(ctx context.Context, run ResealRun, held int64) (bool, error)
+	// CancelResealRun cancels an active run, by by at now, giving up its
+	// schedule's active run in the same write, and returns it. It reports
+	// false for a run that is not active, or does not exist.
+	CancelResealRun(ctx context.Context, id, by string, now time.Time) (ResealRun, bool, error)
+
+	// PutResealRunRepos records repositories of runs, each replacing its
+	// earlier record, and keeps each ResealRetention from now.
+	PutResealRunRepos(ctx context.Context, repos []ResealRunRepo) error
+	// ResealRunRepo returns one repository of a run.
+	ResealRunRepo(ctx context.Context, runID, key string) (ResealRunRepo, bool, error)
+	// ResealRunRepos returns a run's repositories, by key.
+	ResealRunRepos(ctx context.Context, runID string) ([]ResealRunRepo, error)
+	// NextResealRunRepos returns at most limit of a run's repositories
+	// whose keys sort after after, by key.
+	NextResealRunRepos(ctx context.Context, runID, after string, limit int) ([]ResealRunRepo, error)
+
+	// PutResealWork records what a run needs to carry on with a
+	// repository, replacing its earlier record.
+	PutResealWork(ctx context.Context, w ResealWork) error
+	// ResealWork returns it.
+	ResealWork(ctx context.Context, runID, key string) (ResealWork, bool, error)
+
+	// PutResealBatch records what one of a run's commands did, once, and
+	// reports whether this call did.
+	PutResealBatch(ctx context.Context, b ResealBatch) (bool, error)
+	// ResealBatchesDone returns the IDs of the commands of a run's
+	// repository whose batches are recorded.
+	ResealBatchesDone(ctx context.Context, runID, repoKey string) ([]string, error)
+	// ResealBatch returns one batch.
+	ResealBatch(ctx context.Context, runID, repoKey, commandID string) (ResealBatch, bool, error)
 }

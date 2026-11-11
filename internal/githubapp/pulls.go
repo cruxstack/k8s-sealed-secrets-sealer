@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -22,8 +23,10 @@ var Write = Permissions{"contents": "write", "metadata": "read", "pull_requests"
 
 // Limits on a pull request.
 const (
-	// MaxPullRequestFiles bounds the files one pull request changes.
-	MaxPullRequestFiles = 100
+	// MaxPullRequestFiles bounds the files one pull request changes: a
+	// session's pull request changes at most 50, and a run's at most the
+	// 200 files it reads of a repository.
+	MaxPullRequestFiles = 200
 	// blobConcurrency bounds parallel blob uploads.
 	blobConcurrency = 4
 )
@@ -342,6 +345,47 @@ func (c *Client) openPull(ctx context.Context, tok, owner, repo, branch string) 
 		}
 	}
 	return ghPull{}, false, nil
+}
+
+// ReadPulls is enough to read pull requests.
+var ReadPulls = Permissions{"metadata": "read", "pull_requests": "read"}
+
+// PullState is a pull request's state as GitHub has it.
+type PullState struct {
+	// Open is set while it is open; once closed, Merged says whether it
+	// was merged, MergedAt when, and ClosedAt when it closed.
+	Open     bool
+	Merged   bool
+	MergedAt *time.Time
+	ClosedAt *time.Time
+}
+
+// PullRequestState reads whether a pull request is open, merged or
+// closed.
+func (c *Client) PullRequestState(ctx context.Context, owner, repo string, number int) (PullState, error) {
+	if number <= 0 {
+		return PullState{}, fmt.Errorf("failed to read pull request: invalid number %d", number)
+	}
+	tok, err := c.Token(ctx, ReadPulls)
+	if err != nil {
+		return PullState{}, err
+	}
+	var out struct {
+		State    string     `json:"state"`
+		Merged   bool       `json:"merged"`
+		MergedAt *time.Time `json:"merged_at"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}
+	if err := c.do(ctx, http.MethodGet, c.repoURL(owner, repo, "pulls", strconv.Itoa(number)), tok, nil, maxResponseBytes, &out); err != nil {
+		return PullState{}, fmt.Errorf("failed to read pull request %s/%s#%d: %w", owner, repo, number, err)
+	}
+	switch out.State {
+	case "open":
+		return PullState{Open: true}, nil
+	case "closed":
+		return PullState{Merged: out.Merged || out.MergedAt != nil, MergedAt: out.MergedAt, ClosedAt: out.ClosedAt}, nil
+	}
+	return PullState{}, fmt.Errorf("failed to read pull request %s/%s#%d: unknown state %q", owner, repo, number, out.State)
 }
 
 // refused reports whether GitHub turned a request down for good: a 4xx

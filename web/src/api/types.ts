@@ -175,6 +175,14 @@ export interface SealingStatus {
   sealing: "ready" | "degraded" | "unavailable";
   message: string;
   clusters: { ready: number; total: number };
+  /**
+   * Whether values can be resealed: there is an env key and an agent with
+   * the `reseal` capability holds it. A control plane from before
+   * resealing leaves it out, and cannot.
+   */
+  can_reseal?: boolean;
+  /** Why values cannot be resealed, as a sentence. */
+  reseal_blocked?: string;
 }
 
 /** Body of every API error response. */
@@ -283,6 +291,13 @@ export interface PendingChange {
    * sealed again, or removed, before a pull request.
    */
   key_revoked?: boolean;
+  /**
+   * `reseal`: the file's own values, moved onto the env key by "Reseal
+   * all"; absent on changes stored before resealing, which are seals.
+   */
+  kind?: "seal" | "reseal";
+  /** On a reseal change: the keys its values came off. */
+  resealed_from?: string[];
 }
 
 /** The user's pending changes to one repository, based on one commit. */
@@ -345,5 +360,170 @@ export interface Seal {
   created_at: string;
   /** The pending change the value went into, once sealed. */
   change_id?: string;
+  error?: string;
+}
+
+/** Counts of values by what resealing did with them. */
+export interface ResealCounts {
+  /** Moved onto the env key. */
+  resealed: number;
+  /** Already on the env key: unchanged. */
+  current: number;
+  /** No key the agent holds opened them, or the agent did not answer. */
+  failed: number;
+}
+
+/** Where a run of a schedule stands. */
+export type ResealRunStatus =
+  "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+
+/**
+ * A schedule that reseals every value in its repositories, and in every
+ * repository of its orgs, every `interval_days`.
+ * GET /api/v1/reseal/schedules
+ */
+export interface ResealSchedule {
+  id: string;
+  name: string;
+  /** "owner/name" */
+  repos: string[];
+  orgs: string[];
+  interval_days: number;
+  enabled: boolean;
+  /** Null while it is paused. */
+  next_run_at: string | null;
+  created_by: string;
+  created_at: string;
+  updated_by?: string;
+  updated_at?: string;
+  /** Its latest run, if any. */
+  last_run?: ResealRunSummary;
+  /** Set while a run of it is queued or running. */
+  active_run_id?: string;
+}
+
+/** POST /api/v1/reseal/schedules, and any part of it for PATCH. */
+export interface ResealScheduleInput {
+  name: string;
+  repos: string[];
+  orgs: string[];
+  interval_days: number;
+  enabled: boolean;
+}
+
+/** One run of a schedule. GET /api/v1/reseal/runs, newest first. */
+export interface ResealRunSummary {
+  id: string;
+  schedule_id: string;
+  schedule_name: string;
+  /** `manual`: Run now, by `requested_by`. */
+  trigger: "schedule" | "manual";
+  requested_by: string;
+  status: ResealRunStatus;
+  started_at: string;
+  finished_at?: string;
+  /** `hidden`: those in repositories the viewer cannot read. */
+  repos: { total: number; done: number; hidden: number };
+  values: ResealCounts;
+  pull_requests: number;
+  error?: string;
+}
+
+/** GET /api/v1/reseal/runs/{id} */
+export interface ResealRun extends ResealRunSummary {
+  /** Only the repositories the viewer can read. */
+  repositories: ResealRunRepo[];
+}
+
+/** What a run did in one repository. */
+export interface ResealRunRepo {
+  repo: string;
+  status:
+    | "pending"
+    | "resealing"
+    | "opening"
+    | "opened"
+    | "unchanged"
+    | "skipped"
+    | "failed";
+  files: number;
+  values: ResealCounts;
+  pull_request?: { number: number; url: string };
+  /** Why it was skipped or failed, as a sentence. */
+  reason?: string;
+  /** Values that could not be resealed, at most 50. */
+  failures?: ResealFailure[];
+}
+
+/** A value that could not be resealed. */
+export interface ResealFailure {
+  path: string;
+  key: string;
+  /** The document's position in the file, counting from 0. */
+  document: number;
+  region?: string;
+  error: string;
+}
+
+export type ResealPullRequestState = "open" | "merged" | "closed";
+
+/**
+ * A pull request with resealed values: one a run opened, or one opened
+ * from a session with reseal changes.
+ */
+export interface ResealPullRequest {
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  branch: string;
+  state: ResealPullRequestState;
+  source: "schedule" | "session";
+  schedule_id?: string;
+  schedule_name?: string;
+  run_id?: string;
+  requested_by: string;
+  opened_at: string;
+  merged_at?: string;
+  closed_at?: string;
+  /** When its state was last read from GitHub. */
+  checked_at: string;
+  values: number;
+  files: number;
+  /** Fingerprints of the keys it moves values off. */
+  from_keys: string[];
+}
+
+/** GET /api/v1/reseal/pull-requests?state= */
+export interface ResealPullRequestList {
+  pull_requests: ResealPullRequest[];
+  /** How many more are in repositories the viewer cannot read. */
+  hidden: number;
+}
+
+/** Where resealing one file in a session stands. */
+export type FileResealStatus =
+  "queued" | "resealing" | "done" | "failed" | "expired";
+
+/**
+ * "Reseal all" on one file, in a session: its values on older keys move
+ * onto the env key as pending changes.
+ * POST and GET /api/v1/repos/{owner}/{repo}/session/{id}/reseals
+ */
+export interface FileReseal {
+  id: string;
+  path: string;
+  status: FileResealStatus;
+  values: ResealCounts & {
+    /** The values of this env's documents in the file. */
+    total: number;
+    /** Left out: a pending change in the session already sets them. */
+    pending: number;
+  };
+  failures?: Omit<ResealFailure, "path">[];
+  /** The pending changes it made. */
+  change_ids?: string[];
+  agent?: AgentRef;
+  created_at: string;
   error?: string;
 }

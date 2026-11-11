@@ -5,6 +5,7 @@ import {
   ChevronsUpDown,
   FileLock,
   LogOut,
+  RotateCcwKey,
   Search,
   Server,
 } from "lucide-react";
@@ -37,17 +38,22 @@ import { statusQueryOptions } from "@/api/queries/status";
 function NavLink({
   env,
   to,
+  className,
   children,
 }: {
   env: string;
-  to: "/$env/secrets" | "/$env/fleet";
+  to: "/$env/secrets" | "/$env/fleet" | "/$env/reseal";
+  className?: string;
   children: string;
 }) {
   return (
     <Link
       to={to}
       params={{ env }}
-      className="inline-flex h-9 items-center rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3"
+      className={cn(
+        "inline-flex h-9 items-center rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3",
+        className,
+      )}
       inactiveProps={{ className: "text-muted-foreground" }}
       activeProps={{
         className: "bg-muted text-foreground",
@@ -272,9 +278,20 @@ export function Header() {
                 Secrets
               </NavLink>
               {env.admin && (
-                <NavLink env={env.name} to="/$env/fleet">
-                  Fleet
-                </NavLink>
+                <>
+                  <NavLink env={env.name} to="/$env/fleet">
+                    Fleet
+                  </NavLink>
+                  {/* below a laptop's width the header has room for two;
+                      the account menu and the palette offer it there */}
+                  <NavLink
+                    env={env.name}
+                    to="/$env/reseal"
+                    className="hidden lg:inline-flex"
+                  >
+                    Reseal
+                  </NavLink>
+                </>
               )}
             </nav>
           )}
@@ -319,6 +336,18 @@ export function Header() {
                       <Link to="/$env/fleet" params={{ env: env.name }}>
                         <Server className="mr-2 h-4 w-4" aria-hidden="true" />
                         Fleet
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          admin
+                        </span>
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      <Link to="/$env/reseal" params={{ env: env.name }}>
+                        <RotateCcwKey
+                          className="mr-2 h-4 w-4"
+                          aria-hidden="true"
+                        />
+                        Reseal
                         <span className="ml-auto text-xs text-muted-foreground">
                           admin
                         </span>

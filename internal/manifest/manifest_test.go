@@ -233,3 +233,57 @@ spec:
 		t.Fatalf("other hints = %q (%d), %q", docs[1].Description, len(docs[1].Description), docs[1].Docs)
 	}
 }
+
+func TestEncryptedData(t *testing.T) {
+	content := `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: a
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+spec:
+  encryptedData:
+    token: AgBtoken
+    quoted: "AgBquoted"
+    nested: {not: a value}
+    number: 12
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: b
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: prod
+spec:
+  encryptedData:
+    token: AgBprod
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: c
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+spec:
+  encryptedData: {}
+`
+	docs, values, err := EncryptedData([]byte(content), ann, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 || len(values) != 2 || docs[0].Index != 0 || docs[1].Index != 2 {
+		t.Fatalf("documents = %+v, values = %v", docs, values)
+	}
+	// only string values: a mapping or a number is not a sealed value
+	if len(values[0]) != 2 || values[0]["token"] != "AgBtoken" || values[0]["quoted"] != "AgBquoted" || len(values[1]) != 0 {
+		t.Fatalf("values = %v", values)
+	}
+	// Find agrees on the documents
+	found, err := Find([]byte(content), ann, "dev")
+	if err != nil || len(found) != len(docs) || !slices.Equal(found[0].Keys, docs[0].Keys) {
+		t.Fatalf("Find = %+v, %v", found, err)
+	}
+}

@@ -317,7 +317,7 @@ func TestCompute_JoiningClusterIsLeftOutOfTheEnvKey(t *testing.T) {
 		t.Errorf("ChooseSealer: %v", err)
 	}
 	for _, a := range f.Agents {
-		if a.ID == "new" && canSeal(a, f.EnvKey.Fingerprint) {
+		if a.ID == "new" && canRun(a, f.EnvKey.Fingerprint, protocol.CapabilitySeal, protocol.CommandSeal) {
 			t.Error("a joining cluster may seal")
 		}
 	}

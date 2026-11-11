@@ -35,6 +35,7 @@ var (
 	limitSessionSeals = rateLimit{name: "session-seals", max: 20, window: time.Minute, perSession: true}
 	limitSeals        = rateLimit{name: "seals", max: 30, window: time.Minute}
 	limitPulls        = rateLimit{name: "pulls", max: 5, window: time.Minute}
+	limitReseals      = rateLimit{name: "reseals", max: 10, window: time.Minute}
 	// limitRepoChecks counts the permission lookups repository lists make
 	// on GitHub, not the lists: a list on an instance that has not checked
 	// lately costs one per repository installed, and on Lambda that is
