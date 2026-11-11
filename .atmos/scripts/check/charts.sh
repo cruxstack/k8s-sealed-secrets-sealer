@@ -74,6 +74,20 @@ if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.cleanu
   echo "Error: the agent chart enables cleanup without keys" >&2
   exit 1
 fi
+# reseal needs keys, and adds no permission of its own
+validate deploy/helm/agent "${agent[@]}" "${keys[@]}" --set capabilities.reseal=true
+if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.reseal=true >/dev/null 2>&1; then
+  echo "Error: the agent chart enables reseal without keys" >&2
+  exit 1
+fi
+# the same objects as keys alone, but for the capability it names
+with_reseal="$(helm template check deploy/helm/agent "${agent[@]}" "${keys[@]}" --set capabilities.reseal=true)"
+without="$(helm template check deploy/helm/agent "${agent[@]}" "${keys[@]}")"
+if ! grep -A1 'name: APP_CAPABILITIES' <<<"$with_reseal" | grep -q '"keys,reseal,seal"' ||
+  [[ "$(sed 's/"keys,reseal,seal"/"keys,seal"/' <<<"$with_reseal")" != "$without" ]]; then
+  echo "Error: the agent chart does not turn on reseal alone, or grants it more" >&2
+  exit 1
+fi
 validate deploy/helm/agent "${agent[@]}" --set identity.mode=aws-sts --set aws.region=us-east-1 \
   --set 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/agent'
 

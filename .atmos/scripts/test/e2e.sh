@@ -598,4 +598,218 @@ synced "$fleet" && key_in_every_cluster "$unused" yes \
 [[ "$(jq -r .env_key.fingerprint <<<"$fleet")" == "$env_key" ]] || die "the env key changed: $(jq -c .env_key <<<"$fleet")"
 check "reinstated, the key is restored to every cluster from escrow, and the env key is unchanged ($((SECONDS - started))s)"
 
+# --- resealing: values sealed with an older key move onto the env key
+# without being decrypted. alice reseals a file in a session; a schedule
+# reseals the repository and opens one pull request; a second run skips the
+# repository while that pull request is open; closed in GitHub, the tick
+# sees it so. The control plane ticks every 5 seconds here, and checks an
+# open reseal pull request about every 75. ---
+mock="http://localhost:${SEALER_GITHUB_PORT}"
+fleet="$(fleet_now)"
+# an older key every cluster holds: one of the keys the clusters made
+# together, not the env key, preferring the one not deleted above
+old_key="$(jq -r --arg env "$env_key" --arg unused "$unused" --argjson n "$expected" '
+  [.keys[] | select(.fingerprint != $env and .status == "active" and (.holders | length) == $n)]
+  | sort_by(.fingerprint == $unused) | .[0].fingerprint // empty' <<<"$fleet")"
+[[ -n "$old_key" ]] || die "no older key every cluster holds: $(jq -c '[.keys[] | {fingerprint, status, holders}]' <<<"$fleet")"
+jq -e --argjson n "$expected" '[.agents[] | select((.capabilities // []) | index("reseal"))] | length == $n' <<<"$fleet" >/dev/null \
+  || die "not every agent reports the reseal capability: $(jq -c '[.agents[] | {id, capabilities}]' <<<"$fleet")"
+# cert_of <fingerprint> <file>: a key's certificate, from a cluster that
+# restored it from escrow (restored key Secrets name their fingerprint)
+cert_of() {
+  local name
+  for name in $(stack_clusters); do
+    kubectl --context "$KUBE_CONTEXT" -n "${name}-sealed-secrets" get secrets \
+      -l sealedsecrets.bitnami.com/sealed-secrets-key -o json \
+      | jq -r --arg fp "$1" '.items[] | select(.metadata.annotations["sealer.cruxstack.io/fingerprint"] == $fp)
+          | .data["tls.crt"]' | head -n 1 | base64 -d >"$2" 2>/dev/null || true
+    [[ -s "$2" ]] && return 0
+  done
+  return 1
+}
+cert_of "$old_key" "${work}/old-key.pem" || die "no cluster holds a restored copy of ${old_key}"
+# seal_raw <cert> <namespace> <value>: a strict value of the reseal
+# SealedSecret in namespace, as kubeseal seals it
+seal_raw() {
+  printf '%s' "$3" | kubeseal --raw --cert "$1" --scope strict --namespace "$2" --name reseal --from-file=/dev/stdin
+}
+reseal_path=deploy/reseal/sealed-secret.yaml
+old_prefix="e2e-old-$(openssl rand -hex 8)"
+for name in $(stack_clusters); do
+  printf -- '---\napiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: reseal\n  namespace: %s\n  annotations:\n    k8s-sealed-secrets-sealer/env: dev\nspec:\n  encryptedData:\n    current-token: %s\n    old-token: %s\n' \
+    "${name}-apps" "$(seal_raw "${work}/env-key.pem" "${name}-apps" "current-${name}")" \
+    "$(seal_raw "${work}/old-key.pem" "${name}-apps" "${old_prefix}-${name}")"
+done >"${work}/reseal.yaml"
+curl -sSf -o /dev/null -X POST -H 'Content-Type: application/json' \
+  --data "$(jq -n --rawfile c "${work}/reseal.yaml" --arg p "$reseal_path" '{branch: "main", files: {($p): $c}}')" \
+  "${mock}/_mock/repos/example-org/apps/commits" || die "could not push the reseal fixture to the mock"
+check "a file with a value sealed with an older key (${old_key}) is pushed to example-org/apps"
+
+head_commit="$(curl -sS "${page[@]}" -b "${work}/cookies-alice" "${control_plane}${apps}/files" | jq -r .commit)"
+out="$(as_alice POST "${apps}/session" "$(jq -nc --arg c "$head_commit" '{commit: $c}')")"
+[[ "${out%% *}" == 201 ]] || die "alice could not open a session for the reseal: ${out}"
+session="$(jq -r .session.id <<<"${out#* }")"
+started=$SECONDS
+out="$(as_alice POST "${apps}/session/${session}/reseals" "$(jq -nc --arg p "$reseal_path" '{path: $p}')")"
+[[ "${out%% *}" == 202 ]] || die "reseal request: ${out}"
+reseal="$(jq -r .id <<<"${out#* }")"
+status=""
+for _ in $(seq 1 60); do
+  out="$(as_alice GET "${apps}/session/${session}/reseals/${reseal}")"
+  status="$(jq -r .status <<<"${out#* }")"
+  [[ "$status" == queued || "$status" == resealing ]] || break
+  sleep 1
+done
+n="$(stack_clusters | wc -l | tr -d ' ')"
+jq -e --argjson n "$n" '.status == "done" and .values == {total: (2 * $n), resealed: $n, current: $n, failed: 0, pending: 0}
+  and (.change_ids | length) == 1' <<<"${out#* }" >/dev/null || die "the reseal did not finish as expected: ${out}"
+out="$(as_alice GET "${apps}/session")"
+jq -e --arg env "$env_key" --arg old "$old_key" --argjson n "$n" '
+  .session.changes as $c
+  | ($c | length) == 1 and $c[0].kind == "reseal" and $c[0].key == "old-token" and ($c[0].targets | length) == $n
+  and $c[0].fingerprint == $env and $c[0].resealed_from == [$old]
+  and ([.. | objects | select(has("ciphertext") or has("ciphertexts"))] | length) == 0
+' <<<"${out#* }" >/dev/null || die "pending changes after the reseal: ${out}"
+check "alice reseals the file: old-token moves to the env key in ${n} documents, current-token is current ($((SECONDS - started))s)"
+
+out="$(as_alice POST "${apps}/session/${session}/pull-request")"
+[[ "${out%% *}" == 201 ]] || die "alice could not open the reseal pull request: ${out}"
+manual_pr="$(jq -r .pull_request.number <<<"${out#* }")"
+pull="$(curl -sSf "${mock}/_mock/repos/example-org/apps/pulls/${manual_pr}")"
+jq -e --arg p "$reseal_path" --argjson n "$n" '(.files | map(.path)) == [$p] and (.title | startswith("Reseal \($n) values"))
+  and (.body | test("does not rotate"))' \
+  <<<"$pull" >/dev/null || die "the reseal pull request: $(jq -c 'del(.files)' <<<"$pull")"
+jq -r '.files[0].before' <<<"$pull" >"${work}/reseal-before.yaml"
+jq -r '.files[0].after' <<<"$pull" >"${work}/reseal-after.yaml"
+diff <(grep -v '^    old-token: ' "${work}/reseal-before.yaml") <(grep -v '^    old-token: ' "${work}/reseal-after.yaml") >&2 \
+  || die "the reseal pull request changes more than old-token"
+[[ "$(grep -c '^    old-token: ' "${work}/reseal-after.yaml")" == "$n" ]] \
+  && [[ -z "$(comm -12 <(grep '^    old-token: ' "${work}/reseal-before.yaml" | sort) <(grep '^    old-token: ' "${work}/reseal-after.yaml" | sort))" ]] \
+  || die "the reseal pull request does not reseal old-token in every document"
+check "the pull request (#${manual_pr}) changes only old-token's encryptedData, and says resealing does not rotate values"
+
+# applied, every controller decrypts the resealed value to what it was, and
+# counts it under the env key
+kubectl --context "$KUBE_CONTEXT" create --dry-run=client -o json -f "${work}/reseal-after.yaml" \
+  | jq -s '{apiVersion: "v1", kind: "List", items: [.[] | if .kind == "List" then .items[] else . end]}' \
+  | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
+for name in $(stack_clusters); do
+  got=""
+  for _ in $(seq 1 30); do
+    got="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" get secret reseal \
+      -o jsonpath='{.data.old-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    [[ -n "$got" ]] && break
+    sleep 2
+  done
+  [[ "$got" == "${old_prefix}-${name}" ]] || die "controller ${name} did not unseal the resealed old-token"
+done
+started=$SECONDS
+moved() {
+  jq -e --argjson n "$expected" --arg env "$env_key" --arg old "$old_key" '
+    (.keys[] | select(.fingerprint == $env) | .references
+      | (.clusters | length) == $n and ([.clusters[] | select(.values == 5 and .sealed_secrets == 3)] | length) == $n)
+    and (.keys[] | select(.fingerprint == $old) | .references.values == 0)
+  ' <<<"$1" >/dev/null 2>&1
+}
+for _ in $(seq 1 45); do
+  fleet="$(fleet_now)"
+  moved "$fleet" && break
+  sleep 2
+done
+moved "$fleet" || die "the clusters do not count the resealed value under the env key: $(jq -c --arg env "$env_key" --arg old "$old_key" '[.keys[] | select(.fingerprint == $env or .fingerprint == $old) | {fingerprint, references}]' <<<"$fleet")"
+check "applied, every controller unseals the resealed value, and counts it under the env key, none under ${old_key} ($((SECONDS - started))s)"
+
+# --- a schedule for example-org/apps, run now: the run opens one pull
+# request with the value main still holds on the older key ---
+out="$(as_alice POST /api/v1/envs/dev/reseal/schedules '{"name":"e2e","repos":["example-org/apps"],"interval_days":75}')"
+[[ "${out%% *}" == 201 ]] || die "alice could not create a schedule: ${out}"
+schedule="$(jq -r .id <<<"${out#* }")"
+jq -e '.enabled and .interval_days == 75 and (.next_run_at | type) == "string"' <<<"${out#* }" >/dev/null || die "schedule: ${out}"
+# run_now: starts a run of the schedule and waits for it to finish, up to
+# three minutes; prints the run with its repositories
+run_now() {
+  local out run status=""
+  out="$(as_alice POST "/api/v1/envs/dev/reseal/schedules/${schedule}/run")"
+  [[ "${out%% *}" == 202 ]] || { echo "run now: ${out}" >&2; return 1; }
+  run="$(jq -r .id <<<"${out#* }")"
+  for _ in $(seq 1 90); do
+    out="$(as_alice GET "/api/v1/envs/dev/reseal/runs/${run}")"
+    status="$(jq -r .status <<<"${out#* }")"
+    [[ "$status" == queued || "$status" == running ]] || break
+    sleep 2
+  done
+  printf '%s' "${out#* }"
+}
+started=$SECONDS
+run="$(run_now)" || die "the run did not start"
+jq -e --argjson n "$n" '.status == "succeeded" and .repos.total == 1 and .repos.hidden == 0 and .pull_requests == 1
+  and .repositories[0].repo == "example-org/apps" and .repositories[0].status == "opened"
+  and .repositories[0].values.resealed == $n' <<<"$run" >/dev/null || die "the run: ${run}"
+run_id="$(jq -r .id <<<"$run")"
+run_pr="$(jq -r '.repositories[0].pull_request.number' <<<"$run")"
+pull="$(curl -sSf "${mock}/_mock/repos/example-org/apps/pulls/${run_pr}")"
+jq -e --arg p "$reseal_path" --arg b "sealer/dev/reseal-$(tr '[:upper:]' '[:lower:]' <<<"$run_id")" '
+  .head == $b and (.files | map(.path)) == [$p] and (.message | test("Requested-by: alice <1001\\+alice@users.noreply.github.com>"))
+' <<<"$pull" >/dev/null || die "the run's pull request: $(jq -c 'del(.files)' <<<"$pull")"
+diff <(jq -r '.files[0].before' <<<"$pull" | grep -v '^    old-token: ') <(jq -r '.files[0].after' <<<"$pull" | grep -v '^    old-token: ') >&2 \
+  || die "the run's pull request changes more than old-token"
+prs="$(as_alice GET /api/v1/envs/dev/reseal/pull-requests | cut -d' ' -f2-)"
+jq -e --argjson pr "$run_pr" --argjson manual "$manual_pr" --arg run "$run_id" '
+  .hidden == 0
+  and ([.pull_requests[] | select(.number == $pr and .source == "schedule" and .run_id == $run and .state == "open")] | length) == 1
+  and ([.pull_requests[] | select(.number == $manual and .source == "session" and .requested_by == "alice")] | length) == 1
+' <<<"$prs" >/dev/null || die "reseal pull requests: ${prs}"
+check "run now opens one pull request (#${run_pr}) changing only old-token, listed with the session's as open ($((SECONDS - started))s)"
+
+started=$SECONDS
+run="$(run_now)" || die "the second run did not start"
+jq -e --argjson pr "$run_pr" '.status == "succeeded" and .pull_requests == 0 and .repositories[0].status == "skipped"
+  and .repositories[0].pull_request.number == $pr' <<<"$run" >/dev/null || die "the second run: ${run}"
+check "a second run skips example-org/apps while its reseal pull request is open ($((SECONDS - started))s)"
+
+curl -sSf -o /dev/null -X POST "${mock}/_mock/repos/example-org/apps/pulls/${run_pr}/close" || die "could not close #${run_pr} in the mock"
+started=$SECONDS
+closed=""
+for _ in $(seq 1 75); do
+  prs="$(as_alice GET '/api/v1/envs/dev/reseal/pull-requests?state=closed' | cut -d' ' -f2-)"
+  if jq -e --argjson pr "$run_pr" '[.pull_requests[] | select(.number == $pr and .state == "closed")] | length == 1' <<<"$prs" >/dev/null 2>&1; then
+    closed=yes
+    break
+  fi
+  sleep 2
+done
+[[ -n "$closed" ]] || die "the tick did not see #${run_pr} closed: ${prs}"
+check "closed in GitHub, the tick marks the reseal pull request closed ($((SECONDS - started))s)"
+
+for event in reseal.requested reseal.schedule_created reseal.run_started reseal.run_finished reseal.pr_opened reseal.pr_closed; do
+  [[ -n "$(log_events sealer-system sealer-control-plane "$event")" ]] || die "the control plane did not log ${event}"
+done
+done_logged=""
+for name in $(stack_clusters); do
+  [[ -n "$(log_events "${name}-sealer" sealer-agent reseal.done)" ]] && done_logged=yes
+done
+[[ -n "$done_logged" ]] || die "no agent logged reseal.done"
+for deploy in sealer-system/sealer-control-plane $(stack_clusters | sed 's|$|-sealer/sealer-agent|'); do
+  log="$(kubectl --context "$KUBE_CONTEXT" -n "${deploy%%/*}" logs "deploy/${deploy#*/}" 2>/dev/null || true)"
+  if grep -qF -- "$old_prefix" <<<"$log"; then
+    die "a resealed value appears in the log of ${deploy}"
+  fi
+done
+check "resealing is logged by the control plane and the agents, and no value is"
+
+# dave is no admin: schedules and resealing a file are closed to him
+dave_csrf="$(curl -sS -b "${work}/cookies-dave" "${control_plane}/api/v1/auth/me" | jq -r .csrf_token)"
+as_dave() {
+  local args=(-sS -o /dev/null -w '%{http_code}' -X "$1" -b "${work}/cookies-dave" -H 'Content-Type: application/json'
+    -H "X-CSRF-Token: ${dave_csrf}" "${page[@]}")
+  [[ -n "${3:-}" ]] && args+=(--data "$3")
+  curl "${args[@]}" "${control_plane}$2"
+}
+[[ "$(as_dave GET /api/v1/envs/dev/reseal/schedules)" == 403 ]] || die "dave read the schedules"
+[[ "$(as_dave POST /api/v1/envs/dev/reseal/schedules '{"name":"x","repos":["example-org/apps"],"interval_days":1}')" == 403 ]] \
+  || die "dave created a schedule"
+[[ "$(as_dave POST "${apps}/session/${session}/reseals" "$(jq -nc --arg p "$reseal_path" '{path: $p}')")" == 403 ]] \
+  || die "dave resealed a file"
+check "dave (not an admin) gets 403 on schedules and on resealing a file"
+
 echo "e2e: ${passed} checks passed" >&2

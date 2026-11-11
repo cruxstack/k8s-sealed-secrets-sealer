@@ -6,6 +6,9 @@
 {{- if and .Values.capabilities.cleanup (not .Values.capabilities.keys) }}
 {{- fail "capabilities.cleanup needs capabilities.keys: it counts with the key Secrets and restarts the controller as key sync does" }}
 {{- end }}
+{{- if and .Values.capabilities.reseal (not .Values.capabilities.keys) }}
+{{- fail "capabilities.reseal needs capabilities.keys: it opens values with the key Secrets that keys lets it read" }}
+{{- end }}
 # Everything the agent may do is granted here, in the controller's namespace
 # only, except that cleanup lists SealedSecrets in every namespace (below).
 # See docs/design.md, "Agent RBAC".
