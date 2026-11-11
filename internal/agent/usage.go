@@ -467,22 +467,27 @@ func (u *Usage) noteKeys(inRing map[string]bool) {
 	}
 }
 
-// keyRing reads every key Secret in the controller's namespace, under any
-// value of the key label (a key relabeled as compromised still decrypts),
-// as the controller reads one when it starts, and names each by its private
-// key, as the controller does (keyregistry.go). A Secret that would not
-// load is left out.
+// keyRing reads the cluster's keys for one count (readKeyRing).
 func (u *Usage) keyRing(ctx context.Context) ([]sealingKey, error) {
-	list, err := u.kube.CoreV1().Secrets(u.namespace).List(ctx, metav1.ListOptions{LabelSelector: keyLabel})
+	return readKeyRing(ctx, u.kube, u.namespace, u.logger, "values sealed with its key count as unmatched")
+}
+
+// readKeyRing reads every key Secret in the controller's namespace, under
+// any value of the key label (a key relabeled as compromised still
+// decrypts), as the controller reads one when it starts, and names each by
+// its private key, as the controller does (keyregistry.go). A Secret that
+// would not load is left out, and logged with consequence.
+func readKeyRing(ctx context.Context, kube kubernetes.Interface, namespace string, logger *slog.Logger, consequence string) ([]sealingKey, error) {
+	list, err := kube.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{LabelSelector: keyLabel})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list key secrets in %s: %w", u.namespace, err)
+		return nil, fmt.Errorf("failed to list key secrets in %s: %w", namespace, err)
 	}
 	var ring []sealingKey
 	for i := range list.Items {
 		s := &list.Items[i]
 		priv, err := readKeyPair(s.Data["tls.crt"], s.Data["tls.key"])
 		if err != nil {
-			u.logger.WarnContext(ctx, "skipping a key secret that does not load; values sealed with its key count as unmatched",
+			logger.WarnContext(ctx, "skipping a key secret that does not load; "+consequence,
 				"event", "controller.key_unusable", "secret", s.Name, "error", err)
 			continue
 		}

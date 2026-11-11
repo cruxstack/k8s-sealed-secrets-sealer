@@ -148,6 +148,19 @@ func run() error {
 		cleanup := agent.NewCleanup(keySync, usage, certs, logger)
 		commands.Handle(protocol.CommandKeysDelete, cleanup.Delete)
 	}
+	// reseal needs keys too (config.LoadAgent refuses it alone): it opens
+	// values with the key Secrets that keys lets it read
+	if cfg.HasCapability(protocol.CapabilityReseal) {
+		resealer := agent.NewResealer(agent.ResealerOptions{
+			// the env key must be in the controller's key set, as for a seal
+			Keys:      inventory.Fallback(protocol.HealthWindow(cfg.CheckInInterval)),
+			Kube:      kube,
+			Namespace: cfg.ControllerNamespace,
+			Env:       cfg.EnvName,
+			Logger:    logger,
+		})
+		commands.Handle(protocol.CommandReseal, resealer.Reseal)
+	}
 
 	a := agent.New(agent.Options{
 		Inventory:    inventory,

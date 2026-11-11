@@ -34,17 +34,21 @@ const (
 	// SealedSecrets are sealed with, and delete keys an admin deleted. It
 	// needs CapabilityKeys.
 	CapabilityCleanup = "cleanup"
+	// CapabilityReseal lets an agent move sealed values from older keys to
+	// the env key (reseal.v1) without decrypting them. It reads the key
+	// Secrets, so it needs CapabilityKeys.
+	CapabilityReseal = "reseal"
 )
 
 // Capabilities lists every known capability.
-var Capabilities = []string{CapabilitySeal, CapabilityKeys, CapabilityRenewal, CapabilityCleanup}
+var Capabilities = []string{CapabilitySeal, CapabilityKeys, CapabilityRenewal, CapabilityCleanup, CapabilityReseal}
 
 // IsCapability reports whether c is a known capability.
 func IsCapability(c string) bool { return slices.Contains(Capabilities, c) }
 
 // CapabilityNeeds is the capability each capability needs besides itself:
-// counting references reads the key Secrets that keys grants.
-var CapabilityNeeds = map[string]string{CapabilityCleanup: CapabilityKeys}
+// counting references and resealing read the key Secrets that keys grants.
+var CapabilityNeeds = map[string]string{CapabilityCleanup: CapabilityKeys, CapabilityReseal: CapabilityKeys}
 
 // Limits on a check-in.
 const (
@@ -251,6 +255,7 @@ const (
 	CommandKeysRestore   = "keys.restore.v1"
 	CommandRenewalEnable = "renewal.enable.v1"
 	CommandKeysDelete    = "keys.delete.v1"
+	CommandReseal        = "reseal.v1"
 )
 
 // CommandCapability is the capability each command needs.
@@ -259,6 +264,7 @@ var CommandCapability = map[string]string{
 	CommandKeysRestore:   CapabilityKeys,
 	CommandRenewalEnable: CapabilityRenewal,
 	CommandKeysDelete:    CapabilityCleanup,
+	CommandReseal:        CapabilityReseal,
 }
 
 // Command is a unit of work queued for one agent.
@@ -360,6 +366,10 @@ type RenewalEnablePayload struct {
 const (
 	ScopeStrict        = "strict"
 	ScopeNamespaceWide = "namespace-wide"
+	// ScopeClusterWide names the scope of a reseal.v1 item only, so the
+	// agent derives its label as the controller does; agents refuse to
+	// reseal such values, as they refuse to seal them.
+	ScopeClusterWide = "cluster-wide"
 )
 
 // Limits on a seal.
@@ -414,6 +424,70 @@ type SealedTarget struct {
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
 	Ciphertext string `json:"ciphertext"`
+}
+
+// Limits on a reseal.v1. A command and its result must each fit in one
+// DynamoDB item (400 KB), beside the IDs and names they carry, so a command
+// carries at most ResealBudgetBytes of items: each item costs its
+// ciphertext and ResealItemOverheadBytes, which also covers the RSA part
+// growing when the env key is larger than the key a value came from.
+const (
+	MaxResealItems          = 500
+	ResealBudgetBytes       = 320 << 10
+	ResealItemOverheadBytes = 512
+	// MaxResealIDBytes bounds an item's ID.
+	MaxResealIDBytes = 256
+)
+
+// ResealItemCost is what one item with a base64 ciphertext of n characters
+// counts against ResealBudgetBytes.
+func ResealItemCost(n int) int { return n + ResealItemOverheadBytes }
+
+// ResealPayload asks an agent to move sealed values onto the env key. Each
+// value keeps its label: the agent derives it from the item's namespace,
+// name and scope, as the controller does.
+type ResealPayload struct {
+	// EnvKey is the fingerprint of the key values move to; the agent's
+	// own controller must hold it.
+	EnvKey string       `json:"env_key"`
+	Items  []ResealItem `json:"items"`
+}
+
+// ResealItem is one value as it is in spec.encryptedData.
+type ResealItem struct {
+	// ID is opaque to the agent; the result names each item by it.
+	ID         string `json:"id"`
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	Scope      string `json:"scope"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+// What reseal.v1 did with an item.
+const (
+	// ResealResealed: another key opened it; Ciphertext holds it on the
+	// env key, and From names that key.
+	ResealResealed = "resealed"
+	// ResealCurrent: the env key opens it already; it is unchanged.
+	ResealCurrent = "current"
+	// ResealFailed: no key opens it with its label, or it is not a sealed
+	// value; Error says why.
+	ResealFailed = "failed"
+)
+
+// ResealResult reports a reseal.v1, one entry per item, in the payload's
+// order. It never holds a value or a session key.
+type ResealResult struct {
+	Items []ResealedItem `json:"items"`
+}
+
+// ResealedItem is what reseal.v1 did with one item.
+type ResealedItem struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	Ciphertext string `json:"ciphertext,omitempty"`
+	From       string `json:"from,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Envelope is data encrypted under a data key from KMS: AES-256-GCM, with
