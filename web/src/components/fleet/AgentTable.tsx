@@ -1,4 +1,3 @@
-import { Fragment } from "react";
 import type { FleetAgent } from "@/api/types";
 import { Check, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -120,21 +119,21 @@ function KeyUsageCell({ agent, now }: { agent: FleetAgent; now: Date }) {
           {usage.unmatched} unmatched
         </p>
       )}
-      <p className="text-xs text-muted-foreground">
-        <span className="whitespace-nowrap">counted {counted}</span>
-        {namespaces.length > 0 && (
-          <>
-            {" "}
-            in{" "}
-            {namespaces.map((ns, i) => (
-              <Fragment key={ns}>
-                {i > 0 && ", "}
-                <code className="font-mono">{ns}</code>
-              </Fragment>
-            ))}
-          </>
-        )}
+      <p className="text-xs whitespace-nowrap text-muted-foreground">
+        counted {counted}
       </p>
+      {namespaces.length > 0 && (
+        // namespace names are long and unbroken: listed in full they ran
+        // down the narrow column a fragment a line, so only their count
+        // shows, with the names in the title and for a screen reader
+        <p
+          className="text-xs whitespace-nowrap text-muted-foreground"
+          title={namespaces.join("\n")}
+        >
+          in {plural(namespaces.length, "namespace")}
+          <span className="sr-only">: {namespaces.join(", ")}</span>
+        </p>
+      )}
     </div>
   );
 }

@@ -1176,16 +1176,20 @@ describe("FleetView key references and deletion", () => {
       expect.stringMatching(/^Counted /),
     );
     // every namespace: nothing more to say
-    expect(all).not.toHaveTextContent(/counted 1m ago in/);
+    expect(within(all).queryByText(/namespace/)).not.toBeInTheDocument();
     expect(within(all).queryByText(/unmatched/)).not.toBeInTheDocument();
 
     const some = row("use2-blue");
     expect(within(some).getByText("1 value")).toBeInTheDocument();
     expect(within(some).getByText("in 1 SealedSecret")).toBeInTheDocument();
-    expect(some).toHaveTextContent(
-      "counted 5m ago in dev-use2-blue-apps, billing",
+    expect(some).toHaveTextContent("counted 5m ago");
+    // only how many namespaces shows; their names are in the title, and
+    // read out to a screen reader
+    const watched = within(some).getByText(/^in 2 namespaces/);
+    expect(watched).toHaveAttribute("title", "dev-use2-blue-apps\nbilling");
+    expect(watched).toHaveTextContent(
+      "in 2 namespaces: dev-use2-blue-apps, billing",
     );
-    expect(within(some).getByText("billing")).toHaveClass("font-mono");
     // values the controller cannot decrypt need attention
     expect(within(some).getByText("3 unmatched")).toHaveClass("text-warning");
 
