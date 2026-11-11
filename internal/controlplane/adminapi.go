@@ -110,6 +110,8 @@ func canReseal(f fleet.Fleet) (bool, string) {
 		return true, ""
 	case errors.Is(err, fleet.ErrNoResealer):
 		return false, "No healthy agent with the reseal capability holds the env key."
+	case errors.Is(err, fleet.ErrEnvKeyNotActive):
+		return false, "No agent with the reseal capability runs a controller that seals with the env key yet."
 	}
 	return false, "There is no env key to reseal with: sealing is paused."
 }

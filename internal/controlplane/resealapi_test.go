@@ -121,8 +121,9 @@ func (sh *sealHarness) runResealer(id string, held ...testKey) []protocol.Comman
 		})
 		set = append(set, k.Key)
 	}
+	// its controller seals with the env key, the harness's
 	resealer := agent.NewResealer(agent.ResealerOptions{
-		Keys: staticKeys(set), Kube: fake.NewClientset(objs...), Namespace: "sealed-secrets", Env: "dev",
+		Keys: activeKeys{keys: set, active: sh.key.Fingerprint}, Kube: fake.NewClientset(objs...), Namespace: "sealed-secrets", Env: "dev",
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	var results []protocol.CommandResult
@@ -143,6 +144,16 @@ func (sh *sealHarness) runResealer(id string, held ...testKey) []protocol.Comman
 		results = append(results, res)
 	}
 	return results
+}
+
+// activeKeys is a controller's key set and the key it seals with.
+type activeKeys struct {
+	keys   []protocol.Key
+	active string
+}
+
+func (k activeKeys) Collect(context.Context) (agent.Report, error) {
+	return agent.Report{Controller: protocol.Controller{ActiveFingerprint: k.active}, Keys: k.keys, Complete: true}, nil
 }
 
 func (sh *sealHarness) reseal(login, sessionID, path string) *httptest.ResponseRecorder {
@@ -347,6 +358,20 @@ func TestResealFile_Refusals(t *testing.T) {
 	// the status says whether the env can reseal
 	status := decode[statusView](t, sh.do("bob", http.MethodGet, "/api/v1/status", nil, false))
 	if !status.CanReseal || status.ResealBlocked != "" {
+		t.Fatalf("status = %+v", status)
+	}
+
+	// no agent's controller seals with the env key: each prefers the older
+	// key, as clusters made in the same second may prefer their own
+	for id := range sh.agents {
+		sh.checkIn(id, sh.key.Key, f.old.Key)
+	}
+	rec = sh.reseal("alice", sess.ID, resealPath)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "seals with the env key") {
+		t.Fatalf("no controller seals with the env key = %d %s", rec.Code, rec.Body)
+	}
+	status = decode[statusView](t, sh.do("bob", http.MethodGet, "/api/v1/status", nil, false))
+	if status.CanReseal || !strings.Contains(status.ResealBlocked, "seals with the env key") {
 		t.Fatalf("status = %+v", status)
 	}
 

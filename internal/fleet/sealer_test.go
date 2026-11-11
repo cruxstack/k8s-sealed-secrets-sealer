@@ -103,6 +103,7 @@ func TestChooseResealer(t *testing.T) {
 		a.RegisteredCapabilities = []string{protocol.CapabilityKeys, protocol.CapabilityReseal}
 		a.Capabilities = []string{protocol.CapabilityKeys, protocol.CapabilityReseal}
 		a.Commands = []string{protocol.CommandKeysRestore, protocol.CommandReseal}
+		a.Controller = &protocol.Controller{ActiveFingerprint: env.Fingerprint}
 		return a
 	}
 	// a sealer without reseal is no candidate, nor one registered without
@@ -115,6 +116,18 @@ func TestChooseResealer(t *testing.T) {
 	got, err := ChooseResealer(f, []string{"use2"}, nil)
 	if err != nil || got.ID != "b" {
 		t.Fatalf("ChooseResealer = %s, %v", got.ID, err)
+	}
+	// an agent whose controller seals with another key, made in the same
+	// second say, is passed over for one whose seals with the env key
+	other := resealer("a-other", "use2")
+	other.Controller = &protocol.Controller{ActiveFingerprint: "SHA256:own"}
+	f.Agents = append(f.Agents, other)
+	if got, err := ChooseResealer(f, []string{"use2"}, nil); err != nil || got.ID != "b" {
+		t.Fatalf("ChooseResealer with an agent sealing with another key = %s, %v", got.ID, err)
+	}
+	f.Agents = []Agent{sealer("a", "use2", time.Second, env), other}
+	if _, err := ChooseResealer(f, nil, nil); !errors.Is(err, ErrEnvKeyNotActive) {
+		t.Fatalf("no controller seals with the env key: %v", err)
 	}
 	f.Agents = f.Agents[:1]
 	if _, err := ChooseResealer(f, nil, nil); !errors.Is(err, ErrNoResealer) {

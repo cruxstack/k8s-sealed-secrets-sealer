@@ -66,8 +66,8 @@ func open(t *testing.T, b64 string, label []byte, with ...resealKey) (string, bo
 	return string(out), true
 }
 
-// resealCluster is a cluster whose controller holds the given keys, the
-// first being the env key, as key Secrets and in its key set.
+// resealCluster is a cluster whose controller holds the given keys, as key
+// Secrets and in its key set, and seals with the first, the env key.
 func resealCluster(t *testing.T, held ...resealKey) *Resealer {
 	t.Helper()
 	var objs []runtime.Object
@@ -76,8 +76,12 @@ func resealCluster(t *testing.T, held ...resealKey) *Resealer {
 		objs = append(objs, k.secret("key-"+string(rune('a'+i))))
 		set = append(set, protocol.Key{Fingerprint: k.fp, Certificate: string(k.cert)})
 	}
+	active := ""
+	if len(held) > 0 {
+		active = held[0].fp
+	}
 	return NewResealer(ResealerOptions{
-		Keys:      &fakeInventory{report: Report{Keys: set, Complete: true}},
+		Keys:      &fakeInventory{report: Report{Controller: protocol.Controller{ActiveFingerprint: active}, Keys: set, Complete: true}},
 		Kube:      fake.NewClientset(objs...),
 		Namespace: ns,
 		Env:       "dev",
@@ -255,22 +259,68 @@ func TestReseal_RefusesWithoutTheEnvKey(t *testing.T) {
 	item := protocol.ResealItem{ID: "a", Namespace: "apps", Name: "billing", Scope: protocol.ScopeStrict,
 		Ciphertext: old.sealWith(t, "v", "apps", "billing", ssv1alpha1.StrictScope)}
 
+	sealsWith := func(fp string, keys ...protocol.Key) *fakeInventory {
+		return &fakeInventory{report: Report{Controller: protocol.Controller{ActiveFingerprint: fp}, Keys: keys}}
+	}
 	// the controller's key set lacks it
 	r := resealCluster(t, old)
+	r.keys = sealsWith(env.fp, protocol.Key{Fingerprint: old.fp, Certificate: string(old.cert)})
 	if _, err := r.Reseal(context.Background(), resealCommand(t, env.fp, item)); err == nil || !strings.Contains(err.Error(), "not in this cluster's key set") {
 		t.Fatalf("err = %v", err)
 	}
 	// its key set names it, but no key Secret holds its private key
 	r = resealCluster(t, old)
-	r.keys = &fakeInventory{report: Report{Keys: []protocol.Key{{Fingerprint: env.fp, Certificate: string(env.cert)}}}}
+	r.keys = sealsWith(env.fp, protocol.Key{Fingerprint: env.fp, Certificate: string(env.cert)})
 	if _, err := r.Reseal(context.Background(), resealCommand(t, env.fp, item)); err == nil || !strings.Contains(err.Error(), "key Secrets") {
 		t.Fatalf("err = %v", err)
 	}
 	// a certificate under another key's fingerprint
 	r = resealCluster(t, env, old)
-	r.keys = &fakeInventory{report: Report{Keys: []protocol.Key{{Fingerprint: env.fp, Certificate: string(old.cert)}}}}
+	r.keys = sealsWith(env.fp, protocol.Key{Fingerprint: env.fp, Certificate: string(old.cert)})
 	if _, err := r.Reseal(context.Background(), resealCommand(t, env.fp, item)); err == nil {
 		t.Fatal("resealed to a key whose certificate is another key's")
+	}
+	// the controller cannot be read for its active key
+	r = resealCluster(t, env, old)
+	r.keys = sealsWith("", protocol.Key{Fingerprint: env.fp, Certificate: string(env.cert)})
+	if _, err := r.Reseal(context.Background(), resealCommand(t, env.fp, item)); err == nil || !strings.Contains(err.Error(), "cannot tell") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A control plane that names an older key the cluster still holds, one it
+// revoked because it may be exposed, say, gets nothing: values move only
+// onto the key the controller seals with, never back.
+func TestReseal_NeverOntoAnOlderKey(t *testing.T) {
+	older := newResealKey(t, 2048, time.Now().Add(-90*24*time.Hour))
+	newest := newResealKey(t, 2048, time.Now().Add(-time.Hour))
+	// the controller holds both and seals with the newest
+	r := resealCluster(t, newest, older)
+	onNewest := newest.sealWith(t, "rotated-after-incident", "apps", "billing", ssv1alpha1.StrictScope)
+	_, err := r.Reseal(context.Background(), resealCommand(t, older.fp,
+		protocol.ResealItem{ID: "0/0/k", Namespace: "apps", Name: "billing", Scope: protocol.ScopeStrict, Ciphertext: onNewest}))
+	if err == nil || !strings.Contains(err.Error(), "seals with "+newest.fp) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Values that are not sealed values fail alone, whatever their length field
+// says.
+func TestReseal_OddValues(t *testing.T) {
+	env := newResealKey(t, 2048, time.Now().Add(-time.Hour))
+	r := resealCluster(t, env)
+	for name, ct := range map[string]string{
+		"empty":       "",
+		"short":       "AAA=",
+		"length only": "AAE=",
+		"zero length": "AAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"not base64":  "!!!",
+	} {
+		res := runReseal(t, r, resealCommand(t, env.fp,
+			protocol.ResealItem{ID: "0/0/k", Namespace: "apps", Name: "billing", Scope: protocol.ScopeStrict, Ciphertext: ct}))
+		if res.Items[0].Status != protocol.ResealFailed {
+			t.Errorf("%s: %+v", name, res.Items[0])
+		}
 	}
 }
 
@@ -312,7 +362,8 @@ func TestReseal_SkipsKeySecretsThatDoNotLoad(t *testing.T) {
 	broken := small.secret("broken")
 	broken.Data["tls.key"] = []byte("not a key")
 	r := NewResealer(ResealerOptions{
-		Keys:      &fakeInventory{report: Report{Keys: []protocol.Key{{Fingerprint: env.fp, Certificate: string(env.cert)}}}},
+		Keys: &fakeInventory{report: Report{Controller: protocol.Controller{ActiveFingerprint: env.fp},
+			Keys: []protocol.Key{{Fingerprint: env.fp, Certificate: string(env.cert)}}}},
 		Kube:      fake.NewClientset(env.secret("env"), small.secret("small"), broken),
 		Namespace: ns,
 	})

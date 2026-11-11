@@ -329,7 +329,7 @@ func resealRefusal(err error) (string, bool) {
 	switch {
 	case errors.As(err, &outOfSync), errors.Is(err, fleet.ErrNoUsableKey):
 		return "there is no env key to reseal with: " + err.Error(), true
-	case errors.Is(err, fleet.ErrNoResealer):
+	case errors.Is(err, fleet.ErrNoResealer), errors.Is(err, fleet.ErrEnvKeyNotActive):
 		return err.Error(), true
 	}
 	return "", false

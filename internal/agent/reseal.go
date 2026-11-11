@@ -45,10 +45,12 @@ import (
 const sealedTagBytes = 16
 
 // Resealer runs reseal.v1. It trusts nothing in the command it can check
-// itself: the env key must be in its own controller's key set and among
-// the cluster's key Secrets, each value keeps the label its own namespace,
-// name and scope give, and cluster-wide values are refused, as for a seal.
-// It needs the keys capability's RBAC (list Secrets).
+// itself: the key values move to must be the one its own controller seals
+// with (its active key), so a control plane can never have values moved
+// back onto an older key, which may be exposed; each value keeps the label
+// its own namespace, name and scope give; and cluster-wide values are
+// refused, as for a seal. It needs the keys capability's RBAC (list
+// Secrets).
 type Resealer struct {
 	keys      Collector
 	kube      kubernetes.Interface
@@ -96,7 +98,7 @@ func (r *Resealer) Reseal(ctx context.Context, cmd protocol.Command) (any, error
 	if err := checkResealPayload(p); err != nil {
 		return nil, err
 	}
-	if err := r.controllerHolds(ctx, p.EnvKey); err != nil {
+	if err := r.controllerSealsWith(ctx, p.EnvKey); err != nil {
 		return nil, err
 	}
 	ring, err := readKeyRing(ctx, r.kube, r.namespace, r.logger, "values sealed with its key are not resealed")
@@ -124,12 +126,21 @@ func (r *Resealer) Reseal(ctx context.Context, cmd protocol.Command) (any, error
 	return res, nil
 }
 
-// controllerHolds checks that the controller's own key set has the key, as
-// a seal does: values move only to a key this cluster decrypts with.
-func (r *Resealer) controllerHolds(ctx context.Context, fingerprint string) error {
+// controllerSealsWith checks that the key is the one the controller itself
+// seals with now, its active key, as it reads the controller for a check-in,
+// and that its certificate is in the controller's key set. Values move only
+// onto the newest key: never back onto an older one, which a compromised
+// control plane could otherwise name to reach into every value in git.
+func (r *Resealer) controllerSealsWith(ctx context.Context, fingerprint string) error {
 	report, err := r.keys.Collect(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to read the controller's keys: %w", err)
+	}
+	switch active := report.Controller.ActiveFingerprint; {
+	case active == "":
+		return errors.New("refusing to reseal: cannot tell which key this cluster's controller seals with")
+	case active != fingerprint:
+		return fmt.Errorf("refusing to reseal onto key %s: this cluster's controller seals with %s, and values move only onto the key it seals with", fingerprint, active)
 	}
 	for _, k := range report.Keys {
 		if k.Fingerprint != fingerprint {

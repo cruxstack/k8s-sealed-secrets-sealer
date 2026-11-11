@@ -16,6 +16,11 @@ var ErrNoSealer = errors.New("no agent is available to seal: none is healthy, ab
 // ErrNoResealer means no agent can reseal right now.
 var ErrNoResealer = errors.New("no agent is available to reseal: none is healthy, has the reseal capability and holds the env key")
 
+// ErrEnvKeyNotActive means agents could reseal, but none of their
+// controllers seals with the env key yet: an agent moves values only onto
+// the key its controller seals with.
+var ErrEnvKeyNotActive = errors.New("no agent is available to reseal: no controller of an agent with the reseal capability seals with the env key yet")
+
 // ErrNoUsableKey means the clusters share keys but each is revoked or dated
 // in the future, so nothing can be sealed until a new key reaches every
 // cluster.
@@ -45,9 +50,28 @@ func ChooseSealer(f Fleet, regions []string, inFlight map[string]int) (Agent, er
 }
 
 // ChooseResealer picks the agent for a reseal as ChooseSealer does for a
-// seal, among agents with the reseal capability that handle reseal.v1.
+// seal, among agents with the reseal capability that handle reseal.v1 and
+// whose controller seals with the env key: an agent moves values only onto
+// its controller's active key. Clusters made in the same second may each
+// prefer their own key, so some agents holding the env key are passed over.
 func ChooseResealer(f Fleet, regions []string, inFlight map[string]int) (Agent, error) {
-	return choose(f, protocol.CapabilityReseal, protocol.CommandReseal, ErrNoResealer, regions, inFlight)
+	active := f
+	if f.EnvKey != nil {
+		active.Agents = nil
+		for _, a := range f.Agents {
+			if a.Controller != nil && a.Controller.ActiveFingerprint == f.EnvKey.Fingerprint {
+				active.Agents = append(active.Agents, a)
+			}
+		}
+	}
+	a, err := choose(active, protocol.CapabilityReseal, protocol.CommandReseal, ErrNoResealer, regions, inFlight)
+	if errors.Is(err, ErrNoResealer) {
+		// say so when agents could reseal but for their controllers' keys
+		if _, anyErr := choose(f, protocol.CapabilityReseal, protocol.CommandReseal, ErrNoResealer, regions, inFlight); anyErr == nil {
+			return Agent{}, ErrEnvKeyNotActive
+		}
+	}
+	return a, err
 }
 
 func choose(f Fleet, capability, command string, none error, regions []string, inFlight map[string]int) (Agent, error) {
