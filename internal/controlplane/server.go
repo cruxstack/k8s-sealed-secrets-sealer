@@ -81,6 +81,10 @@ type Options struct {
 	// PollInterval is how often a held commands poll checks for new
 	// commands. Zero means DefaultPollInterval.
 	PollInterval time.Duration
+	// TickInterval is how often Tick is called (on Lambda, by a schedule).
+	// Each open reseal pull request is checked about every 15 ticks. Zero
+	// means DefaultTickInterval.
+	TickInterval time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -119,6 +123,7 @@ type Server struct {
 
 	keyRenewPeriod time.Duration
 	pollInterval   time.Duration
+	tickInterval   time.Duration
 
 	// agents is the registry in force and the login verifiers built for it,
 	// replaced together when the registry is read again
@@ -164,6 +169,10 @@ func New(opts Options) *Server {
 	if pollInterval <= 0 {
 		pollInterval = DefaultPollInterval
 	}
+	tickInterval := opts.TickInterval
+	if tickInterval <= 0 {
+		tickInterval = DefaultTickInterval
+	}
 	s := &Server{
 		logger:     logger,
 		version:    opts.Version,
@@ -182,6 +191,7 @@ func New(opts Options) *Server {
 
 		keyRenewPeriod: keyRenewPeriod,
 		pollInterval:   pollInterval,
+		tickInterval:   tickInterval,
 		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
 		knownEscrow:    map[string]knownCopies{},
@@ -197,6 +207,9 @@ type agentAccess struct {
 	reg    *registry.Registry
 	logins map[string]LoginVerifier
 }
+
+// Env names the env the server serves.
+func (s *Server) Env() string { return s.env }
 
 // currentRegistry returns the registry in force. A handler reads it once
 // and uses that throughout.

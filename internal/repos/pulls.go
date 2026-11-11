@@ -74,6 +74,12 @@ func (s *Service) OpenPullRequest(ctx context.Context, user *userauth.User, owne
 	if err != nil {
 		return githubapp.PullRequest{}, err
 	}
+	return s.openPullRequest(ctx, r, pr)
+}
+
+// openPullRequest opens a pull request of values in a repository, whoever
+// it is for.
+func (s *Service) openPullRequest(ctx context.Context, r githubapp.Repository, pr NewPullRequest) (githubapp.PullRequest, error) {
 	snap, err := s.snapshot(ctx, r, pr.Commit)
 	if err != nil {
 		return githubapp.PullRequest{}, err

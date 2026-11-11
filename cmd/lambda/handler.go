@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 )
@@ -18,12 +20,55 @@ import (
 // 6 MB limit for synchronous responses.
 const maxResponseBytes = 4 << 20
 
+// tickMargin is the time a tick leaves before the invocation's deadline,
+// to record what it did and return.
+const tickMargin = 10 * time.Second
+
 // handler serves API Gateway HTTP API (payload format 2.0) and Lambda
 // function URL requests, which share one event format, with the control
-// plane's HTTP handler.
+// plane's HTTP handler, and ticks with tick.
 type handler struct {
 	next   http.Handler
+	tick   func(context.Context) error
 	logger *slog.Logger
+}
+
+// tickEvent is the payload of a scheduled tick: {"sealer": "tick"}.
+type tickEvent struct {
+	Sealer string `json:"sealer"`
+}
+
+// handle runs a tick for a tick event, and serves any other event as an
+// HTTP request.
+func (h *handler) handle(ctx context.Context, raw json.RawMessage) (any, error) {
+	var t tickEvent
+	if json.Unmarshal(raw, &t) == nil && t.Sealer == "tick" {
+		return h.runTick(ctx)
+	}
+	var e events.APIGatewayV2HTTPRequest
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil, errors.New("unsupported event: expected a tick, or an API Gateway HTTP API (payload format 2.0) or function URL request")
+	}
+	return h.invoke(ctx, e)
+}
+
+// runTick advances reseal schedules and runs once, within the time the
+// invocation has, less tickMargin. Its errors are logged, not returned: a
+// failed invocation would be retried by the schedule, and the next tick
+// comes anyway.
+func (h *handler) runTick(ctx context.Context) (map[string]bool, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-tickMargin))
+		defer cancel()
+	}
+	if h.tick == nil {
+		return map[string]bool{"ticked": false}, nil
+	}
+	if err := h.tick(ctx); err != nil {
+		h.logger.ErrorContext(ctx, "reseal tick failed", "event", "reseal.tick_failed", "error", err)
+	}
+	return map[string]bool{"ticked": true}, nil
 }
 
 func (h *handler) invoke(ctx context.Context, e events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -192,5 +195,39 @@ func TestSetup_ServesTheControlPlane(t *testing.T) {
 	if len(resp.Cookies) != 1 || !strings.HasPrefix(resp.Cookies[0], "__Host-sealer_oauth_state=") ||
 		!strings.Contains(resp.Cookies[0], "Secure") || !strings.Contains(resp.Cookies[0], "Path=/;") {
 		t.Fatalf("login cookies = %q", resp.Cookies)
+	}
+}
+
+// A scheduled invocation with the tick payload ticks, within the time the
+// invocation has less a margin; any other event is an HTTP request.
+func TestHandle_Ticks(t *testing.T) {
+	var ticks int
+	var left time.Duration
+	h := &handler{logger: slog.New(slog.DiscardHandler),
+		next: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }),
+		tick: func(ctx context.Context) error {
+			ticks++
+			deadline, _ := ctx.Deadline()
+			left = time.Until(deadline)
+			return errors.New("a run failed")
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := h.handle(ctx, json.RawMessage(`{"sealer":"tick"}`))
+	if err != nil || ticks != 1 || left > time.Minute-tickMargin || left < 40*time.Second {
+		t.Fatalf("tick = %v, %v; %d ticks, %s left", out, err, ticks, left)
+	}
+	raw, _ := json.Marshal(event(http.MethodGet, "/healthz"))
+	resp, err := h.handle(ctx, raw)
+	if err != nil || resp.(events.APIGatewayV2HTTPResponse).StatusCode != http.StatusTeapot || ticks != 1 {
+		t.Fatalf("http event = %+v, %v", resp, err)
+	}
+	// an EventBridge event of another shape is no tick
+	if _, err := h.handle(ctx, json.RawMessage(`{"source":"aws.events","detail":{}}`)); err == nil {
+		t.Fatal("an unknown event was served")
+	}
+	if ticks != 1 {
+		t.Fatalf("%d ticks", ticks)
 	}
 }

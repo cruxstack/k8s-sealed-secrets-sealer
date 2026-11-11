@@ -301,11 +301,14 @@ func permissionsKey(p Permissions) string {
 
 // Repository is a repository the App is installed on.
 type Repository struct {
-	Owner         string `json:"owner"`
-	Name          string `json:"name"`
-	FullName      string `json:"full_name"`
-	Private       bool   `json:"private"`
-	Archived      bool   `json:"archived"`
+	Owner    string `json:"owner"`
+	Name     string `json:"name"`
+	FullName string `json:"full_name"`
+	Private  bool   `json:"private"`
+	Archived bool   `json:"archived"`
+	// Disabled is set on a repository GitHub disabled: nothing can be
+	// pushed to it.
+	Disabled      bool   `json:"disabled"`
 	DefaultBranch string `json:"default_branch"`
 }
 
@@ -314,6 +317,7 @@ type ghRepository struct {
 	FullName      string `json:"full_name"`
 	Private       bool   `json:"private"`
 	Archived      bool   `json:"archived"`
+	Disabled      bool   `json:"disabled"`
 	DefaultBranch string `json:"default_branch"`
 	Owner         struct {
 		Login string `json:"login"`
@@ -327,6 +331,7 @@ func (r ghRepository) repository() Repository {
 		FullName:      r.FullName,
 		Private:       r.Private,
 		Archived:      r.Archived,
+		Disabled:      r.Disabled,
 		DefaultBranch: r.DefaultBranch,
 	}
 }

@@ -63,6 +63,7 @@ type GitHub interface {
 	Tree(ctx context.Context, owner, repo, commit string) (githubapp.Tree, error)
 	Blob(ctx context.Context, owner, repo, sha string) ([]byte, error)
 	CreatePullRequest(ctx context.Context, owner, repo string, pr githubapp.NewPullRequest) (githubapp.PullRequest, error)
+	PullRequestState(ctx context.Context, owner, repo string, number int) (githubapp.PullState, error)
 }
 
 // Options configures a Service.
@@ -500,7 +501,12 @@ func (s *Service) FileValues(ctx context.Context, user *userauth.User, owner, na
 	if i == len(snap.candidates) || snap.candidates[i].Path != filePath {
 		return File{}, nil, ErrFileNotFound
 	}
-	e := snap.candidates[i]
+	return s.fileValues(ctx, r, snap.candidates[i])
+}
+
+// fileValues reads a candidate and returns its documents for the env and
+// their values, or with its Error set, why its content cannot be parsed.
+func (s *Service) fileValues(ctx context.Context, r githubapp.Repository, e githubapp.TreeEntry) (File, []map[string]string, error) {
 	content, err := s.gh.Blob(ctx, r.Owner, r.Name, e.SHA)
 	if err != nil {
 		return File{}, nil, err

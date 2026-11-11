@@ -72,6 +72,15 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	if cfg.KeyRenewPeriod != 720*time.Hour {
 		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)
 	}
+	if cfg.TickInterval != time.Minute {
+		t.Errorf("TickInterval = %s, want 1m", cfg.TickInterval)
+	}
+	if cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_TICK_INTERVAL": "5s"}))); err != nil || cfg.TickInterval != 5*time.Second {
+		t.Errorf("tick interval = %v, %v", cfg, err)
+	}
+	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_TICK_INTERVAL": "1h"}))); err == nil || !strings.Contains(err.Error(), "APP_TICK_INTERVAL") {
+		t.Errorf("tick interval of an hour = %v", err)
+	}
 	if cfg.KMSTransitKeyID != "alias/sealer-transit" || cfg.KMSRegion != "" || cfg.KMSEndpoint != "" {
 		t.Errorf("KMS = %q %q %q", cfg.KMSTransitKeyID, cfg.KMSRegion, cfg.KMSEndpoint)
 	}

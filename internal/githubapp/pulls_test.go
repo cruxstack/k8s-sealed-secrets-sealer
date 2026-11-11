@@ -311,3 +311,38 @@ func TestCreatePullRequest_Refuses(t *testing.T) {
 		t.Fatal("a token was minted for a request that was refused up front")
 	}
 }
+
+func TestPullRequestState(t *testing.T) {
+	f := newFixture(t)
+	c := f.client(t, nil)
+	ctx := context.Background()
+	for _, branch := range []string{"sealer/dev/a", "sealer/dev/b"} {
+		if _, err := c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, branch, branch)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := c.PullRequestState(ctx, "example-org", "apps", 1)
+	if err != nil || !st.Open || st.Merged {
+		t.Fatalf("open = %+v, %v", st, err)
+	}
+	// one merged, one closed
+	if !f.mock.ClosePullRequest("example-org", "apps", 1, true) || !f.mock.ClosePullRequest("example-org", "apps", 2, false) {
+		t.Fatal("close")
+	}
+	if st, err := c.PullRequestState(ctx, "example-org", "apps", 1); err != nil || st.Open || !st.Merged || st.MergedAt == nil || st.ClosedAt == nil {
+		t.Fatalf("merged = %+v, %v", st, err)
+	}
+	if st, err := c.PullRequestState(ctx, "example-org", "apps", 2); err != nil || st.Open || st.Merged || st.ClosedAt == nil {
+		t.Fatalf("closed = %+v, %v", st, err)
+	}
+	if _, err := c.PullRequestState(ctx, "example-org", "apps", 9); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown = %v", err)
+	}
+	// a merge moved the base branch to the pull request's head
+	if head, _ := c.BranchHead(ctx, "example-org", "apps", "main"); head == "" {
+		t.Fatal("no head")
+	}
+	if content, _ := f.mock.File("example-org", "apps", "main", "deploy/billing/sealed-secret.yaml"); content != "sealer/dev/a\n" {
+		t.Fatalf("main after the merge = %q", content)
+	}
+}

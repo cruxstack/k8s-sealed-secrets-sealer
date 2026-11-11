@@ -1,7 +1,9 @@
 // Command lambda runs the control plane as an AWS Lambda function
 // (provided.al2023, built as "bootstrap") behind an API Gateway HTTP API or a
 // function URL. It serves the same routes as cmd/server, with the same
-// configuration; settings given as SSM parameter ARNs are read at start.
+// configuration; settings given as SSM parameter ARNs are read at start. An
+// invocation whose payload is {"sealer": "tick"}, from an EventBridge
+// Scheduler schedule, advances reseal schedules and runs instead.
 package main
 
 import (
@@ -22,7 +24,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	lambda.Start(h.invoke)
+	lambda.Start(h.handle)
 }
 
 // setup runs once per Lambda instance, in its init phase.
@@ -37,9 +39,9 @@ func setup(ctx context.Context) (*handler, error) {
 		logger = logger.With("env", cfg.EnvName)
 	}
 	slog.SetDefault(logger)
-	next, err := app.NewControlPlane(ctx, cfgs, logger)
+	cp, err := app.NewControlPlane(ctx, cfgs, logger)
 	if err != nil {
 		return nil, err
 	}
-	return &handler{next: next, logger: logger}, nil
+	return &handler{next: cp, tick: cp.Tick, logger: logger}, nil
 }

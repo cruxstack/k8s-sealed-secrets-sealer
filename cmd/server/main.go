@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/app"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
@@ -37,9 +39,14 @@ func run() error {
 	}
 	slog.SetDefault(logger)
 
-	handler, err := app.NewControlPlane(ctx, cfgs, logger)
+	cp, err := app.NewControlPlane(ctx, cfgs, logger)
 	if err != nil {
 		return err
 	}
-	return httpserver.Serve(ctx, cfg.HTTPAddr, handler, logger)
+	// the ticker advances reseal schedules and runs, as a schedule invoking
+	// the function does on Lambda
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return cp.RunTicker(ctx) })
+	g.Go(func() error { return httpserver.Serve(ctx, cfg.HTTPAddr, cp, logger) })
+	return g.Wait()
 }

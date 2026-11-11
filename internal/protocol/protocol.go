@@ -434,7 +434,7 @@ type SealedTarget struct {
 const (
 	MaxResealItems          = 500
 	ResealBudgetBytes       = 320 << 10
-	ResealItemOverheadBytes = 512
+	ResealItemOverheadBytes = 1 << 10
 	// MaxResealIDBytes bounds an item's ID.
 	MaxResealIDBytes = 256
 )

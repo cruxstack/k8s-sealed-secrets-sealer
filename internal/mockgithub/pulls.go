@@ -22,6 +22,9 @@ type pullRecord struct {
 	BaseSHA string // the base branch's head when the pull request opened
 	Created time.Time
 	Closed  bool
+	// ClosedAt is when it closed; MergedAt is set when it was merged
+	ClosedAt *time.Time
+	MergedAt *time.Time
 }
 
 func (p pullRecord) state() string {
@@ -33,14 +36,95 @@ func (p pullRecord) state() string {
 
 func (s *Server) pullJSONView(r *http.Request, st *repoState, p pullRecord) map[string]any {
 	return map[string]any{
-		"number":   p.Number,
-		"state":    p.state(),
-		"title":    p.Title,
-		"body":     p.Body,
-		"html_url": s.webURL(r) + "/" + st.Owner + "/" + st.Name + "/pull/" + strconv.Itoa(p.Number),
-		"head":     map[string]string{"ref": p.Head, "sha": p.HeadSHA},
-		"base":     map[string]string{"ref": p.Base, "sha": p.BaseSHA},
+		"number":    p.Number,
+		"state":     p.state(),
+		"title":     p.Title,
+		"body":      p.Body,
+		"html_url":  s.webURL(r) + "/" + st.Owner + "/" + st.Name + "/pull/" + strconv.Itoa(p.Number),
+		"head":      map[string]string{"ref": p.Head, "sha": p.HeadSHA},
+		"base":      map[string]string{"ref": p.Base, "sha": p.BaseSHA},
+		"merged":    p.MergedAt != nil,
+		"merged_at": p.MergedAt,
+		"closed_at": p.ClosedAt,
 	}
+}
+
+// getPull serves GET /repos/{owner}/{repo}/pulls/{number}.
+func (s *Server) getPull(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.PathValue("number"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repo(w, r)
+	if !ok {
+		return
+	}
+	if n < 1 || n > len(st.pulls) {
+		writeError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pullJSONView(r, st, st.pulls[n-1]))
+}
+
+// ClosePullRequest closes a pull request, merging it first when merge is
+// set: its base branch moves to its head, which must descend from it, as a
+// fast-forward merge does. It reports whether it did. For tests and the
+// end-to-end tests (POST /_mock/repos/{owner}/{repo}/pulls/{number}/close
+// or .../merge).
+func (s *Server) ClosePullRequest(owner, repo string, number int, merge bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repos[strings.ToLower(owner+"/"+repo)]
+	if !ok || number < 1 || number > len(st.pulls) || st.pulls[number-1].Closed {
+		return false
+	}
+	p := &st.pulls[number-1]
+	now := time.Now().UTC()
+	if merge {
+		base := "heads/" + p.Base
+		if !st.descends(p.HeadSHA, st.refs[base]) {
+			return false
+		}
+		st.refs[base] = p.HeadSHA
+		p.MergedAt = &now
+	}
+	p.Closed, p.ClosedAt = true, &now
+	return true
+}
+
+// closePull serves the mock's routes that close or merge a pull request.
+func (s *Server) closePull(merge bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		n, _ := strconv.Atoi(r.PathValue("number"))
+		if !s.ClosePullRequest(r.PathValue("owner"), r.PathValue("repo"), n, merge) {
+			writeError(w, http.StatusConflict, "the pull request is not open, or cannot be merged")
+			return
+		}
+		v, _ := s.pullRequest(r.PathValue("owner"), r.PathValue("repo"), n)
+		writeJSON(w, http.StatusOK, v)
+	}
+}
+
+// pushFiles serves POST /_mock/repos/{owner}/{repo}/commits: it commits
+// {"branch", "files": {path: content}} on top of the branch, as a person
+// pushing would, for the end-to-end tests.
+func (s *Server) pushFiles(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Branch string            `json:"branch"`
+		Files  map[string]string `json:"files"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Branch == "" || len(in.Files) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "a branch and files are required")
+		return
+	}
+	sha, ok := s.Push(r.PathValue("owner"), r.PathValue("repo"), in.Branch, "mock", in.Files)
+	if !ok {
+		writeError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"sha": sha})
 }
 
 func (s *Server) webURL(r *http.Request) string {
@@ -424,8 +508,9 @@ type PullFile struct {
 // page and tests. It is not a GitHub API shape.
 type Pull struct {
 	Number int `json:"number"`
-	// State is "open" or "closed".
+	// State is "open" or "closed"; Merged is set on one merged.
 	State   string     `json:"state"`
+	Merged  bool       `json:"merged"`
 	Title   string     `json:"title"`
 	Body    string     `json:"body"`
 	Head    string     `json:"head"`
@@ -444,7 +529,7 @@ func (s *Server) pullRequest(owner, repo string, number int) (Pull, bool) {
 		return Pull{}, false
 	}
 	p := st.pulls[number-1]
-	v := Pull{Number: p.Number, State: p.state(), Title: p.Title, Body: p.Body, Head: p.Head, Base: p.Base, Files: []PullFile{}}
+	v := Pull{Number: p.Number, State: p.state(), Merged: p.MergedAt != nil, Title: p.Title, Body: p.Body, Head: p.Head, Base: p.Base, Files: []PullFile{}}
 	// the commits from the head back to the base
 	for c := p.HeadSHA; c != "" && c != p.BaseSHA; {
 		v.Commits = append(v.Commits, c)

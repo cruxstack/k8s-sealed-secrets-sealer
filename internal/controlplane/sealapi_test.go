@@ -45,6 +45,7 @@ const billing = "deploy/billing/sealed-secret.yaml"
 type sealHarness struct {
 	t        *testing.T
 	h        http.Handler
+	srv      *Server
 	store    *store.Memory
 	kms      *envelope.FakeKMS
 	logs     *bytes.Buffer
@@ -138,7 +139,7 @@ agents:
 	if sh.keyPriv, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
 		t.Fatal(err)
 	}
-	sh.h = New(Options{
+	sh.srv = New(Options{
 		Logger:       slog.New(slog.NewTextHandler(sh.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Env:          "dev",
 		Registry:     reg,
@@ -159,7 +160,8 @@ agents:
 			}
 			return reload(ctx)
 		},
-	}).Handler()
+	})
+	sh.h = sh.srv.Handler()
 	for _, a := range reg.Agents {
 		sh.agents[a.ID] = agentSession(t, agentSessions, reg, a.ID)
 		sh.checkIn(a.ID, sh.key.Key)
@@ -217,6 +219,7 @@ func (sh *sealHarness) agentDo(method, path, id string, body any) *httptest.Resp
 var testUsers = map[string]userauth.User{
 	"alice": {ID: 1001, Login: "alice"},
 	"bob":   {ID: 1002, Login: "bob"},
+	"dave":  {ID: 1004, Login: "dave"},
 }
 
 // do sends a request as a signed-in user, with the CSRF token unless

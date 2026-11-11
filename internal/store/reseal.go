@@ -365,9 +365,12 @@ type ResealBatch struct {
 }
 
 // ResealBatchItem is what a command did with one value: a reseal.v1
-// result's item.
+// result's item, with the document it is for.
 type ResealBatchItem struct {
 	ID         string `dynamodbav:"id"`
+	Namespace  string `dynamodbav:"namespace"`
+	Name       string `dynamodbav:"name"`
+	Scope      string `dynamodbav:"scope"`
 	Status     string `dynamodbav:"status"`
 	Ciphertext string `dynamodbav:"ciphertext,omitempty"`
 	From       string `dynamodbav:"from,omitempty"`
