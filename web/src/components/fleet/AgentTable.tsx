@@ -1,5 +1,6 @@
+import { Fragment } from "react";
 import type { FleetAgent } from "@/api/types";
-import { Check } from "lucide-react";
+import { Check, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { RegionTag } from "@/components/ui/region-tag";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -11,7 +12,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { shortFingerprint, timeAgo } from "@/lib/utils";
+import { sentence, shortFingerprint, timeAgo } from "@/lib/utils";
+import { countsReferences, plural } from "./references";
 
 /** Health of one agent, as shown in the table. */
 export function agentHealth(agent: FleetAgent): {
@@ -56,6 +58,87 @@ function KeyCount({
   );
 }
 
+/**
+ * What an agent's latest count of key references found: the values in its
+ * controller's SealedSecrets and when it counted, the namespaces when it
+ * does not watch them all, and in the warning color the values none of the
+ * cluster's keys decrypts. Agents without `cleanup` do not count.
+ */
+function KeyUsageCell({ agent, now }: { agent: FleetAgent; now: Date }) {
+  const usage = agent.key_usage;
+  if (!usage) {
+    if (!agent.checked_in) return <Dash />;
+    return countsReferences(agent) ? (
+      <span className="text-xs whitespace-nowrap text-muted-foreground">
+        Not counted yet
+      </span>
+    ) : (
+      <span
+        className="text-xs whitespace-nowrap text-muted-foreground"
+        title="It counts key references only with the cleanup capability"
+      >
+        Doesn't count
+      </span>
+    );
+  }
+  const counted = (
+    <RelativeTime
+      iso={usage.counted_at}
+      now={now}
+      past
+      describe={(at) => `Counted ${at}`}
+    />
+  );
+  if (usage.error) {
+    return (
+      <div className="max-w-32 space-y-0.5 text-xs">
+        <p className="font-medium text-destructive">Count failed {counted}</p>
+        {/* an error names API groups and resources, long unbroken words */}
+        <p className="text-muted-foreground [overflow-wrap:anywhere]">
+          {sentence(usage.error)}
+        </p>
+      </div>
+    );
+  }
+  const namespaces = usage.namespaces ?? [];
+  return (
+    // one count per line, wrapping past 8rem, so the column stays narrow
+    // beside the issues and never spills into them
+    <div className="max-w-32 space-y-0.5">
+      <p className="whitespace-nowrap tabular-nums">
+        {plural(usage.values, "value")}
+      </p>
+      <p className="text-xs text-muted-foreground tabular-nums">
+        in {plural(usage.sealed_secrets, "SealedSecret")}
+      </p>
+      {usage.unmatched > 0 && (
+        <p
+          className="flex items-center gap-1 text-xs font-semibold whitespace-nowrap text-warning"
+          title="Values none of this cluster's keys decrypts: the controller cannot decrypt them either"
+        >
+          <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />
+          {usage.unmatched} unmatched
+        </p>
+      )}
+      <p className="text-xs text-muted-foreground">
+        <span className="whitespace-nowrap">counted {counted}</span>
+        {namespaces.length > 0 && (
+          <>
+            {" "}
+            in{" "}
+            {namespaces.map((ns, i) => (
+              <Fragment key={ns}>
+                {i > 0 && ", "}
+                <code className="font-mono">{ns}</code>
+              </Fragment>
+            ))}
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function AgentRow({
   agent,
   envKey,
@@ -97,23 +180,27 @@ function AgentRow({
         {agent.region ? <RegionTag region={agent.region} /> : <Dash />}
       </TableCell>
       <TableCell className="whitespace-nowrap">
-        <Badge variant={health.variant}>{health.label}</Badge>
-        {agent.last_checkin && (
-          <RelativeTime
-            className="ml-2 text-xs text-muted-foreground"
-            iso={agent.last_checkin}
-            now={now}
-            past
-            describe={(at) => `Last check-in ${at}`}
-          />
-        )}
+        {/* the time under the badge, as a key's status shows it, so the
+            table fits a laptop with the sealed values column */}
+        <span className="flex flex-col items-start gap-0.5">
+          <Badge variant={health.variant}>{health.label}</Badge>
+          {agent.last_checkin && (
+            <RelativeTime
+              className="text-xs text-muted-foreground"
+              iso={agent.last_checkin}
+              now={now}
+              past
+              describe={(at) => `Last check-in ${at}`}
+            />
+          )}
+        </span>
       </TableCell>
       <TableCell className="pt-3.5 font-mono text-xs">
         {agent.agent_version ?? <Dash />}
       </TableCell>
       <TableCell>
         {capabilities.length > 0 ? (
-          <ul className="flex gap-1" aria-label="Capabilities">
+          <ul className="flex flex-wrap gap-1" aria-label="Capabilities">
             {capabilities.map((c) => (
               <li key={c}>
                 <Badge variant="outline">{c}</Badge>
@@ -187,7 +274,11 @@ function AgentRow({
           <Dash />
         )}
       </TableCell>
-      <TableCell className="text-xs">
+      <TableCell>
+        <KeyUsageCell agent={agent} now={now} />
+      </TableCell>
+      {/* issues are sentences: never squeezed to a word a line */}
+      <TableCell className="min-w-40 text-xs">
         {issues.length > 0 ? (
           <ul className="list-disc space-y-1 pl-4">
             {issues.map((issue) => (
@@ -229,6 +320,7 @@ export function AgentTable({
           <TableHead className="text-right">Keys</TableHead>
           <TableHead className="text-right">Missing</TableHead>
           <TableHead>Active key</TableHead>
+          <TableHead>Sealed values</TableHead>
           <TableHead>Issues</TableHead>
         </tr>
       </TableHeader>

@@ -11,6 +11,7 @@ import { sentence } from "@/lib/utils";
 import { AgentTable } from "./AgentTable";
 import { EnvKeyBanner } from "./EnvKeyBanner";
 import { KeyTable } from "./KeyTable";
+import { CLEANUP, noneCount } from "./references";
 
 function FleetHeader({ env }: { env?: string }) {
   return (
@@ -71,6 +72,17 @@ function KeyLimitNotice({ fleet }: { fleet: Fleet }) {
   );
 }
 
+/** "4 keys, 1 revoked, 1 deleted": the key section's count. */
+function keyCount(keys: Fleet["keys"]): string {
+  const all = keys ?? [];
+  const parts = [`${all.length} ${all.length === 1 ? "key" : "keys"}`];
+  for (const status of ["revoked", "deleted"] as const) {
+    const n = all.filter((k) => k.status === status).length;
+    if (n > 0) parts.push(`${n} ${status}`);
+  }
+  return parts.join(", ");
+}
+
 /** The fleet page: the env's key state, every registered agent and key. */
 export function FleetView() {
   const { data, error, isPending } = useQuery(fleetQueryOptions);
@@ -105,7 +117,6 @@ export function FleetView() {
   const agents = data.agents ?? [];
   const healthy = agents.filter((a) => a.checked_in && a.healthy).length;
   const keys = data.keys ?? [];
-  const revoked = keys.filter((k) => k.status === "revoked").length;
 
   return (
     <div className="space-y-6">
@@ -151,10 +162,18 @@ export function FleetView() {
           <SectionHeading
             id="keys-heading"
             title="Keys"
-            count={`${keys.length} ${keys.length === 1 ? "key" : "keys"}${revoked > 0 ? `, ${revoked} revoked` : ""}`}
+            count={keyCount(keys)}
             aside="Newest first"
           />
-          <KeyTable keys={keys} clusters={agents.length} />
+          {noneCount(agents) && (
+            <Alert variant="info" role="status" aria-label="References">
+              No cluster counts key references, so the References column is
+              empty and no key can be deleted. Agents count them with the{" "}
+              <code className="font-mono">{CLEANUP}</code> capability, in their
+              Helm values and in the agent registry.
+            </Alert>
+          )}
+          <KeyTable keys={keys} agents={agents} />
         </section>
       )}
     </div>

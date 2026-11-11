@@ -7,16 +7,23 @@ import {
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "sonner";
 import apiClient, { setApiEnv, setCsrfToken } from "@/api/client";
-import type { Fleet } from "@/api/types";
+import type { Fleet, FleetAgent, FleetKey } from "@/api/types";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { FleetView } from "./FleetView";
 import {
   ADMIN,
+  CLEANUP_CAPABILITIES,
   KEY_A,
   KEY_B,
   agent,
+  counted,
   fakeApi,
   fleetKey,
+  iso,
+  keyUsage,
+  references,
   type FakeApi,
 } from "@/test/fake-api";
 
@@ -32,9 +39,13 @@ function renderFleet(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // the app shell provides tooltips and toasts
   render(
     <QueryClientProvider client={queryClient}>
-      <FleetView />
+      <TooltipProvider delayDuration={0}>
+        <FleetView />
+        <Toaster />
+      </TooltipProvider>
     </QueryClientProvider>,
   );
   return api;
@@ -85,6 +96,33 @@ function keyedFleet(overrides: Partial<Fleet> = {}): Fleet {
 function keyRow(fingerprint: string) {
   const table = screen.getByRole("table", { name: /sealing keys/i });
   return within(table).getByTitle(fingerprint).closest("tr") as HTMLElement;
+}
+
+/**
+ * A key's actions, in their order on its row: "enabled", or why not (the
+ * grayed-out button's description).
+ */
+function keyActions(fingerprint: string): Record<string, string> {
+  const buttons = within(keyRow(fingerprint))
+    .getAllByRole("button")
+    .filter((b) => /^(Revoke|Delete|Reinstate) key /.test(b.ariaLabel ?? ""));
+  return Object.fromEntries(
+    buttons.map((b) => [
+      (b.ariaLabel ?? "").split(" ")[0],
+      b.getAttribute("aria-disabled") === "true"
+        ? // the first description is the reason; a tooltip open adds more
+          (document.getElementById(
+            (b.getAttribute("aria-describedby") ?? "").split(" ")[0]!,
+          )?.textContent ?? "no reason")
+        : "enabled",
+    ]),
+  );
+}
+
+/** The text of the tooltip on screen, if one is. */
+function tooltipShown() {
+  return document.querySelector("[data-radix-popper-content-wrapper]")
+    ?.textContent;
 }
 
 /** An agent's row; its header names the agent, then its cluster. */
@@ -319,12 +357,22 @@ describe("FleetView", () => {
       "title",
       expect.stringMatching(/^Revoked by alice, /),
     );
-    expect(
-      within(revoked).getByRole("button", { name: /reinstate key/i }),
-    ).toBeInTheDocument();
-    expect(
-      within(revoked).queryByRole("button", { name: /revoke key/i }),
-    ).not.toBeInTheDocument();
+    // a visible header over the icons, aligned with them
+    const actions = screen.getByRole("columnheader", { name: "Actions" });
+    expect(actions).not.toHaveClass("sr-only");
+    expect(actions.querySelector(".sr-only")).toBeNull();
+    expect(actions).toHaveClass("text-right");
+    // the same three actions on every row; those that do not apply say why
+    expect(keyActions(KEY_B.fingerprint)).toEqual({
+      Revoke: "enabled",
+      Delete: "Revoke the key first.",
+      Reinstate: "Not revoked.",
+    });
+    expect(keyActions(KEY_C.fingerprint)).toEqual({
+      Revoke: "Already revoked.",
+      Delete: "It cannot be deleted now.",
+      Reinstate: "enabled",
+    });
   });
 
   it("flags future-dated keys and keys with no escrowed copy", async () => {
@@ -529,5 +577,632 @@ describe("FleetView", () => {
     expect(alert).toHaveTextContent(
       "The server encountered an error — please try again.",
     );
+  });
+});
+
+/** An agent that counts key references, with a count a minute old. */
+function countingAgent(
+  overrides: Partial<FleetAgent> & { id: string },
+): FleetAgent {
+  return agent({
+    keys: [KEY_A, KEY_B],
+    keys_reported: 2,
+    registered_capabilities: CLEANUP_CAPABILITIES,
+    capabilities: CLEANUP_CAPABILITIES,
+    key_usage: keyUsage(),
+    ...overrides,
+  });
+}
+
+/** Two clusters that count references, as keyedFleet's agents. */
+const COUNTING = [
+  countingAgent({ id: "use1-blue" }),
+  countingAgent({ id: "use2-blue", region: "use2" }),
+];
+
+/** KEY_C, revoked two hours ago and counted unreferenced in both clusters. */
+function revokedKey(overrides: Partial<FleetKey> = {}) {
+  return fleetKey(KEY_C, {
+    holders: ["use1-blue", "use2-blue"],
+    status: "revoked",
+    revoked_by: "alice",
+    revoked_at: iso(2 * 3_600_000),
+    references: references([
+      counted("use1-blue", 0),
+      counted("use2-blue", 0, 0, 20 * 60_000),
+    ]),
+    deletable: true,
+    ...overrides,
+  });
+}
+
+/** KEY_C, deleted by alice two hours ago; purged in 30 days from then. */
+function deletedKey(overrides: Partial<FleetKey> = {}) {
+  return revokedKey({
+    status: "deleted",
+    revoked_by: "bob",
+    revoked_at: iso(3 * 24 * 3_600_000),
+    deleted_by: "alice",
+    deleted_at: iso(2 * 3_600_000),
+    purge_at: iso(2 * 3_600_000 - 30 * 24 * 3_600_000),
+    holders: [],
+    deletable: false,
+    ...overrides,
+  });
+}
+
+/** The fleet with counting agents and these keys besides the env key. */
+function countedFleet(...keys: FleetKey[]): Fleet {
+  return keyedFleet({
+    agents: COUNTING,
+    keys: [
+      fleetKey(KEY_B, {
+        holders: ["use1-blue", "use2-blue"],
+        env_key: true,
+        escrow_copies: 2,
+        references: references([
+          counted("use1-blue", 8, 3),
+          counted("use2-blue", 4, 1),
+        ]),
+      }),
+      ...keys,
+    ],
+  });
+}
+
+/** A key's References cell: the toggle of its count per cluster. */
+function referencesToggle(fingerprint: string) {
+  return within(keyRow(fingerprint)).getByRole("button", {
+    expanded: false,
+  });
+}
+
+describe("FleetView key references and deletion", () => {
+  const originalAdapter = apiClient.defaults.adapter;
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter;
+  });
+
+  it("shows each key's references, with the count per cluster on demand", async () => {
+    renderFleet(
+      countedFleet(
+        fleetKey(KEY_A, {
+          holders: ["use1-blue", "use2-blue"],
+          references: references([
+            counted("use1-blue", 0),
+            counted("use2-blue", 0),
+          ]),
+        }),
+      ),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    // every agent counts, so nothing needs explaining
+    expect(
+      screen.queryByRole("status", { name: "References" }),
+    ).not.toBeInTheDocument();
+
+    // zero in every cluster reads as none
+    expect(
+      within(keyRow(KEY_A.fingerprint)).getByRole("button", { name: "None" }),
+    ).toBeInTheDocument();
+
+    // a button, not a hover title: it works with a keyboard and a tap
+    const toggle = within(keyRow(KEY_B.fingerprint)).getByRole("button", {
+      name: "12 values, in 4 SealedSecrets",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const perCluster = screen.getByRole("table", {
+      name: /^References to key SHA256:ZZZZzzzzYYYY… per cluster$/,
+    });
+    // the row it controls follows the key's
+    expect(perCluster.closest("tr")).toHaveAttribute(
+      "id",
+      toggle.getAttribute("aria-controls"),
+    );
+    const blue = within(perCluster)
+      .getByRole("rowheader", { name: /^use1-blue/ })
+      .closest("tr") as HTMLElement;
+    expect(blue).toHaveTextContent("use1-blueblue83");
+    const when = within(blue).getByText("1m ago");
+    expect(when).toHaveAttribute("title", expect.stringMatching(/^Counted /));
+    expect(
+      within(perCluster).getByRole("rowheader", { name: /^use2-blue/ }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("table", { name: /per cluster/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says a count is unknown or a lower bound when a cluster did not count, and why", async () => {
+    renderFleet(
+      keyedFleet({
+        agents: [
+          countingAgent({ id: "use1-blue" }),
+          // no cleanup capability
+          agent({ id: "use2-green", region: "use2", cluster: "green" }),
+          countingAgent({
+            id: "use1-red",
+            cluster: "red",
+            key_usage: keyUsage({
+              error: "cannot list sealedsecrets.bitnami.com: forbidden",
+            }),
+          }),
+          countingAgent({
+            id: "use2-red",
+            region: "use2",
+            cluster: "red",
+            key_usage: keyUsage({ counted_at: iso(2 * 3_600_000) }),
+          }),
+        ],
+        keys: [
+          fleetKey(KEY_B, {
+            env_key: true,
+            references: references(
+              [counted("use1-blue", 8, 3)],
+              ["use2-green"],
+            ),
+          }),
+          fleetKey(KEY_A, {
+            references: references([counted("use1-blue", 0)], ["use2-green"]),
+          }),
+          revokedKey({
+            references: references([], ["use2-green", "use1-red", "use2-red"]),
+            deletable: false,
+            delete_blocked:
+              "use2-green does not count references: it lacks the cleanup capability.",
+          }),
+        ],
+      }),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+
+    // a lower bound, naming the cluster left out
+    expect(referencesToggle(KEY_B.fingerprint)).toHaveAccessibleName(
+      "At least 8 values, not counted in use2-green",
+    );
+    expect(
+      within(referencesToggle(KEY_B.fingerprint)).getByText("use2-green"),
+    ).toHaveClass("font-mono");
+    // a 0 with a cluster left out is unknown, never a bare 0 or none
+    const partial = referencesToggle(KEY_A.fingerprint);
+    expect(partial).toHaveAccessibleName("Unknown, not counted in use2-green");
+    expect(partial).not.toHaveTextContent(/\b0\b|none/i);
+    // many clusters left out are counted, then named per cluster
+    const unknown = referencesToggle(KEY_C.fingerprint);
+    expect(unknown).toHaveAccessibleName("Unknown, not counted in 3 clusters");
+    fireEvent.click(unknown);
+    const detail = document.getElementById(
+      unknown.getAttribute("aria-controls")!,
+    )!;
+    expect(detail).toHaveTextContent(
+      "These clusters did not count, so the count is unknown:",
+    );
+    const reasons = within(detail)
+      .getAllByRole("listitem")
+      .map((li) => li.textContent);
+    expect(reasons).toEqual([
+      "use2-green: no cleanup capability",
+      "use1-red: the count failed: cannot list sealedsecrets.bitnami.com: forbidden",
+      "use2-red: last counted 2h ago",
+    ]);
+    // no per-cluster table when no cluster counted
+    expect(within(detail).queryByRole("table")).not.toBeInTheDocument();
+
+    fireEvent.click(referencesToggle(KEY_B.fingerprint));
+    expect(
+      screen.getByText("These clusters did not count, so there may be more:"),
+    ).toBeInTheDocument();
+  });
+
+  it("explains an empty References column when no agent counts", async () => {
+    renderFleet(
+      keyedFleet({
+        keys: [
+          fleetKey(KEY_B, {
+            env_key: true,
+            references: references([], ["use1-blue", "use2-blue"]),
+          }),
+        ],
+      }),
+    );
+    const note = await screen.findByRole("status", { name: "References" });
+    expect(note).toHaveTextContent(
+      "No cluster counts key references, so the References column is empty and no key can be deleted.",
+    );
+    expect(within(note).getByText("cleanup")).toHaveClass("font-mono");
+    // one note, not a toggle per row
+    const row = keyRow(KEY_B.fingerprint);
+    expect(within(row).getByLabelText("not counted")).toHaveTextContent("—");
+    expect(
+      within(row).queryByRole("button", { expanded: false }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("counts deleted keys in the section heading", async () => {
+    renderFleet(countedFleet(revokedKey(), deletedKey({ ...KEY_A })));
+    expect(
+      await screen.findByText("3 keys, 1 revoked, 1 deleted"),
+    ).toBeInTheDocument();
+  });
+
+  it("offers Revoke, Delete and Reinstate on every key, and a grayed-out one opens nothing", async () => {
+    const api = renderFleet(
+      countedFleet(
+        revokedKey(),
+        deletedKey({
+          ...KEY_A,
+          purged: true,
+          delete_blocked: "The key is already deleted.",
+        }),
+      ),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    for (const fp of [
+      KEY_B.fingerprint,
+      KEY_C.fingerprint,
+      KEY_A.fingerprint,
+    ]) {
+      const buttons = within(keyRow(fp))
+        .getAllByRole("button")
+        .filter((b) =>
+          /^(Revoke|Delete|Reinstate) key /.test(b.ariaLabel ?? ""),
+        );
+      // the same icons in the same places on every row
+      expect(buttons.map((b) => b.ariaLabel?.split(" ")[0])).toEqual([
+        "Revoke",
+        "Delete",
+        "Reinstate",
+      ]);
+      for (const b of buttons) {
+        expect(b).toHaveClass("h-9", "w-9");
+        expect(b).not.toHaveTextContent(/\w/);
+        if (b.getAttribute("aria-disabled") !== "true") continue;
+        expect(b).not.toBeDisabled();
+        fireEvent.click(b);
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      }
+    }
+    // the server's reason wins over the page's own
+    expect(keyActions(KEY_A.fingerprint).Delete).toBe(
+      "The key is already deleted.",
+    );
+    expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+
+  it("says a key with references cannot be deleted", async () => {
+    renderFleet(
+      countedFleet(
+        revokedKey({
+          references: references([
+            counted("use1-blue", 2, 1),
+            counted("use2-blue", 1, 1),
+          ]),
+          deletable: false,
+          delete_blocked: undefined,
+        }),
+      ),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    expect(keyActions(KEY_C.fingerprint).Delete).toBe(
+      "3 values are sealed with it.",
+    );
+  });
+
+  it("deletes a revoked key nothing refers to, after a dialog that says what deleting does", async () => {
+    const api = renderFleet(countedFleet(revokedKey()));
+    await screen.findByRole("heading", { name: "Keys" });
+    const row = keyRow(KEY_C.fingerprint);
+    expect(keyActions(KEY_C.fingerprint)).toEqual({
+      Revoke: "Already revoked.",
+      Delete: "enabled",
+      Reinstate: "enabled",
+    });
+    fireEvent.click(within(row).getByRole("button", { name: /delete key/i }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete this key?",
+    });
+    // what it does
+    expect(dialog).toHaveTextContent(
+      "SHA256:Cc+c/cCCddDD… is removed from every cluster, and each controller restarts once",
+    );
+    // what it rests on, and how old that is
+    expect(dialog).toHaveTextContent(
+      "No cluster refers to it. Every cluster counted the values in its SealedSecrets, and none was sealed with it; the oldest count was taken 20m ago.",
+    );
+    expect(within(dialog).getByText("20m ago")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/^Counted /),
+    );
+    // how long it can be undone
+    expect(dialog).toHaveTextContent(
+      "Its escrowed copies are kept until then, and Reinstate restores the key to every cluster. After that it is gone for good.",
+    );
+    expect(dialog).toHaveTextContent(/undo it for 30 days/);
+    // what the count cannot see
+    expect(dialog).toHaveTextContent(
+      /values in git that are not deployed to any cluster/,
+    );
+    expect(dialog).toHaveTextContent(
+      /pull requests opened before the key was revoked that merge later/,
+    );
+    expect(dialog).toHaveTextContent(/watch the clusters' unmatched counts/);
+    // nothing is sent until it is confirmed
+    expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+
+    const confirm = within(dialog).getByRole("button", { name: "Delete key" });
+    expect(confirm).toHaveClass("bg-destructive");
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Delete this key?" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(api.calls.filter((c) => c.method === "POST")).toEqual([
+      expect.objectContaining({
+        url: "/keys/SHA256%3ACc-c_cCCddDDeeEEffFFggGGhhHHiiIIjjJJkkKKllL/delete",
+        env: "dev",
+        csrf: ADMIN.csrf_token,
+      }),
+    ]);
+    // a toast names the key, in monospace, and how to undo it
+    const toast = await screen.findByText(/^Deleted/);
+    expect(within(toast).getByText("SHA256:Cc+c/cCCddDD…")).toHaveClass(
+      "font-mono",
+    );
+    expect(
+      screen.getByText(/Reinstate it within 30 days to undo this/),
+    ).toBeInTheDocument();
+    // the fleet is read again
+    await waitFor(() =>
+      expect(api.calls.filter((c) => c.url === "/fleet")).toHaveLength(2),
+    );
+  });
+
+  it("shows the server's refusal in the delete dialog", async () => {
+    renderFleet(countedFleet(revokedKey()), undefined, {
+      keyStatusError: {
+        status: 409,
+        error:
+          "use2-blue has not counted references since the key was revoked.",
+      },
+    });
+    await screen.findByRole("heading", { name: "Keys" });
+    fireEvent.click(
+      within(keyRow(KEY_C.fingerprint)).getByRole("button", {
+        name: /delete key/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete key" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Could not delete the key: use2-blue has not counted references since the key was revoked.",
+    );
+    // the dialog stays, so the reason can be read
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it("says why a revoked key cannot be deleted, on focus and on a tap", async () => {
+    const why =
+      "use2-blue has not counted references since the key was revoked.";
+    const api = renderFleet(
+      countedFleet(revokedKey({ deletable: false, delete_blocked: why })),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    const del = within(keyRow(KEY_C.fingerprint)).getByRole("button", {
+      name: /delete key/i,
+    });
+    // disabled, but focusable, with the reason as its description
+    expect(del).toHaveAttribute("aria-disabled", "true");
+    expect(del).not.toBeDisabled();
+    expect(del).toHaveAccessibleDescription(why);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.focus(del);
+    await waitFor(() => expect(tooltipShown()).toContain(why));
+    fireEvent.blur(del);
+    await waitFor(() => expect(tooltipShown()).toBeUndefined());
+
+    // a tap shows the reason, and does nothing else
+    fireEvent.click(del);
+    await waitFor(() => expect(tooltipShown()).toContain(why));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+
+  it("shows a deleted key being removed from clusters, and reinstates it from escrow", async () => {
+    const api = renderFleet(
+      countedFleet(deletedKey({ holders: ["use2-blue"] })),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    const row = keyRow(KEY_C.fingerprint);
+    expect(within(row).getByText("Deleted")).toHaveClass("text-destructive");
+    expect(row).toHaveTextContent("by alice 2h ago");
+    expect(within(row).getByText("2h ago")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/^Deleted by alice, /),
+    );
+    expect(row).toHaveTextContent("escrow purged in 29d");
+    expect(within(row).getByText("in 29d")).toHaveAttribute(
+      "title",
+      expect.stringMatching(
+        /^Escrowed copies purged .*; it can be reinstated until then$/,
+      ),
+    );
+    expect(within(row).getByText("removing from 1 cluster")).toHaveAttribute(
+      "title",
+      "use2-blue",
+    );
+    expect(keyActions(KEY_C.fingerprint)).toEqual({
+      Revoke: "Deleted.",
+      Delete: "Already deleted.",
+      Reinstate: "enabled",
+    });
+
+    fireEvent.click(
+      within(row).getByRole("button", { name: /reinstate key/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Reinstate this deleted key?",
+    });
+    expect(dialog).toHaveTextContent(
+      /key sync restores it from escrow to every cluster; each controller restarts once to load it/,
+    );
+    expect(dialog).toHaveTextContent(/kept rather than purged in 29d/);
+    expect(dialog).toHaveTextContent(/may become the env key/i);
+    expect(dialog).toHaveTextContent(/only if it was deleted by mistake/);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reinstate key" }),
+    );
+    await waitFor(() =>
+      expect(api.calls.filter((c) => c.method === "POST")).toEqual([
+        expect.objectContaining({
+          url: "/keys/SHA256%3ACc-c_cCCddDDeeEEffFFggGGhhHHiiIIjjJJkkKKllL/reinstate",
+          csrf: ADMIN.csrf_token,
+        }),
+      ]),
+    );
+    expect(
+      await screen.findByText(
+        "Key sync restores it to every cluster from escrow.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a deleted key no cluster holds, waiting for its escrow purge", async () => {
+    renderFleet(countedFleet(deletedKey()));
+    await screen.findByRole("heading", { name: "Keys" });
+    const row = keyRow(KEY_C.fingerprint);
+    expect(row).toHaveTextContent("escrow purged in 29d");
+    expect(row).not.toHaveTextContent(/removing/);
+    expect(keyActions(KEY_C.fingerprint).Reinstate).toBe("enabled");
+  });
+
+  it("offers nothing for a purged key, and says why", async () => {
+    renderFleet(
+      countedFleet(
+        deletedKey({
+          purged: true,
+          purge_at: iso(2 * 24 * 3_600_000),
+          // still listed while a cluster that was down holds it
+          holders: ["use1-blue"],
+        }),
+      ),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+    const row = keyRow(KEY_C.fingerprint);
+    expect(row).toHaveTextContent("escrow purged 2d ago");
+    expect(within(row).getByText("2d ago")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/: it cannot be reinstated$/),
+    );
+    expect(row).toHaveTextContent("removing from 1 cluster");
+    expect(keyActions(KEY_C.fingerprint)).toEqual({
+      Revoke: "Deleted.",
+      Delete: "Already deleted.",
+      Reinstate: "Escrowed copies were purged.",
+    });
+  });
+
+  it("shows the server's refusal to reinstate a key purged meanwhile", async () => {
+    renderFleet(countedFleet(deletedKey()), undefined, {
+      keyStatusError: {
+        status: 409,
+        error: "Its escrowed copies were purged; it cannot be reinstated.",
+      },
+    });
+    await screen.findByRole("heading", { name: "Keys" });
+    fireEvent.click(
+      within(keyRow(KEY_C.fingerprint)).getByRole("button", {
+        name: /reinstate key/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reinstate key" }),
+    );
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Could not reinstate the key: Its escrowed copies were purged; it cannot be reinstated.",
+    );
+  });
+
+  it("shows what each agent counted", async () => {
+    renderFleet(
+      keyedFleet({
+        agents: [
+          countingAgent({ id: "use1-blue" }),
+          countingAgent({
+            id: "use2-blue",
+            region: "use2",
+            key_usage: keyUsage({
+              values: 1,
+              sealed_secrets: 1,
+              unmatched: 3,
+              namespaces: ["dev-use2-blue-apps", "billing"],
+              counted_at: iso(5 * 60_000),
+            }),
+          }),
+          countingAgent({
+            id: "use1-green",
+            key_usage: keyUsage({
+              error: "cannot list sealedsecrets.bitnami.com: forbidden",
+            }),
+          }),
+          countingAgent({ id: "use2-green", key_usage: undefined }),
+          agent({ id: "use1-red" }),
+          agent({
+            id: "use2-red",
+            checked_in: false,
+            in_scope: false,
+            last_checkin: undefined,
+            capabilities: undefined,
+          }),
+        ],
+      }),
+    );
+    await screen.findByRole("heading", { name: "Keys" });
+
+    const all = row("use1-blue");
+    expect(within(all).getByText("12 values")).toBeInTheDocument();
+    expect(within(all).getByText("in 4 SealedSecrets")).toBeInTheDocument();
+    expect(all).toHaveTextContent("counted 1m ago");
+    expect(within(all).getByText("1m ago")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/^Counted /),
+    );
+    // every namespace: nothing more to say
+    expect(all).not.toHaveTextContent(/counted 1m ago in/);
+    expect(within(all).queryByText(/unmatched/)).not.toBeInTheDocument();
+
+    const some = row("use2-blue");
+    expect(within(some).getByText("1 value")).toBeInTheDocument();
+    expect(within(some).getByText("in 1 SealedSecret")).toBeInTheDocument();
+    expect(some).toHaveTextContent(
+      "counted 5m ago in dev-use2-blue-apps, billing",
+    );
+    expect(within(some).getByText("billing")).toHaveClass("font-mono");
+    // values the controller cannot decrypt need attention
+    expect(within(some).getByText("3 unmatched")).toHaveClass("text-warning");
+
+    const failed = row("use1-green");
+    expect(within(failed).getByText(/^Count failed/)).toHaveClass(
+      "text-destructive",
+    );
+    expect(failed).toHaveTextContent(
+      "Cannot list sealedsecrets.bitnami.com: forbidden.",
+    );
+    expect(failed).not.toHaveTextContent(/SealedSecret/);
+
+    expect(row("use2-green")).toHaveTextContent("Not counted yet");
+    expect(within(row("use1-red")).getByText("Doesn't count")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/cleanup capability/),
+    );
+    expect(row("use2-red")).not.toHaveTextContent(/count/i);
   });
 });

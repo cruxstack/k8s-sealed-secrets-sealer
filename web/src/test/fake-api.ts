@@ -4,6 +4,10 @@ import type {
   Fleet,
   FleetAgent,
   FleetKey,
+  KeyClusterReferences,
+  KeyReferences,
+  KeyStatus,
+  KeyUsage,
   MeResponse,
   PendingChange,
   Repository,
@@ -86,7 +90,7 @@ export function fakeApi(opts: {
   sealError?: string;
   /** Answers a pull request with this error instead of opening one. */
   pullRequestError?: { status: number; error: string };
-  /** Answers revoking or reinstating a key with this error. */
+  /** Answers revoking, reinstating or deleting a key with this error. */
   keyStatusError?: { status: number; error: string };
 }): FakeApi {
   const calls: Recorded[] = [];
@@ -139,7 +143,7 @@ export function fakeApi(opts: {
         return reply(opts.fleetStatus, { error: "internal error" });
       return reply(200, opts.fleet ?? emptyFleet());
     }
-    const keyStatus = /^\/keys\/([^/]+)\/(revoke|reinstate)$/.exec(url);
+    const keyStatus = /^\/keys\/([^/]+)\/(revoke|reinstate|delete)$/.exec(url);
     if (keyStatus && method === "POST") {
       if (!opts.me?.envs.find((e) => e.name === env)?.admin) {
         return reply(403, { error: "only admins can do this" });
@@ -152,12 +156,17 @@ export function fakeApi(opts: {
       const fingerprint = decodeURIComponent(keyStatus[1]!)
         .replace(/-/g, "+")
         .replace(/_/g, "/");
+      const status = {
+        revoke: "revoked",
+        reinstate: "active",
+        delete: "deleted",
+      } as const;
       return reply(200, {
         fingerprint,
-        status: keyStatus[2] === "revoke" ? "revoked" : "active",
+        status: status[keyStatus[2] as keyof typeof status],
         status_by: opts.me.user.login,
         status_at: new Date().toISOString(),
-      });
+      } satisfies KeyStatus);
     }
     if (url === "/status") {
       if (!opts.me) return reply(401, { error: "unauthorized" });
@@ -341,10 +350,60 @@ export function fleetKey(
     escrow_copies: 1,
     env_key: false,
     status: "active",
+    purged: false,
     future_dated: false,
+    references: references([]),
+    deletable: false,
     ...overrides,
   };
 }
+
+/** One cluster's count of a key's references, taken `msAgo`. */
+export function counted(
+  agent: string,
+  values: number,
+  sealedSecrets = values,
+  msAgo = 60_000,
+): KeyClusterReferences {
+  return {
+    agent,
+    cluster: agent.replace(/^use\d-/, ""),
+    values,
+    sealed_secrets: sealedSecrets,
+    counted_at: iso(msAgo),
+  };
+}
+
+/**
+ * A key's references: the clusters' counts, summed, and the agents whose
+ * clusters did not count.
+ */
+export function references(
+  clusters: KeyClusterReferences[],
+  uncounted: string[] = [],
+): KeyReferences {
+  return {
+    values: clusters.reduce((n, c) => n + c.values, 0),
+    sealed_secrets: clusters.reduce((n, c) => n + c.sealed_secrets, 0),
+    clusters,
+    uncounted,
+  };
+}
+
+/** An agent's latest count of the values in its cluster, a minute old. */
+export function keyUsage(overrides: Partial<KeyUsage> = {}): KeyUsage {
+  return {
+    counted_at: iso(60_000),
+    namespaces: null,
+    sealed_secrets: 4,
+    values: 12,
+    unmatched: 0,
+    ...overrides,
+  };
+}
+
+/** An agent that counts references: `cleanup`, registered and reported. */
+export const CLEANUP_CAPABILITIES = ["seal", "keys", "cleanup"];
 
 export { iso };
 
