@@ -1391,11 +1391,11 @@ registry, which can outgrow Lambda's 4 KB of environment variables, can be
 given the same way (`APP_REGISTRY`, an advanced-tier parameter up to 8 KB),
 and is then read again about once a minute (section 4), or packaged as a
 file. The function's role needs `ssm:GetParameter` on those parameters (and
-`kms:Decrypt` for SecureStrings), the table's DynamoDB actions, and
-`kms:GenerateDataKey` on the transit key. Each agent holds a Lambda
-invocation most of the time, so past about 50 agents a container costs
-less; [docs/operations.md](operations.md) has the size limits and what each
-agent costs.
+`kms:Decrypt` for SecureStrings), the table's DynamoDB actions and
+`kms:Decrypt` on its KMS key, and `kms:GenerateDataKey` on the transit key.
+Each agent holds a Lambda invocation most of the time, so past about 50
+agents a container costs less; [docs/operations.md](operations.md) has the
+size limits and what each agent costs.
 
 AWS infrastructure lives in a separate repository,
 `terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
