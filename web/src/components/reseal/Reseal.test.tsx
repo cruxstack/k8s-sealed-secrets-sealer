@@ -765,7 +765,9 @@ describe("reseal runs", () => {
 
     const running = runRow("run-6");
     expect(running).toHaveTextContent("Run nowby bob");
-    expect(running).toHaveTextContent("1m 30s so far");
+    // started 90s before the fixtures were made; the page reads the clock
+    // when it renders, a few seconds later on a slow runner
+    expect(running).toHaveTextContent(/1m \d+s so far/);
     expect(running).toHaveTextContent("5 resealed20 current1 failed");
     expect(within(running).getByText("1 failed")).toHaveClass(
       "text-destructive",
