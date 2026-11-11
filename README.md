@@ -66,7 +66,7 @@ controllers never talk to the control plane.
 - **Security:** values travel to agents encrypted with a KMS key the control
   plane can only encrypt with. Sealing keys are escrowed under a KMS key the
   control plane cannot use at all. Agents run with namespaced RBAC (the
-  `cleanup` capability adds reading SealedSecrets cluster-wide), and what
+  `cleanup` capability adds listing SealedSecrets cluster-wide), and what
   each agent may do is set in its Helm values, never by the control plane.
 
 Read [docs/design.md](docs/design.md) for the full design and security model.

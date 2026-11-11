@@ -201,7 +201,8 @@ Alert, too, on these log events, at warn level or above:
 - control plane: `key.sync_failed`, `key.escrow_rejected`,
   `key.escrow_refused`, `key.future_dated`, `keys.near_limit`,
   `keys.truncated`, `keys.out_of_sync`, `key.remove_refused`,
-  `key.unmatched_values`, `renewal.enable_failed`,
+  `key.delete_undone`, `key.unmatched_values`, `key.usage_invalid`,
+  `renewal.enable_failed`,
   `agent.login_rejected`, `agent.checkin_rejected`, `seal.invalid_result`,
   `repo.permission_mismatch`, `agent.login_throttled`,
   `registry.reload_failed`, `github.request_failed`;
@@ -313,6 +314,11 @@ never need the control plane.
   env's only seal-capable agent, seals are refused until it checks in
   again. Pre-pull the new image onto the cluster's nodes before upgrading
   to keep the gap short.
+- Before rolling the control plane back to a version that predates
+  deleting keys, reinstate every deleted key you may still need. An older
+  control plane does not know the deleted status, and leaves the expiry on
+  a key's escrowed copies even when it reinstates the key, so they are
+  purged all the same.
 
 ### From v0.7.0 or v0.7.1
 
@@ -504,7 +510,10 @@ For 30 days its escrowed copies are kept, and reinstating it brings it back
 to every cluster. Watch `key.unmatched_values`, and the clusters' issues,
 meanwhile: a value applied later that was sealed with the key shows there,
 as a value no key in the cluster decrypts. After 30 days the key cannot
-come back.
+come back, unless a cluster still holds it: a cluster that counts values
+sealed with a deleted key, or refuses to remove it for them, undoes the
+deletion (`key.delete_undone`), and the key is revoked again. Reinstate it
+then, and that cluster escrows it again.
 
 ## Troubleshooting
 
@@ -536,12 +545,16 @@ hold. Set the key order where the agent can read it: the controller's
 arguments, or a plain environment variable.
 
 **A key cannot be deleted.** The fleet page's reason (`delete_blocked`)
-says which: values still sealed with it, named by cluster; a cluster
-whose agent lacks `cleanup`, in its values or its registry entry; a count
-that failed, whose error is in the agent's issues and `key.count_failed`
-(often RBAC: its chart predates `cleanup`, or the SealedSecrets CRD is
-missing); or a count that predates the revocation or is over an hour old,
-which the next count fixes. An agent refuses a removal when a value is
+says which: values still sealed with it, named by cluster; values a
+cluster without the key cannot decrypt, which may be sealed with it; no
+escrowed copy, so the deletion could not be undone (reinstate the key, let
+a cluster escrow it, and revoke it again); a cluster whose agent lacks
+`cleanup`, in its values or its registry entry; a count that failed, whose
+error is in the agent's issues and `key.count_failed` (often RBAC: its
+chart predates `cleanup`, or the SealedSecrets CRD is missing; or a count
+too large for one go, which the next counts go on with); or a count that
+predates the revocation or is over an hour old, which the next count
+fixes. An agent refuses a removal when a value is
 sealed with the key by its own count (`key.remove_refused`), and is asked
 again 10 minutes later.
 

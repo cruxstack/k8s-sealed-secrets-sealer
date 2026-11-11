@@ -923,6 +923,10 @@ level or above:
 | `key.remove_refused`        | An agent refused to remove a deleted key, as    |
 |                             | values are sealed with it, or could not.        |
 | `key.unmatched_values`      | A cluster has values none of its keys decrypts. |
+| `key.delete_undone`         | A cluster counted values sealed with a deleted  |
+|                             | key, which is revoked again.                    |
+| `key.usage_invalid`         | An agent's count was not valid; it counts as    |
+|                             | failed.                                         |
 | `key.count_failed`          | An agent could not count key references.        |
 | `keys.near_limit`           | A cluster's keys reach 50% or 80% of the limit. |
 | `keys.truncated`            | A cluster reports more keys than are kept.      |
@@ -1129,26 +1133,42 @@ curl -X POST -H "Authorization: Bearer $APP_ADMIN_TOKEN" \
   https://sealer.example.com/api/v1/envs/dev/admin/keys/SHA256:abc.../delete
 ```
 
-It is allowed only when the key is revoked and every in-scope cluster's
-agent has `cleanup` and counted after the key was revoked (so no new value
-can be sealed with it), within the last hour, without error, and found no
-value sealed with it. On every key it cannot delete, active and deleted
-ones included, the fleet view says why not in one sentence
-(`delete_blocked`), and a request to delete it is refused with it. A key with
-any references is never deleted. `key.deleted` names the admin.
+It is allowed only when the key is revoked, has an escrowed copy (so the
+deletion can be undone), and every in-scope cluster's agent has `cleanup`
+and counted after the key was revoked (so no new value can be sealed with
+it), within the last hour, without error, and found no value sealed with
+it. A cluster that does not hold the key and has values none of its keys
+decrypts holds the deletion back too: those values may be sealed with the
+key. On every key it cannot delete, active and deleted ones included, the
+fleet view says why not in one sentence (`delete_blocked`), and a request
+to delete it is refused with it. A key with any references is never
+deleted. The deletion holds only for the revocation the counts were made
+since: a key reinstated and revoked again in between is not deleted.
+`key.deleted` names the admin.
 
 Each agent with `cleanup` whose cluster still holds the key is then sent
-`keys.delete.v1`, one at a time as restores are. The agent counts again and
+`keys.delete.v1`, one at a time as restores are, also when the key limit
+leaves the key out of the agent's stored state. The agent counts again and
 refuses a key any value is sealed with (`key.remove_refused`; the control
-plane asks again 10 minutes later). Otherwise it deletes every Secret in the
-controller's namespace that holds the key, under any value of the key label,
-each only as it was read, and restarts the controller as a restore does: the
-controller holds its keys in memory until it restarts (`key.removed`). A
-cluster that was down, or a key Secret made again, gets the same command
-when its agent reports the key. The key's escrowed copies expire 30 days
-after the deletion. Until then, reinstating the key makes it active again,
-and key sync restores it to every cluster from escrow; after that it cannot
-come back. A deleted key is a revoked key for everything else.
+plane asks again 10 minutes later). It names a key Secret by its private
+key, as the controller does, and refuses a key while a Secret holding it
+does not load or has another key's certificate. Otherwise it deletes every
+Secret in the controller's namespace that holds the key, under any value of
+the key label, each only as it was read, and restarts the controller as a
+restore does: the controller holds its keys in memory until it restarts
+(`key.removed`). A cluster that was down, or a key Secret made again, gets
+the same command when its agent reports the key. The key's escrowed copies
+expire 30 days after the deletion. Until then, reinstating the key makes it
+active again, and key sync restores it to every cluster from escrow; after
+that it cannot come back. A deleted key is a revoked key for everything
+else.
+
+A cluster that counts values sealed with a deleted key, or refuses to
+remove it for them, undoes the deletion: the key is revoked again, its
+escrowed copies stop expiring, and `key.delete_undone` names the cluster
+and its counts. Past the purge the copies may be gone; the key still
+returns as revoked, and once reinstated, a cluster that holds it escrows it
+again.
 
 Counts cover only what clusters hold. Values in git that are not deployed to
 a namespace a controller watches (a branch, an app not deployed yet, a
@@ -1185,13 +1205,15 @@ bound to the agent's ServiceAccount in the agent's own namespace, and with
 objects' names are generated or unknown.
 
 With `cleanup` the chart also installs the agent's only cluster-wide
-permission: a ClusterRole and ClusterRoleBinding that let it `get` and
-`list` SealedSecrets (`bitnami.com`) in every namespace, to count the
-values sealed with each key. SealedSecrets hold only ciphertext, and the
-agent reads only those its controller watches. Their name has the release's
-namespace in it, so agents of several controllers in one cluster each have
-their own. The chart refuses `cleanup` without `keys`, which it needs to
-read the keys it counts with and to restart the controller.
+permission: a ClusterRole and ClusterRoleBinding that let it `list`
+SealedSecrets (`bitnami.com`) in every namespace, to count the values
+sealed with each key. The agent reads only those its controller watches,
+but with `keys` it holds every private key of its cluster, so the
+permission lets it decrypt every SealedSecret those keys sealed, anywhere
+in the cluster. Their name has the release's namespace in it, so agents of
+several controllers in one cluster each have their own. The chart refuses
+`cleanup` without `keys`, which it needs to read the keys it counts with
+and to restart the controller.
 
 `patch` on the Deployment cannot be limited to the one argument renewal
 sets: an agent with `renewal` can change the controller's pod spec, and so
@@ -1240,10 +1262,10 @@ shows creating one.
   finished it (`scanned_at`, the agent's clock) and when the control plane
   first received it (`counted_at`, its own), the namespaces counted, how
   many SealedSecrets and values, how many unmatched, and per key the values
-  and SealedSecrets it seals; or the error. It is written only when an
-  agent sends a new count, on condition it is new, so `counted_at` is never
-  moved later, and it is kept out of the agent state that every check-in
-  reads. The fleet view and the delete gate read every agent's with one
+  and SealedSecrets it seals; or the error. A count that is not valid is
+  stored as a failed one. It is written only when an agent sends a new
+  count, on condition it is new, so `counted_at` is never moved later, and
+  it is kept out of the agent state that every check-in reads. The fleet view and the delete gate read every agent's with one
   batch read.
 - **Command:** type, status (`queued`, `leased`, `succeeded`, `failed`;
   past its expiry without a result it counts as expired), lease and finish
@@ -1361,7 +1383,8 @@ fingerprint), never values or ciphertexts:
 |              | `key.escrow_refused`, `key.restore_queued`, `key.restored`,  |
 |              | `key.sync_failed`, `key.revoked`, `key.reinstated`,          |
 |              | `key.deleted`, `key.remove_queued`, `key.removed`,           |
-|              | `key.remove_refused`, `key.unmatched_values`,                |
+|              | `key.remove_refused`, `key.delete_undone`,                   |
+|              | `key.unmatched_values`, `key.usage_invalid`,                 |
 |              | `renewal.enable_queued`, `renewal.enabled`,                  |
 |              | `renewal.enable_failed`; `key.escrow_uploaded`,              |
 |              | `key.removed`, `key.remove_refused`, `key.count_failed` and  |

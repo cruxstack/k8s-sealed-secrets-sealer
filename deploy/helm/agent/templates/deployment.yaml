@@ -99,6 +99,14 @@ spec:
             - name: APP_KEY_USAGE_INTERVAL
               value: {{ .Values.keyUsageInterval | quote }}
             {{- end }}
+            {{- if (.Values.resources.limits).memory }}
+            # the agent keeps its heap within 90% of its memory limit
+            - name: APP_MEMORY_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: agent
+                  resource: limits.memory
+            {{- end }}
             - name: APP_LOG_LEVEL
               value: {{ .Values.log.level | quote }}
             - name: APP_LOG_FORMAT

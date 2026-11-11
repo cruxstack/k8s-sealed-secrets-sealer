@@ -7,7 +7,7 @@
 {{- fail "capabilities.cleanup needs capabilities.keys: it counts with the key Secrets and restarts the controller as key sync does" }}
 {{- end }}
 # Everything the agent may do is granted here, in the controller's namespace
-# only, except that cleanup reads SealedSecrets in every namespace (below).
+# only, except that cleanup lists SealedSecrets in every namespace (below).
 # See docs/design.md, "Agent RBAC".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -90,9 +90,10 @@ subjects:
 {{- if .Values.capabilities.cleanup }}
 {{- $cluster := printf "%s-%s-sealedsecrets" .Release.Namespace (include "agent.fullname" .) | trunc 253 | trimSuffix "-" }}
 ---
-# cleanup: read the SealedSecrets the controller may watch, in any namespace,
-# to count the values sealed with each key. SealedSecrets hold only
-# ciphertext. The name has the release's namespace, so agents of several
+# cleanup: list the SealedSecrets the controller may watch, in any namespace,
+# to count the values sealed with each key. With keys the agent holds the
+# cluster's private keys, so this lets it decrypt every SealedSecret they
+# sealed. The name has the release's namespace, so agents of several
 # controllers in one cluster each have their own.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -103,7 +104,7 @@ metadata:
 rules:
   - apiGroups: ["bitnami.com"]
     resources: ["sealedsecrets"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

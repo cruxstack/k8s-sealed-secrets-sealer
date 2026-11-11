@@ -54,13 +54,19 @@ validate deploy/helm/agent "${agent[@]}" "${keys[@]}" --set capabilities.cleanup
 # namespace, and gets its interval; without it nothing is cluster-wide
 cleanup="$(helm template check deploy/helm/agent "${agent[@]}" "${keys[@]}" --set capabilities.cleanup=true --namespace blue-sealer)"
 if ! grep -q 'name: blue-sealer-check-sealedsecrets' <<<"$cleanup" || ! grep -q 'kind: ClusterRoleBinding' <<<"$cleanup" ||
-  ! grep -q 'resources: \["sealedsecrets"\]' <<<"$cleanup" || ! grep -q 'verbs: \["delete"\]' <<<"$cleanup" ||
-  ! grep -q 'name: APP_KEY_USAGE_INTERVAL' <<<"$cleanup"; then
+  ! grep -A1 'resources: \["sealedsecrets"\]' <<<"$cleanup" | grep -q 'verbs: \["list"\]' ||
+  ! grep -q 'verbs: \["delete"\]' <<<"$cleanup" || ! grep -q 'name: APP_KEY_USAGE_INTERVAL' <<<"$cleanup"; then
   echo "Error: the agent chart does not grant cleanup what it needs" >&2
   exit 1
 fi
 if helm template check deploy/helm/agent "${agent[@]}" "${keys[@]}" | grep -qE 'kind: ClusterRole|verbs: \["delete"\]|APP_KEY_USAGE_INTERVAL'; then
   echo "Error: the agent chart grants cleanup's permissions without it" >&2
+  exit 1
+fi
+# the agent keeps its heap under its memory limit, when it has one
+if ! helm template check deploy/helm/agent "${agent[@]}" | grep -A4 'name: APP_MEMORY_LIMIT' | grep -q 'resource: limits.memory' ||
+  helm template check deploy/helm/agent "${agent[@]}" --set resources.limits.memory=null | grep -q 'APP_MEMORY_LIMIT'; then
+  echo "Error: the agent chart does not pass its memory limit, or passes one it does not have" >&2
   exit 1
 fi
 # cleanup needs keys

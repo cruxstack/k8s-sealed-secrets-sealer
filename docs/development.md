@@ -362,7 +362,8 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region               |
 | `APP_CAPABILITIES`                 | agent         | `seal` (`none` for none)           |
 | `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)                   |
-| `APP_KEY_USAGE_INTERVAL`           | agent         | `5m` (30s to 1h), with `cleanup`   |
+| `APP_KEY_USAGE_INTERVAL`           | agent         | `5m` (30s to 30m), with `cleanup`  |
+| `APP_MEMORY_LIMIT`                 | agent         | none; the chart's memory limit     |
 | `APP_CONTROLLER_NAMESPACE`         | agent         | required                           |
 | `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |
 | `APP_CONTROLLER_DEPLOYMENT`        | agent         | `APP_CONTROLLER_NAME`              |

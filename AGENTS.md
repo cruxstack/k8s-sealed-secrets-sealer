@@ -91,7 +91,7 @@ provide the authenticated, short-lived download token for private images.
 ## Security
 - Never log, return or store plaintext secret values or private keys. Ciphertext is returned only where the design says so.
 - The control plane never gets a Kubernetes client or a service account token (`automountServiceAccountToken: false`).
-- Agent RBAC is namespaced to the controller's namespace. The one exception is the `cleanup` capability's `get` and `list` on SealedSecrets cluster-wide (ciphertext only); add nothing else cluster-wide. New permissions belong behind a capability that is off by default.
+- Agent RBAC is namespaced to the controller's namespace. The one exception is the `cleanup` capability's `list` on SealedSecrets cluster-wide; with `keys` the agent holds its cluster's private keys, so that lets it decrypt every SealedSecret they sealed. Add nothing else cluster-wide. New permissions belong behind a capability that is off by default.
 - Refuse `cluster-wide` sealing scope.
 - Keep the project agnostic: no organization-specific names, domains, account IDs or topology in code, docs, tests or fixtures. Use neutral examples (envs `dev`/`prod`, regions `use1`/`use2`, clusters `blue`/`green`, `example.com`).
 

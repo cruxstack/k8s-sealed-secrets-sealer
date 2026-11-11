@@ -55,8 +55,10 @@ capabilities:
   # count the values in the SealedSecrets the controller watches by the key
   # that sealed them, so an admin can delete keys nothing uses, and remove
   # keys an admin deleted from the controller. This adds the agent's only
-  # cluster-wide permission: get and list SealedSecrets in every namespace,
-  # which hold only ciphertext. It also lets the agent delete Secrets in the
+  # cluster-wide permission: list SealedSecrets in every namespace. With
+  # keys the agent holds every private key of its cluster, so it can then
+  # decrypt every SealedSecret those keys sealed, anywhere in the cluster,
+  # not only the controller's. It also lets the agent delete Secrets in the
   # controller's namespace, so it can delete keys there. Needs keys.
   cleanup: false
 
@@ -114,7 +116,7 @@ kms:
 checkinInterval: 15s
 
 # How often, at most, the agent counts the values sealed with each key, from
-# 30s to 1h (cleanup capability). A count decrypts only the RSA part of each
+# 30s to 30m (cleanup capability). A count decrypts only the RSA part of each
 # value that changed since the last, a few milliseconds each with 4096-bit
 # keys; the control plane uses counts up to an hour old.
 keyUsageInterval: 5m
@@ -138,6 +140,10 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# With a memory limit the agent keeps its heap within 90% of it. 128Mi holds
+# a count's list page (100 SealedSecrets, tens of MiB while decoded when
+# each has dozens of values) and the RSA parts of up to 50,000 values a
+# count decrypts at once, about 26 MiB with 4096-bit keys.
 resources:
   requests:
     cpu: 10m

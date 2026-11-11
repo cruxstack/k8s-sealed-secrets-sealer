@@ -201,12 +201,14 @@ kms:
 
 Everything the chart grants the agent is in the controller's namespace,
 except with `cleanup`: a ClusterRole and ClusterRoleBinding, named
-`<release namespace>-<full name>-sealedsecrets`, let it `get` and `list`
+`<release namespace>-<full name>-sealedsecrets`, let it `list`
 SealedSecrets in every namespace, to count the values sealed with each key.
-SealedSecrets hold only ciphertext. `cleanup` also lets it delete Secrets
-in the controller's namespace, to remove keys an admin deleted. It needs
-`keys`, and the chart refuses it without. `keyUsageInterval` (5 minutes by
-default) sets how often it counts. An admin can delete a key only once every
+With `keys` the agent holds its cluster's private keys, so this lets it
+decrypt every SealedSecret they sealed, in any namespace. `cleanup` also
+lets it delete Secrets in the controller's namespace, to remove keys an
+admin deleted. It needs `keys`, and the chart refuses it without.
+`keyUsageInterval` (5 minutes by default, 30s to 30m) sets how often it
+counts. An admin can delete a key only once every
 cluster's agent counts (design section 10), so turn `cleanup` on in every
 cluster of an env, in its values and its registry entry, or in none.
 
