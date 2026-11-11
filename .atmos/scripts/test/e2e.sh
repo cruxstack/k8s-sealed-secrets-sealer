@@ -480,4 +480,114 @@ if kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control
 fi
 check "the pull request is logged, and the value is not"
 
+# --- key references and deletion: every agent counts the values in the
+# SealedSecrets its controller watches by the key that sealed them. A key
+# no value uses is revoked, deleted once every cluster counted since, and
+# removed from every cluster; reinstated, it comes back from escrow. ---
+fleet_now() { api GET /api/v1/envs/dev/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-; }
+
+# each cluster holds the round-trip SealedSecret (one value) and billing
+# (api-token and db-password), all sealed with the env key, in the one apps
+# namespace its controller watches besides its own
+counted() {
+  jq -e --argjson n "$expected" --arg fp "$env_key" '
+    ([.agents[] | select(.key_usage != null and .key_usage.error == null and .key_usage.unmatched == 0
+      and .key_usage.namespaces == [.id + "-apps", .id + "-sealed-secrets"])] | length) == $n
+    and (.keys[] | select(.fingerprint == $fp) | .references
+      | (.uncounted | length) == 0 and (.clusters | length) == $n
+      and ([.clusters[] | select(.values == 3 and .sealed_secrets == 2)] | length) == $n)
+  ' <<<"$1" >/dev/null 2>&1
+}
+for _ in $(seq 1 45); do
+  fleet="$(fleet_now)"
+  counted "$fleet" && break
+  sleep 2
+done
+counted "$fleet" || die "the clusters did not count the env key's values: $(jq -c --arg fp "$env_key" '{usage: [.agents[] | {id, key_usage}], references: (.keys[] | select(.fingerprint == $fp) | .references)}' <<<"$fleet")"
+check "every cluster counts its SealedSecrets: the env key seals 3 values in 2 SealedSecrets in each"
+
+# key_fingerprints <cluster>: the fingerprints of every key Secret in its
+# controller's namespace, under any value of the key label, computed from
+# each certificate as the controller does (SSH SHA-256 of the public key)
+key_fingerprints() {
+  local cert
+  for cert in $(kubectl --context "$KUBE_CONTEXT" -n "${1}-sealed-secrets" get secrets     -l sealedsecrets.bitnami.com/sealed-secrets-key -o json | jq -r '.items[].data["tls.crt"]'); do
+    base64 -d <<<"$cert" | openssl x509 -pubkey -noout       | ssh-keygen -i -m PKCS8 -f /dev/stdin | ssh-keygen -lf - | awk '{print $2}'
+  done
+}
+# key_in_every_cluster <fingerprint> <yes|no>: whether every cluster holds
+# it (yes) or none does (no)
+key_in_every_cluster() {
+  local name
+  for name in $(stack_clusters); do
+    if key_fingerprints "$name" | grep -qxF -- "$1"; then
+      [[ "$2" == yes ]] || return 1
+    else
+      [[ "$2" == no ]] || return 1
+    fi
+  done
+}
+
+# a key every cluster counted no value of; the clusters' own keys, made
+# together, are older keys beside the env key
+unused="$(jq -r --arg fp "$env_key" '[.keys[] | select(.fingerprint != $fp and .status == "active"
+  and .references.values == 0 and (.references.clusters | length) > 0)][0].fingerprint // empty' <<<"$fleet")"
+[[ -n "$unused" ]] || die "no key without references besides the env key: $(jq -c '[.keys[] | {fingerprint, status, references}]' <<<"$fleet")"
+key_in_every_cluster "$unused" yes || die "the key ${unused} is not in every cluster's key Secrets"
+key_path="/api/v1/envs/dev/keys/$(tr '+/' '-_' <<<"$unused")"
+
+out="$(as_alice POST "${key_path}/delete")"
+[[ "${out%% *}" == 409 && "$(jq -r .error <<<"${out#* }")" == "Revoke the key first." ]] || die "delete of an active key: ${out}"
+[[ "$(jq -r --arg fp "$unused" '.keys[] | select(.fingerprint == $fp) | .delete_blocked' <<<"$(fleet_now)")" == "Revoke the key first." ]] \
+  || die "the fleet does not say why the active key cannot be deleted"
+check "an active key cannot be deleted (${unused})"
+
+out="$(as_alice POST "${key_path}/revoke")"
+[[ "${out%% *}" == 200 && "$(jq -r .status <<<"${out#* }")" == revoked ]] || die "revoke: ${out}"
+# the counts so far came in before the revocation
+out="$(as_alice POST "${key_path}/delete")"
+[[ "${out%% *}" == 409 && "$(jq -r .error <<<"${out#* }")" == "Waiting for "* ]] || die "delete right after revoking: ${out}"
+check "a revoked key cannot be deleted until every cluster counted it since"
+
+# each agent counts every 30 seconds and checks in every 5
+started=$SECONDS
+for _ in $(seq 1 40); do
+  out="$(as_alice POST "${key_path}/delete")"
+  [[ "${out%% *}" == 409 ]] || break
+  sleep 3
+done
+[[ "${out%% *}" == 200 ]] || die "delete after the clusters counted: ${out}"
+jq -e '.status == "deleted" and .status_by == "alice" and (.purge_at | type) == "string"' <<<"${out#* }" >/dev/null \
+  || die "the deleted key's status: ${out}"
+check "once every cluster counted it since the revocation, alice deletes it ($((SECONDS - started))s)"
+
+started=$SECONDS
+removed=""
+for _ in $(seq 1 60); do
+  fleet="$(fleet_now)"
+  if jq -e --arg fp "$unused" '.keys[] | select(.fingerprint == $fp) | .status == "deleted" and (.holders | length) == 0' \
+    <<<"$fleet" >/dev/null 2>&1 && key_in_every_cluster "$unused" no; then
+    removed=yes
+    break
+  fi
+  sleep 2
+done
+[[ -n "$removed" ]] || die "the deleted key was not removed from every cluster: $(jq -c --arg fp "$unused" '.keys[] | select(.fingerprint == $fp)' <<<"$fleet")"
+[[ "$(log_events sealer-system sealer-control-plane key.removed | wc -l | tr -d ' ')" == "$expected" ]] \
+  || die "the control plane did not log key.removed once per cluster"
+check "every agent removes the deleted key from its cluster's key Secrets, and the fleet shows it held by none ($((SECONDS - started))s)"
+
+out="$(as_alice POST "${key_path}/reinstate")"
+[[ "${out%% *}" == 200 && "$(jq -r .status <<<"${out#* }")" == active ]] || die "reinstate: ${out}"
+started=$SECONDS
+for _ in $(seq 1 90); do
+  fleet="$(fleet_now)"
+  synced "$fleet" && key_in_every_cluster "$unused" yes && break
+  sleep 2
+done
+synced "$fleet" && key_in_every_cluster "$unused" yes \
+  || die "the reinstated key did not come back to every cluster: $(jq -c --arg fp "$unused" '.keys[] | select(.fingerprint == $fp)' <<<"$fleet")"
+[[ "$(jq -r .env_key.fingerprint <<<"$fleet")" == "$env_key" ]] || die "the env key changed: $(jq -c .env_key <<<"$fleet")"
+check "reinstated, the key is restored to every cluster from escrow, and the env key is unchanged ($((SECONDS - started))s)"
+
 echo "e2e: ${passed} checks passed" >&2

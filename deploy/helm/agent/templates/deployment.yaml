@@ -95,6 +95,10 @@ spec:
             {{- end }}
             - name: APP_CHECKIN_INTERVAL
               value: {{ .Values.checkinInterval | quote }}
+            {{- if .Values.capabilities.cleanup }}
+            - name: APP_KEY_USAGE_INTERVAL
+              value: {{ .Values.keyUsageInterval | quote }}
+            {{- end }}
             - name: APP_LOG_LEVEL
               value: {{ .Values.log.level | quote }}
             - name: APP_LOG_FORMAT

@@ -52,6 +52,13 @@ capabilities:
   # as few agents as you can (one per env is enough), or set the
   # controller's own keyrenewperiod value and leave this off.
   renewal: false
+  # count the values in the SealedSecrets the controller watches by the key
+  # that sealed them, so an admin can delete keys nothing uses, and remove
+  # keys an admin deleted from the controller. This adds the agent's only
+  # cluster-wide permission: get and list SealedSecrets in every namespace,
+  # which hold only ciphertext. It also lets the agent delete Secrets in the
+  # controller's namespace, so it can delete keys there. Needs keys.
+  cleanup: false
 
 # The control plane this agent checks in with (required). It must be https;
 # allowInsecure permits plain http for local stacks only.
@@ -105,6 +112,12 @@ kms:
 # 5m, each seal failing when it expires after 2 minutes. Keep the default
 # unless check-ins cost too much, and run more than one seal-capable agent.
 checkinInterval: 15s
+
+# How often, at most, the agent counts the values sealed with each key, from
+# 30s to 1h (cleanup capability). A count decrypts only the RSA part of each
+# value that changed since the last, a few milliseconds each with 4096-bit
+# keys; the control plane uses counts up to an hour old.
+keyUsageInterval: 5m
 
 # On shutdown the agent finishes the command it is running and reports its
 # result, within 45 seconds (a held commands poll and a few commands), then

@@ -313,7 +313,7 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 		AllowInsecureControlPlane: r.boolean("APP_ALLOW_INSECURE_CONTROL_PLANE", false),
 		TokenFile:                 r.str("APP_IDENTITY_TOKEN_FILE", DefaultTokenFile),
 		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, protocol.MinCheckInInterval, protocol.MaxCheckInInterval),
-		KeyUsageInterval:          r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, time.Minute, time.Hour),
+		KeyUsageInterval:          r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, 30*time.Second, time.Hour),
 	}
 	cfg.ControllerDeployment = r.dnsSubdomain("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
 	cfg.ControlPlaneURL = r.required(r.url("APP_CONTROL_PLANE_URL", cfg.AllowInsecureControlPlane), "APP_CONTROL_PLANE_URL")

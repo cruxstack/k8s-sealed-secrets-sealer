@@ -198,7 +198,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	_, err := loadAgent(env(map[string]string{
 		"APP_CONTROLLER_NAME":    "Not_A_Label",
 		"APP_CHECKIN_INTERVAL":   "1s",
-		"APP_KEY_USAGE_INTERVAL": "30s",
+		"APP_KEY_USAGE_INTERVAL": "10s",
 		"APP_CAPABILITIES":       "seal,root,cleanup",
 		"APP_LOG_LEVEL":          "loud",
 		"APP_LOG_FORMAT":         "xml",
