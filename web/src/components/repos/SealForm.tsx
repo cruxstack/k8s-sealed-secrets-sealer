@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
   type Ref,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -16,7 +17,12 @@ import {
   requestSeal,
   sessionQueryKey,
 } from "@/api/queries/sessions";
-import type { RepositoryFile, Seal, SealSession } from "@/api/types";
+import type {
+  PendingChange,
+  RepositoryFile,
+  Seal,
+  SealSession,
+} from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
@@ -59,6 +65,16 @@ function agentName(seal: Seal): string {
 
 function documents(n: number): string {
   return n === 1 ? "1 document" : `${n} documents`;
+}
+
+/** Whether a pending change is the one a seal made. */
+function madeBy(c: PendingChange, seal: Seal): boolean {
+  const regions = (r?: string[]) => [...(r ?? [])].sort().join(",");
+  return (
+    c.path === seal.path &&
+    c.key === seal.key &&
+    regions(c.regions) === regions(seal.regions)
+  );
 }
 
 /** What the rest of the panel may do with the form. */
@@ -128,6 +144,19 @@ export function SealForm({
   const refocus = useRef(false);
   const [seal, setSeal] = useState<Seal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // a seal's "Sealed …" line lasts as long as its change: once the change has
+  // shown up in the session and then left it (removed, discarded, or sent in
+  // a pull request), the line goes too
+  const [seenChange, setSeenChange] = useState<string | null>(null);
+  if (seal?.status === "sealed") {
+    const listed = (session?.changes ?? []).some((c) => madeBy(c, seal));
+    if (listed && seenChange !== seal.id) {
+      setSeenChange(seal.id);
+    } else if (!listed && seenChange === seal.id) {
+      setSeenChange(null);
+      setSeal(null);
+    }
+  }
   // the regions to choose between, and those chosen: all of them at first
   const choices = fileRegions(file).filter((r) => r !== "");
   const [chosen, setChosen] = useState<string[]>(choices);
@@ -203,21 +232,37 @@ export function SealForm({
   const held = targets.filter((d) => d.keys.includes(key)).length;
   const where = everywhere ? "" : ` in ${regionList(chosen)}`;
   const canSubmit = !busy && key !== "" && !problem && value !== "";
-  const note = problem
-    ? problem
-    : pendingHere
-      ? `Replaces the value of ${key} you sealed in this session${where}.`
-      : held === targets.length && held > 0
-        ? `Replaces the current value of ${key}${everywhere ? " in the file" : where}.`
-        : held > 0
-          ? `Replaces ${key} where it is set${where} and adds it to the other documents.`
-          : unexpected
-            ? `Adds ${key} to spec.encryptedData, but this file does not expect it. Check the name.`
-            : key
-              ? `Adds ${key} to spec.encryptedData${where}.`
-              : expected.length > 0
-                ? "The name in spec.encryptedData; pick a key above or type one."
-                : "The name in spec.encryptedData; existing keys are suggested.";
+  const k = <code className="font-mono">{key}</code>;
+  const data = <code className="font-mono">spec.encryptedData</code>;
+  const note: ReactNode = problem ? (
+    problem
+  ) : pendingHere ? (
+    <>
+      Replaces the value of {k} you sealed in this session{where}.
+    </>
+  ) : held === targets.length && held > 0 ? (
+    <>
+      Replaces the current value of {k}
+      {everywhere ? " in the file" : where}.
+    </>
+  ) : held > 0 ? (
+    <>
+      Replaces {k} where it is set{where} and adds it to the other documents.
+    </>
+  ) : unexpected ? (
+    <>
+      Adds {k} to {data}, but this file does not expect it. Check the name.
+    </>
+  ) : key ? (
+    <>
+      Adds {k} to {data}
+      {where}.
+    </>
+  ) : expected.length > 0 ? (
+    <>The name in {data}; pick a key above or type one.</>
+  ) : (
+    <>The name in {data}; existing keys are suggested.</>
+  );
   const toggle = (r: string) =>
     setChosen((c) =>
       c.includes(r)
@@ -288,7 +333,7 @@ export function SealForm({
     <form
       onSubmit={(e) => void submit(e)}
       aria-label={`Seal a value into ${file.path}`}
-      className="space-y-4 border-t border-border bg-muted/25 px-5 py-5"
+      className="space-y-4 border-t border-border bg-muted/25 p-4"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="text-sm font-semibold">Seal a value</h3>
@@ -367,10 +412,10 @@ export function SealForm({
                   aria-pressed={on}
                   onClick={() => toggle(r)}
                   className={cn(
-                    "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-sm transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50",
+                    "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50",
                     on
-                      ? "border-primary/40 bg-primary/10 text-primary dark:bg-primary/20"
-                      : "border-dashed border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+                      ? "border-primary bg-selected text-primary"
+                      : "border-input bg-card text-foreground hover:bg-muted",
                   )}
                 >
                   {on ? (
@@ -378,8 +423,8 @@ export function SealForm({
                   ) : (
                     <span className="h-3.5 w-3.5" aria-hidden="true" />
                   )}
-                  <span className="font-mono">{r}</span>
-                  <span className="text-xs opacity-70">
+                  <span className="font-mono font-medium">{r}</span>
+                  <span className={on ? undefined : "text-muted-foreground"}>
                     {n === 1 ? "1 doc" : `${n} docs`}
                   </span>
                 </button>
@@ -466,11 +511,13 @@ export function SealForm({
           </span>
           <Button
             type="submit"
+            size="sm"
             disabled={!canSubmit}
             className={cn(
-              "min-w-28",
+              // as wide busy as idle, so the button doesn't jump
+              "min-w-32",
               justSealed &&
-                "bg-success text-white hover:bg-success/90 disabled:opacity-100",
+                "bg-success text-success-foreground hover:bg-success/90 disabled:opacity-100",
             )}
           >
             {busy ? (

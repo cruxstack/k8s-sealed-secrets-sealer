@@ -16,14 +16,24 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatDateTime, shortFingerprint, timeAgo } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/relative-time";
+import {
+  Dash,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { formatDateTime, shortFingerprint } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 
-function Dash() {
+/** A fingerprint, short, in monospace, with the full one in its title. */
+function Fingerprint({ value }: { value: string }) {
   return (
-    <span className="text-muted-foreground" aria-label="none">
-      —
-    </span>
+    <code className="font-mono" title={value}>
+      {shortFingerprint(value)}
+    </code>
   );
 }
 
@@ -35,13 +45,15 @@ function KeyStatusBadge({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
       <span className="flex flex-col items-start gap-0.5">
         <Badge variant="destructive">Revoked</Badge>
         {fleetKey.revoked_at && (
-          <time
-            className="text-xs whitespace-nowrap text-muted-foreground"
-            dateTime={fleetKey.revoked_at}
-            title={`Revoked${by}, ${formatDateTime(fleetKey.revoked_at)}`}
-          >
-            {by.trim() || "revoked"} {timeAgo(fleetKey.revoked_at, now)}
-          </time>
+          <span className="text-xs whitespace-nowrap text-muted-foreground">
+            {by.trim() || "revoked"}{" "}
+            <RelativeTime
+              iso={fleetKey.revoked_at}
+              now={now}
+              past
+              describe={(at) => `Revoked${by}, ${at}`}
+            />
+          </span>
         )}
       </span>
     );
@@ -85,14 +97,8 @@ function KeyRow({
   const short = shortFingerprint(fleetKey.fingerprint);
   const revoked = fleetKey.status === "revoked";
   return (
-    <tr
-      className={
-        revoked
-          ? "border-b border-border align-top text-muted-foreground last:border-0"
-          : "border-b border-border align-top last:border-0"
-      }
-    >
-      <th scope="row" className="px-4 py-2.5 text-left font-normal">
+    <TableRow className={revoked ? "text-muted-foreground" : undefined}>
+      <th scope="row" className="px-4 py-3 text-left font-normal">
         <span className="flex items-center gap-1 whitespace-nowrap">
           <code className="font-mono text-xs" title={fleetKey.fingerprint}>
             {short}
@@ -100,12 +106,10 @@ function KeyRow({
           <CopyButton value={fleetKey.fingerprint} label="key fingerprint" />
         </span>
       </th>
-      <td className="px-4 py-3 whitespace-nowrap">
-        <time dateTime={fleetKey.not_before}>
-          {formatDateTime(fleetKey.not_before)}
-        </time>
-      </td>
-      <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">
+      <TableCell className="whitespace-nowrap">
+        <RelativeTime iso={fleetKey.not_before} now={now} />
+      </TableCell>
+      <TableCell className="text-right whitespace-nowrap tabular-nums">
         {holders.length > 0 ? (
           <span title={holders.join("\n")}>
             {holders.length} of {clusters}
@@ -113,8 +117,8 @@ function KeyRow({
         ) : (
           <Dash />
         )}
-      </td>
-      <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">
+      </TableCell>
+      <TableCell className="text-right whitespace-nowrap tabular-nums">
         {fleetKey.escrow_copies > 0 ? (
           <span
             title={`${fleetKey.escrow_copies} escrowed ${fleetKey.escrow_copies === 1 ? "copy" : "copies"}, each from another agent`}
@@ -129,11 +133,11 @@ function KeyRow({
             0
           </span>
         )}
-      </td>
-      <td className="px-4 py-3">
+      </TableCell>
+      <TableCell>
         <KeyStatusBadge fleetKey={fleetKey} now={now} />
-      </td>
-      <td className="px-4 py-2 text-right">
+      </TableCell>
+      <TableCell className="py-2 text-right">
         {revoked ? (
           <Button
             variant="outline"
@@ -158,8 +162,8 @@ function KeyRow({
             Revoke
           </Button>
         )}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -192,9 +196,14 @@ export function KeyTable({
     mutationFn: (k: FleetKey) => revokeKey(k.fingerprint),
     onSuccess: (_, k) => {
       setConfirming(null);
-      toast(`Revoked ${shortFingerprint(k.fingerprint)}`, {
-        description: "Rotate the values sealed with it if it may be exposed.",
-      });
+      toast.success(
+        <span>
+          Revoked <Fingerprint value={k.fingerprint} />
+        </span>,
+        {
+          description: "Rotate the values sealed with it if it may be exposed.",
+        },
+      );
     },
     onSettled: refresh,
   });
@@ -202,7 +211,11 @@ export function KeyTable({
     mutationFn: (k: FleetKey) => reinstateKey(k.fingerprint),
     onSuccess: (_, k) => {
       setConfirming(null);
-      toast(`Reinstated ${shortFingerprint(k.fingerprint)}`);
+      toast.success(
+        <span>
+          Reinstated <Fingerprint value={k.fingerprint} />
+        </span>,
+      );
     },
     onSettled: refresh,
   });
@@ -210,59 +223,47 @@ export function KeyTable({
 
   return (
     <>
-      <div className="overflow-x-auto rounded-xl border bg-card">
-        <table className="w-full text-sm">
-          <caption className="sr-only">
-            Sealing keys in this environment
-          </caption>
-          <thead className="border-b border-border bg-muted/50 text-xs tracking-wide whitespace-nowrap text-muted-foreground uppercase">
-            <tr>
-              <th scope="col" className="px-4 py-3 text-left font-semibold">
-                Key
-              </th>
-              <th scope="col" className="px-4 py-3 text-left font-semibold">
-                Valid from
-              </th>
-              <th scope="col" className="px-4 py-3 text-right font-semibold">
-                Held by
-              </th>
-              <th scope="col" className="px-4 py-3 text-right font-semibold">
-                Escrowed
-              </th>
-              <th scope="col" className="px-4 py-3 text-left font-semibold">
-                Status
-              </th>
-              <th scope="col" className="px-4 py-3 text-right font-semibold">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {keys.map((k) => (
-              <KeyRow
-                key={k.fingerprint}
-                fleetKey={k}
-                clusters={clusters}
-                now={now}
-                busy={
-                  (revoke.isPending &&
-                    revoke.variables?.fingerprint === k.fingerprint) ||
-                  (reinstate.isPending &&
-                    reinstate.variables?.fingerprint === k.fingerprint)
-                }
-                onRevoke={() => {
-                  revoke.reset();
-                  setConfirming({ key: k, action: "revoke" });
-                }}
-                onReinstate={() => {
-                  reinstate.reset();
-                  setConfirming({ key: k, action: "reinstate" });
-                }}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* cells are centred, and the action column keeps its width, so
+          nothing shifts when a key is revoked or reinstated */}
+      <Table className="[&_td]:align-middle [&_th]:align-middle">
+        <caption className="sr-only">Sealing keys in this env</caption>
+        <TableHeader>
+          <tr>
+            <TableHead>Key</TableHead>
+            <TableHead>Valid from</TableHead>
+            <TableHead className="text-right">Held by</TableHead>
+            <TableHead className="text-right">Escrowed</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="w-36 text-right">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </tr>
+        </TableHeader>
+        <tbody>
+          {keys.map((k) => (
+            <KeyRow
+              key={k.fingerprint}
+              fleetKey={k}
+              clusters={clusters}
+              now={now}
+              busy={
+                (revoke.isPending &&
+                  revoke.variables?.fingerprint === k.fingerprint) ||
+                (reinstate.isPending &&
+                  reinstate.variables?.fingerprint === k.fingerprint)
+              }
+              onRevoke={() => {
+                revoke.reset();
+                setConfirming({ key: k, action: "revoke" });
+              }}
+              onReinstate={() => {
+                reinstate.reset();
+                setConfirming({ key: k, action: "reinstate" });
+              }}
+            />
+          ))}
+        </tbody>
+      </Table>
 
       <Dialog
         open={confirming !== null}

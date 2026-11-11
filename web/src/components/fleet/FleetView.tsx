@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Server } from "lucide-react";
+import { Server } from "lucide-react";
 import { fleetQueryOptions } from "@/api/queries/fleet";
 import { extractApiError } from "@/api/client";
 import type { Fleet } from "@/api/types";
-import { Card, CardContent } from "@/components/ui/card";
+import { Alert } from "@/components/ui/alert";
+import { EmptyState } from "@/components/ui/empty-state";
+import { SectionHeading } from "@/components/ui/section-heading";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
+import { sentence } from "@/lib/utils";
 import { AgentTable } from "./AgentTable";
 import { EnvKeyBanner } from "./EnvKeyBanner";
 import { KeyTable } from "./KeyTable";
@@ -50,35 +52,22 @@ function KeyLimitNotice({ fleet }: { fleet: Fleet }) {
   const name = most.cluster !== most.id ? most.cluster : most.id;
   const where = others > 0 ? `${name} (and ${others} more)` : name;
   return (
-    <Card
+    <Alert
+      variant={over ? "destructive" : "warning"}
       role={over ? "alert" : "status"}
       aria-label="Key limit"
-      className={cn(over ? "border-destructive/50" : "border-warning/60")}
+      heading={
+        over
+          ? `${where} reports ${n} keys, more than the ${limit} kept per cluster`
+          : `${where} holds ${n} keys, ${Math.floor((n * 100) / limit)}% of the ${limit} kept per cluster`
+      }
     >
-      <CardContent className="flex items-start gap-3 p-4 text-sm">
-        <AlertTriangle
-          className={cn(
-            "mt-0.5 h-4 w-4 shrink-0",
-            over ? "text-destructive" : "text-warning",
-          )}
-          aria-hidden="true"
-        />
-        <div className="space-y-1">
-          <p className="font-medium">
-            {over
-              ? `${where} reports ${n} keys, more than the ${limit} kept per cluster`
-              : `${where} holds ${n} keys, ${Math.floor((n * 100) / limit)}% of the ${limit} kept per cluster`}
-          </p>
-          <p className="text-muted-foreground">
-            {over
-              ? `The ${most.keys_dropped} oldest are left out of key sync, so a cluster that joins does not get them.`
-              : "Past the limit, the oldest keys are left out of key sync."}{" "}
-            Keys only accumulate for now; keep key renewal on in one cluster to
-            slow that.
-          </p>
-        </div>
-      </CardContent>
-    </Card>
+      {over
+        ? `The ${most.keys_dropped} oldest are left out of key sync, so a cluster that joins does not get them.`
+        : "Past the limit, the oldest keys are left out of key sync."}{" "}
+      Keys only accumulate for now; keep key renewal on in one cluster to slow
+      that.
+    </Alert>
   );
 }
 
@@ -102,11 +91,13 @@ export function FleetView() {
     return (
       <div className="space-y-6">
         <FleetHeader />
-        <Card role="alert" className="border-destructive/50">
-          <CardContent className="p-6 text-sm text-destructive">
-            Could not load the fleet: {extractApiError(error)}
-          </CardContent>
-        </Card>
+        <Alert
+          variant="destructive"
+          role="alert"
+          heading="Could not load the fleet"
+        >
+          {sentence(extractApiError(error))}
+        </Alert>
       </div>
     );
   }
@@ -125,42 +116,27 @@ export function FleetView() {
       <KeyLimitNotice fleet={data} />
 
       <section aria-labelledby="agents-heading" className="space-y-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <div className="flex items-baseline gap-2">
-            <h2 id="agents-heading" className="text-base font-semibold">
-              Agents
-            </h2>
-            {agents.length > 0 && (
-              <span
-                className={
-                  healthy === agents.length
-                    ? "text-sm text-muted-foreground"
-                    : "text-sm text-warning"
-                }
-              >
-                {healthy} of {agents.length} healthy
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Refreshes every 15 seconds
-          </p>
-        </div>
+        <SectionHeading
+          id="agents-heading"
+          title="Agents"
+          count={
+            agents.length > 0
+              ? `${healthy} of ${agents.length} healthy`
+              : undefined
+          }
+          // a count that needs attention is amber
+          countClassName={
+            healthy === agents.length ? undefined : "text-warning"
+          }
+          aside="Refreshes every 15 seconds"
+        />
 
         {agents.length === 0 ? (
-          <Card>
-            <CardContent className="flex flex-col items-center gap-2 p-10 text-center">
-              <Server
-                className="h-8 w-8 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <p className="font-medium">No agents registered</p>
-              <p className="max-w-sm text-sm text-muted-foreground">
-                Add agents to the control plane's agent registry. Each one
-                appears here once it is registered.
-              </p>
-            </CardContent>
-          </Card>
+          <EmptyState icon={Server} title="No agents registered">
+            Nothing can be sealed until an agent checks in. Add agents to the
+            control plane's agent registry; each one appears here once it is
+            registered.
+          </EmptyState>
         ) : (
           <AgentTable
             agents={agents}
@@ -172,18 +148,12 @@ export function FleetView() {
 
       {keys.length > 0 && (
         <section aria-labelledby="keys-heading" className="space-y-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <div className="flex items-baseline gap-2">
-              <h2 id="keys-heading" className="text-base font-semibold">
-                Keys
-              </h2>
-              <span className="text-sm text-muted-foreground">
-                {keys.length} {keys.length === 1 ? "key" : "keys"}
-                {revoked > 0 && `, ${revoked} revoked`}
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground">Newest first</p>
-          </div>
+          <SectionHeading
+            id="keys-heading"
+            title="Keys"
+            count={`${keys.length} ${keys.length === 1 ? "key" : "keys"}${revoked > 0 ? `, ${revoked} revoked` : ""}`}
+            aside="Newest first"
+          />
           <KeyTable keys={keys} clusters={agents.length} />
         </section>
       )}

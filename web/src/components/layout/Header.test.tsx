@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -80,13 +86,26 @@ describe("Header", () => {
       name: "Environment dev: sealing works, some clusters are not ready",
     });
     expect(badge).toHaveTextContent("dev");
+    // the state shows in the dot's shape too, not in its color alone
+    expect(badge.querySelector("[data-sealing]")).toHaveAttribute(
+      "data-sealing",
+      "degraded",
+    );
     expect(
       screen.queryByRole("link", { name: /open the fleet/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Secrets" })).toHaveAttribute(
       "href",
       "/dev/secrets",
     );
+    expect(
+      within(nav).queryByRole("link", { name: "Fleet" }),
+    ).not.toBeInTheDocument();
+    // the icon-only theme toggle says what it does
+    expect(
+      screen.getByRole("button", { name: "Toggle theme" }),
+    ).toHaveAttribute("title", "Switch to the dark theme");
 
     fireEvent.keyDown(trigger, { key: "Enter" });
     await screen.findByRole("menuitem", { name: /sign out/i });
@@ -106,8 +125,14 @@ describe("Header", () => {
     });
   });
 
-  it("leads admins to the fleet from the env badge and the account menu", async () => {
+  it("leads admins to the fleet from the nav, the env badge and the account menu", async () => {
     renderHeader(ADMIN);
+
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute(
+      "href",
+      "/dev/fleet",
+    );
 
     expect(
       await screen.findByRole("link", {
@@ -135,14 +160,32 @@ describe("Header", () => {
     expect(items.map((i) => i.textContent)).toEqual([
       "dev",
       "prodadmin",
-      "Open the prod fleet",
+      "Fleet",
     ]);
     expect(screen.getByRole("menuitem", { name: /^prod/ })).toHaveAttribute(
       "aria-current",
       "true",
     );
-    expect(
-      screen.getByRole("menuitem", { name: "Open the prod fleet" }),
-    ).toHaveAttribute("href", "/prod/fleet");
+    expect(screen.getByRole("menuitem", { name: "Fleet" })).toHaveAttribute(
+      "href",
+      "/prod/fleet",
+    );
+    expect(screen.getByText("Envs")).toBeInTheDocument();
+  });
+
+  it("marks an env where sealing is unavailable with its own shape", async () => {
+    renderHeader(ME, {
+      env: "dev",
+      sealing: "unavailable",
+      message: "Sealing waits for the clusters to report their keys.",
+      clusters: { ready: 0, total: 3 },
+    });
+    const badge = await screen.findByRole("button", {
+      name: "Environment dev: sealing is unavailable",
+    });
+    expect(badge.querySelector("[data-sealing]")).toHaveAttribute(
+      "data-sealing",
+      "unavailable",
+    );
   });
 });

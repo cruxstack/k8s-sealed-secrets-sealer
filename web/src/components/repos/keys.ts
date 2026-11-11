@@ -71,6 +71,20 @@ export function pendingDocs(
   return out;
 }
 
+/**
+ * The pending documents per key, for one file, whose value was sealed with
+ * a key an admin has since revoked: they must be sealed again.
+ */
+export function revokedDocs(
+  changes: readonly PendingChange[],
+  path: string,
+): PendingDocs {
+  return pendingDocs(
+    changes.filter((c) => c.key_revoked),
+    path,
+  );
+}
+
 /** Whether a value for key waits in the session for the document. */
 export function isPending(
   pending: PendingDocs,
@@ -84,18 +98,23 @@ export function isPending(
 /**
  * Where a key stands in one document:
  * - `set`: the document holds it;
+ * - `revoked`: a value for it waits in the session, sealed with a key since
+ *   revoked, so it must be sealed again;
  * - `pending`: a value for it waits in the session;
  * - `lacking`: the document should hold it and doesn't: its hints name the
  *   key, or it has no hints to say otherwise;
  * - `unneeded`: the document's hints don't name it, so it isn't missed.
  */
-export type DocKeyState = "set" | "pending" | "lacking" | "unneeded";
+export type DocKeyState =
+  "set" | "revoked" | "pending" | "lacking" | "unneeded";
 
 export function docKeyState(
   d: SealedSecretDocument,
   key: string,
   pending: PendingDocs,
+  revoked: PendingDocs = NO_PENDING,
 ): DocKeyState {
+  if (isPending(revoked, key, d)) return "revoked";
   if (isPending(pending, key, d)) return "pending";
   if (d.keys.includes(key)) return "set";
   const expected = d.expected_keys ?? [];
@@ -110,13 +129,16 @@ export function docKeyState(
  * - `partial`: some hold it or have it pending, and others lack it;
  * - `missing`: it is needed, but no document holds it or has it pending;
  * - `new`: a value waits in the session, and no document holds it yet;
- * - `replaced`: a value waits in the session, replacing the file's.
+ * - `replaced`: a value waits in the session, replacing the file's;
+ * - `revoked`: a value waiting in the session was sealed with a key since
+ *   revoked: it must be sealed again (or removed) before a pull request.
  */
-export type KeyState = "set" | "partial" | "missing" | "new" | "replaced";
+export type KeyState =
+  "set" | "partial" | "missing" | "new" | "replaced" | "revoked";
 
 /** Where a key stands in one region's documents. */
 export type RegionKeyState =
-  "set" | "pending" | "partial" | "missing" | "unneeded";
+  "set" | "pending" | "revoked" | "partial" | "missing" | "unneeded";
 
 export interface RegionStatus {
   /** The region, or "" for documents without one. */
@@ -135,6 +157,8 @@ export interface KeyStatus {
   holders: number;
   /** How many documents have a value for it pending. */
   pending: number;
+  /** How many of those were sealed with a key since revoked. */
+  revoked: number;
   /** How many documents need it: those whose hints don't leave it out. */
   needed: number;
   /** The documents that lack it, as `docId` names them. */
@@ -162,6 +186,7 @@ export function fileRegions(file: RepositoryFile): string[] {
 
 function regionState(states: DocKeyState[]): RegionKeyState {
   const has = (s: DocKeyState) => states.includes(s);
+  if (has("revoked")) return "revoked";
   if (has("lacking")) {
     return has("set") || has("pending") ? "partial" : "missing";
   }
@@ -172,11 +197,13 @@ function regionState(states: DocKeyState[]): RegionKeyState {
 
 /**
  * Every key of a file worth showing: the keys its hints expect, in their
- * order, then the rest it holds or has pending, by name.
+ * order, then the rest it holds or has pending, by name. `revoked` names
+ * the pending documents sealed with a revoked key; they are also pending.
  */
 export function keyStatuses(
   file: RepositoryFile,
   pending: PendingDocs,
+  revoked: PendingDocs = NO_PENDING,
 ): KeyStatus[] {
   const docs = file.documents ?? [];
   const { expected } = fileHints(file);
@@ -186,29 +213,33 @@ export function keyStatuses(
   ].filter((k) => !expected.includes(k));
   others.sort();
   return [...expected, ...others].map((key) => {
-    const states = docs.map((d) => docKeyState(d, key, pending));
+    const states = docs.map((d) => docKeyState(d, key, pending, revoked));
     const count = (s: DocKeyState) => states.filter((x) => x === s).length;
     const holders = docs.filter((d) => d.keys.includes(key)).length;
-    const waiting = count("pending");
+    const stale = count("revoked");
+    const waiting = count("pending") + stale;
     const lacking = docs
       .filter((_, i) => states[i] === "lacking")
       .map((d) => docId(d));
     const state: KeyState =
-      lacking.length === 0
-        ? waiting > 0
-          ? holders > 0
-            ? "replaced"
-            : "new"
-          : "set"
-        : holders > 0 || waiting > 0
-          ? "partial"
-          : "missing";
+      stale > 0
+        ? "revoked"
+        : lacking.length === 0
+          ? waiting > 0
+            ? holders > 0
+              ? "replaced"
+              : "new"
+            : "set"
+          : holders > 0 || waiting > 0
+            ? "partial"
+            : "missing";
     return {
       key,
       state,
       expected: expected.includes(key),
       holders,
       pending: waiting,
+      revoked: stale,
       needed: states.filter((s) => s !== "unneeded").length,
       lacking,
       regions: regions.map((region) => {

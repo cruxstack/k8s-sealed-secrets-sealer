@@ -141,11 +141,10 @@ describe("repositories", () => {
     ).toHaveLength(2);
 
     fireEvent.click(buttons[2] as HTMLElement);
-    expect(
-      await screen.findByText(
-        /could not read this file: file is not valid yaml/i,
-      ),
-    ).toBeInTheDocument();
+    // an unreadable file is a failure, in the panel as in the list
+    const unreadable = await screen.findByRole("alert");
+    expect(unreadable).toHaveTextContent(/could not read this file/i);
+    expect(unreadable).toHaveTextContent("File is not valid YAML.");
     expect(screen.getByText("0123456")).toBeInTheDocument();
     expect(screen.queryByText(/not write to it/)).not.toBeInTheDocument();
   });
@@ -187,10 +186,51 @@ describe("repositories", () => {
     expect(screen.getByText("*sealed*.yaml")).toBeInTheDocument();
   });
 
-  it("reports a repository the user cannot read as not found", async () => {
+  it("reports a repository the user cannot read as not found, with the way back", async () => {
     renderAt("/secrets/example-org/restricted", fakeApi({ me: ME }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /could not load this repository/i,
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/repository not found/i);
+    expect(alert).toHaveTextContent("example-org/restricted doesn't exist");
+    expect(
+      within(alert).getByRole("link", { name: "Back to Secrets" }),
+    ).toHaveAttribute("href", "/dev/secrets");
+  });
+
+  it("shows the table's shape and a disabled filter while loading", async () => {
+    const api = fakeApi({ me: ME, repos: [REPO_APPS] });
+    // the repository list never answers
+    renderAt("/secrets", {
+      ...api,
+      adapter: (config) =>
+        config.url?.endsWith("/repos")
+          ? new Promise(() => {})
+          : api.adapter(config),
+    });
+    const loading = await screen.findByLabelText("Loading repositories");
+    expect(within(loading).getByRole("table")).toBeInTheDocument();
+    expect(
+      screen.getByRole("searchbox", { name: "Filter repositories" }),
+    ).toBeDisabled();
+  });
+
+  it("offers to clear a filter that matches nothing", async () => {
+    renderAt(
+      "/secrets",
+      fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
     );
+    const filter = await screen.findByRole("searchbox", {
+      name: "Filter repositories",
+    });
+    fireEvent.change(filter, { target: { value: "nope" } });
+    expect(
+      screen.getByText("No repository matches “nope”."),
+    ).toBeInTheDocument();
+    // one in the field, which replaces its shortcut hint, and one with the
+    // empty result
+    const clear = screen.getAllByRole("button", { name: "Clear filter" });
+    expect(clear).toHaveLength(2);
+    fireEvent.click(clear[1] as HTMLElement);
+    expect(filter).toHaveValue("");
+    expect(screen.getAllByRole("rowheader")).toHaveLength(2);
   });
 });

@@ -5,6 +5,8 @@ import {
   type ErrorComponentProps,
 } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
+import { NotFound } from "@/components/layout/NotFound";
+import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/toaster";
 import { AuthProvider } from "@/lib/auth";
 
@@ -13,6 +15,7 @@ export const Route = createRootRouteWithContext<{
 }>()({
   component: RootComponent,
   errorComponent: RouteError,
+  notFoundComponent: NotFound,
 });
 
 function ErrorPanel({ title, message }: { title: string; message: string }) {
@@ -26,13 +29,9 @@ function ErrorPanel({ title, message }: { title: string; message: string }) {
         <pre className="max-h-40 overflow-auto rounded-md bg-muted p-4 text-left text-xs">
           {message}
         </pre>
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-        >
+        <Button type="button" onClick={() => window.location.reload()}>
           Refresh page
-        </button>
+        </Button>
       </div>
     </div>
   );

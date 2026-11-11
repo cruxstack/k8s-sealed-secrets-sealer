@@ -69,7 +69,7 @@ describe("command palette", () => {
     expect(apps).toHaveTextContent("2 pending");
     expect(
       within(dialog).getByRole("option", { name: /example-org\/platform/ }),
-    ).toHaveTextContent("read only");
+    ).toHaveTextContent("Read only");
 
     const input = within(dialog).getByRole("combobox");
     fireEvent.change(input, { target: { value: "platform" } });
@@ -99,6 +99,22 @@ describe("command palette", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/dev/fleet"),
     );
+  });
+
+  it("says what found nothing", async () => {
+    renderAt("/secrets");
+    fireEvent.keyDown(
+      await screen.findByRole("button", { name: /account menu/i }),
+      { key: "k", ctrlKey: true },
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("option", { name: /example-org\/apps/ });
+    fireEvent.change(within(dialog).getByRole("combobox"), {
+      target: { value: "zzz" },
+    });
+    expect(
+      await within(dialog).findByText("No repository or page matches “zzz”."),
+    ).toBeInTheDocument();
   });
 
   it("offers the fleet to admins only", async () => {

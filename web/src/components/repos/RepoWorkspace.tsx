@@ -1,26 +1,19 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import {
-  CircleSlash,
-  ExternalLink,
-  FileSearch,
-  FileWarning,
-  GitBranch,
-  Lock,
-  X,
-} from "lucide-react";
-import { extractApiError } from "@/api/client";
+import { ExternalLink, FileSearch, GitBranch, Lock, X } from "lucide-react";
+import { toApiError } from "@/api/client";
 import { repoFilesQueryOptions } from "@/api/queries/repos";
 import { sessionQueryOptions } from "@/api/queries/sessions";
 import { statusQueryOptions } from "@/api/queries/status";
-import type { PullRequest, RepositoryFile } from "@/api/types";
+import type { PullRequest, RepositoryFile, SealSession } from "@/api/types";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useEnv } from "@/lib/env";
-import { safeHttpUrl } from "@/lib/utils";
+import { safeHttpUrl, sentence } from "@/lib/utils";
 import { FileList, fileStatus } from "./FileList";
 import { FilePanel } from "./FilePanel";
 import { OpenedDialog, PendingChanges } from "./PendingChanges";
@@ -41,38 +34,41 @@ function OpenedBanner({
 }) {
   const url = safeHttpUrl(pr.url);
   return (
-    <div
+    <Alert
+      variant="success"
       role="status"
       aria-label="Pull request opened"
-      className="flex flex-col gap-3 rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-    >
-      <p>
-        Opened pull request <span className="font-semibold">#{pr.number}</span>:{" "}
-        {pr.title}.{" "}
-        <span className="text-muted-foreground">
-          Branch <code className="font-mono text-xs">{pr.branch}</code>.
-        </span>
-      </p>
-      <div className="flex shrink-0 items-center gap-1">
-        {url && (
-          <Button asChild variant="outline" size="sm">
-            <a href={url} target="_blank" rel="noopener noreferrer">
-              View pull request
-              <ExternalLink className="ml-1.5 h-3.5 w-3.5" aria-hidden="true" />
-            </a>
+      action={
+        <>
+          {url && (
+            <Button asChild variant="outline" size="sm">
+              <a href={url} target="_blank" rel="noopener noreferrer">
+                View pull request
+                <ExternalLink
+                  className="ml-1.5 h-3.5 w-3.5"
+                  aria-hidden="true"
+                />
+              </a>
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="Dismiss"
+            onClick={onDismiss}
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
           </Button>
-        )}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          aria-label="Dismiss"
-          onClick={onDismiss}
-        >
-          <X className="h-4 w-4" aria-hidden="true" />
-        </Button>
-      </div>
-    </div>
+        </>
+      }
+    >
+      Opened pull request <span className="font-semibold">#{pr.number}</span>:{" "}
+      {pr.title}.{" "}
+      <span className="text-muted-foreground">
+        Branch <code className="font-mono text-xs">{pr.branch}</code>.
+      </span>
+    </Alert>
   );
 }
 
@@ -88,6 +84,68 @@ function WorkspaceSkeleton() {
         <Skeleton className="h-36 w-full" />
       </div>
       <Skeleton className="h-[30rem] w-full" />
+    </div>
+  );
+}
+
+/**
+ * The repository could not be read: why, and the way back to the list. A
+ * session's pending changes stay reachable below, so they can still be
+ * discarded when the commit they are based on is gone.
+ */
+function LoadError({
+  name,
+  error,
+  session,
+  children,
+}: {
+  name: string;
+  error: unknown;
+  session: SealSession | null;
+  children?: ReactNode;
+}) {
+  const env = useEnv()?.name ?? "";
+  const { status, message } = toApiError(error);
+  const missing = status === 404 && !session;
+  return (
+    <div className="space-y-6">
+      <Alert
+        variant="destructive"
+        role="alert"
+        heading={
+          missing ? "Repository not found" : "Could not load this repository"
+        }
+        action={
+          <Button asChild variant="outline" size="sm">
+            <Link to="/$env/secrets" params={{ env }}>
+              Back to Secrets
+            </Link>
+          </Button>
+        }
+      >
+        {missing ? (
+          <>
+            <code className="font-mono text-xs [overflow-wrap:anywhere]">
+              {name}
+            </code>{" "}
+            doesn't exist, you can't read it on GitHub, or the Sealer GitHub App
+            isn't installed on it.
+          </>
+        ) : status === 404 ? null : (
+          `${sentence(message)} `
+        )}
+        {session && (
+          <>
+            The files are read at the commit your pending changes are based on,{" "}
+            <code className="font-mono text-xs">
+              {session.commit.slice(0, 7)}
+            </code>
+            . If it is gone from {session.branch}, discard the changes to start
+            again from its head.
+          </>
+        )}
+      </Alert>
+      {children && <div className="lg:w-80">{children}</div>}
     </div>
   );
 }
@@ -136,6 +194,7 @@ export function RepoWorkspace({
   const current = chosen ?? defaultFile(files);
   const canWrite = data?.repository.access === "write";
   const changes = session?.changes ?? [];
+  const name = data?.repository.full_name ?? `${owner}/${repo}`;
 
   return (
     <div className="space-y-6">
@@ -152,13 +211,11 @@ export function RepoWorkspace({
                   Secrets
                 </Link>
               </li>
-              <li aria-hidden="true" className="text-muted-foreground/60">
+              <li aria-hidden="true" className="text-muted-foreground">
                 /
               </li>
               <li aria-current="page" className="min-w-0">
-                <h1 className="font-mono font-semibold break-all">
-                  {data?.repository.full_name ?? `${owner}/${repo}`}
-                </h1>
+                <h1 className="font-mono font-semibold break-all">{name}</h1>
               </li>
             </ol>
           </nav>
@@ -172,11 +229,14 @@ export function RepoWorkspace({
           )}
         </div>
         {data && (
-          <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             SealedSecrets for the{" "}
-            <span className="font-medium text-foreground">{env}</span> env on
-            <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
-            <code className="font-mono text-xs">{data.branch}</code> at{" "}
+            <span className="font-medium text-foreground">{env}</span> env on{" "}
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+              <code className="font-mono text-xs">{data.branch}</code>
+            </span>{" "}
+            at{" "}
             <code className="font-mono text-xs" title={data.commit}>
               {data.commit.slice(0, 7)}
             </code>
@@ -187,9 +247,7 @@ export function RepoWorkspace({
       {isPending ? (
         <WorkspaceSkeleton />
       ) : error && !data ? (
-        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
-          {/* pending changes stay reachable, so they can still be discarded
-              when the commit they are based on is gone */}
+        <LoadError name={name} error={error} session={session}>
           {session && (
             <PendingChanges
               owner={owner}
@@ -202,94 +260,52 @@ export function RepoWorkspace({
               }}
             />
           )}
-          <Card
-            role="alert"
-            className="border-destructive/50 lg:col-start-2 lg:row-start-1"
-          >
-            <CardContent className="space-y-1 p-6 text-sm">
-              <p className="text-destructive">
-                Could not load this repository: {extractApiError(error)}
-              </p>
-              {session && (
-                <p className="text-muted-foreground">
-                  The files are read at the commit your pending changes are
-                  based on,{" "}
-                  <code className="font-mono text-xs">
-                    {session.commit.slice(0, 7)}
-                  </code>
-                  . If it is gone from {session.branch}, discard the changes to
-                  start again from its head.
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+        </LoadError>
       ) : (
         <>
           {opened && (
             <OpenedBanner pr={opened} onDismiss={() => setOpened(null)} />
           )}
           {!canWrite && (
-            <p className="flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm">
-              <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <Alert variant="info" icon={Lock}>
               You can read this repository but not write to it. Sealing needs
               write access on GitHub.
-            </p>
+            </Alert>
           )}
           {canWrite && status?.sealing === "unavailable" && (
-            <p
+            <Alert
+              variant="destructive"
               role="status"
-              className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm"
+              heading={`Can't seal in ${env} right now`}
             >
-              <CircleSlash
-                className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
-                aria-hidden="true"
-              />
-              <span>
-                Sealing is unavailable in {env} right now: {status.message}{" "}
-                <span className="text-muted-foreground">
-                  You can look around, but seals fail until its clusters are
-                  back.
-                </span>
-              </span>
-            </p>
+              {sentence(status.message)} You can still look around.
+            </Alert>
           )}
           {data.truncated && (
-            <p
-              role="status"
-              className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm"
-            >
-              This repository is too large to search completely; some files may
-              be missing.
-            </p>
+            <Alert variant="info" role="status">
+              This repository is too large to search completely, so some files
+              may be missing.
+            </Alert>
           )}
 
           {files.length === 0 ? (
-            <Card>
-              <CardContent className="flex flex-col items-center gap-2 p-10 text-center">
-                <FileSearch
-                  className="h-8 w-8 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <p className="font-medium">No SealedSecrets for {env}</p>
-                <p className="max-w-md text-sm text-muted-foreground">
-                  No file on {data.branch} has a SealedSecret annotated for this
-                  env. Files searched:{" "}
-                  {data.file_globs.map((g, i) => (
-                    <span key={g}>
-                      {i > 0 && ", "}
-                      <code className="font-mono text-xs">{g}</code>
-                    </span>
-                  ))}
-                  .
-                </p>
-              </CardContent>
-            </Card>
+            <EmptyState icon={FileSearch} title={`No SealedSecrets for ${env}`}>
+              No file on {data.branch} has a SealedSecret annotated for this
+              env. Files searched:{" "}
+              {data.file_globs.map((g, i) => (
+                <span key={g}>
+                  {i > 0 && ", "}
+                  <code className="font-mono text-xs">{g}</code>
+                </span>
+              ))}
+              .
+            </EmptyState>
           ) : (
             <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
               {/* the files and the pending changes stay in view while the
-                  page scrolls; the file list scrolls on its own */}
-              <aside className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-0 lg:max-h-[calc(100vh-7.5rem)]">
+                  page scrolls, clear of the header; the file list scrolls
+                  on its own */}
+              <aside className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-6 lg:max-h-[calc(100vh-6.5rem)]">
                 <FileList
                   files={files}
                   selected={current?.path}
@@ -314,19 +330,10 @@ export function RepoWorkspace({
               </aside>
               <div className="min-w-0 space-y-6">
                 {selected && !chosen && (
-                  <p
-                    role="status"
-                    className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm"
-                  >
-                    <FileWarning
-                      className="mt-0.5 h-4 w-4 shrink-0 text-warning"
-                      aria-hidden="true"
-                    />
-                    <span>
-                      <code className="font-mono">{selected}</code> is not among
-                      this repository's SealedSecret files for {env}.
-                    </span>
-                  </p>
+                  <Alert variant="warning" role="status">
+                    <code className="font-mono text-xs">{selected}</code> is not
+                    among this repository's SealedSecret files for {env}.
+                  </Alert>
                 )}
                 {current && (
                   <FilePanel

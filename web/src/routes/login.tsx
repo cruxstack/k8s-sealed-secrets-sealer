@@ -1,5 +1,6 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { FileLock } from "lucide-react";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { resolveCurrentUser } from "@/lib/auth";
 import { loginErrorMessage } from "@/lib/login-errors";
@@ -62,12 +63,9 @@ function LoginPage() {
         </div>
 
         {errorMessage && (
-          <div
-            role="alert"
-            className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive"
-          >
+          <Alert variant="destructive" role="alert">
             {errorMessage}
-          </div>
+          </Alert>
         )}
 
         <Button asChild className="w-full" size="lg">

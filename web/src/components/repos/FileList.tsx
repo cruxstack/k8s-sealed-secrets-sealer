@@ -1,9 +1,9 @@
 import { useRef, useState, type KeyboardEvent } from "react";
-import { Search } from "lucide-react";
 import type { PendingChange, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Kbd } from "@/components/ui/kbd";
+import { Button } from "@/components/ui/button";
+import { FilterInput } from "@/components/ui/filter-input";
+import { CardHeading } from "@/components/ui/section-heading";
 import { useShortcut } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import { fileHints } from "./hints";
@@ -103,28 +103,19 @@ export function FileList({
   return (
     <section
       aria-labelledby="files-heading"
-      className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card"
+      className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <h2
-          id="files-heading"
-          className="flex items-center gap-2 text-sm font-semibold"
-        >
+        <CardHeading id="files-heading" count={files.length}>
           Files
-          <Badge variant="secondary">{files.length}</Badge>
-        </h2>
+        </CardHeading>
       </div>
-      <div className="relative border-b border-border p-2">
-        <Search
-          className="pointer-events-none absolute top-1/2 left-4.5 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <Input
-          ref={filterRef}
-          type="search"
+      <div className="border-b border-border p-2">
+        <FilterInput
+          inputRef={filterRef}
           name="file-filter"
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onValueChange={setFilter}
           onKeyDown={(e) => {
             if (e.key === "Enter" && shown[0]) {
               e.preventDefault();
@@ -138,16 +129,15 @@ export function FileList({
           }}
           placeholder="Filter files"
           aria-label="Filter files"
-          className="h-9 pr-9 pl-8"
         />
-        <Kbd className="pointer-events-none absolute top-1/2 right-4 -translate-y-1/2">
-          /
-        </Kbd>
       </div>
       {shown.length === 0 ? (
-        <p className="px-4 py-6 text-center text-sm text-muted-foreground">
-          No file matches “{filter.trim()}”.
-        </p>
+        <div className="space-y-2 px-4 py-6 text-center text-sm text-muted-foreground">
+          <p>No file matches “{filter.trim()}”.</p>
+          <Button variant="outline" size="sm" onClick={() => setFilter("")}>
+            Clear filter
+          </Button>
+        </div>
       ) : (
         <ul
           ref={listRef}
@@ -157,12 +147,15 @@ export function FileList({
           {shown.map((f, i) => {
             const status = fileStatus(f);
             const isSelected = f.path === selected;
-            const count = changes.filter((c) => c.path === f.path).length;
+            const mine = changes.filter((c) => c.path === f.path);
+            const stale = mine.filter((c) => c.key_revoked).length;
+            const count = mine.length - stale;
             const { description } = fileHints(f);
             const missing =
               status === "unreadable"
                 ? []
                 : missingKeys(f, pendingDocs(changes, f.path));
+            const badges = missing.length > 0 || count > 0 || stale > 0;
             return (
               <li key={f.path}>
                 <button
@@ -171,10 +164,10 @@ export function FileList({
                   onKeyDown={(e) => move(e, i)}
                   aria-current={isSelected ? "true" : undefined}
                   className={cn(
-                    "group w-full rounded-lg border border-transparent px-3 py-2 text-left text-[13px] transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                    "group w-full rounded-lg border px-2.5 py-2 text-left text-[13px] transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                     isSelected
-                      ? "border-primary/30 bg-primary/8 dark:bg-primary/15"
-                      : "hover:bg-muted/70",
+                      ? "border-primary bg-selected"
+                      : "border-transparent hover:bg-muted/70",
                   )}
                 >
                   <span className="flex items-start gap-2">
@@ -189,16 +182,42 @@ export function FileList({
                       <FilePath path={f.path} />
                       {description && (
                         <span
-                          className="mt-0.5 block truncate text-xs text-foreground/80"
+                          className="mt-0.5 block truncate text-xs text-foreground"
                           title={description}
                         >
                           {description}
                         </span>
                       )}
-                      {/* the badges wrap below the summary as one group */}
-                      <span className="mt-0.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                        <span className="whitespace-nowrap">{summary(f)}</span>
-                        <span className="flex shrink-0 items-center gap-1">
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        {summary(f)}
+                      </span>
+                      {/* the badges always get their own row, left-aligned */}
+                      {badges && (
+                        <span className="mt-1.5 flex flex-wrap items-center gap-1">
+                          {stale > 0 && (
+                            <Badge
+                              variant="warning"
+                              title="Sealed with a key an admin has since revoked: seal again, or remove it"
+                            >
+                              Seal again
+                              <span className="sr-only">
+                                {stale === 1
+                                  ? " 1 pending change"
+                                  : ` ${stale} pending changes`}
+                              </span>
+                            </Badge>
+                          )}
+                          {count > 0 && (
+                            <Badge variant="info">
+                              {count}{" "}
+                              <span className="sr-only">
+                                {count === 1
+                                  ? "pending change"
+                                  : "pending changes"}
+                              </span>
+                              <span aria-hidden="true">pending</span>
+                            </Badge>
+                          )}
                           {missing.length > 0 && (
                             <Badge
                               variant="outline"
@@ -211,19 +230,8 @@ export function FileList({
                               </span>
                             </Badge>
                           )}
-                          {count > 0 && (
-                            <Badge className="shrink-0">
-                              {count}{" "}
-                              <span className="sr-only">
-                                {count === 1
-                                  ? "pending change"
-                                  : "pending changes"}
-                              </span>
-                              <span aria-hidden="true">pending</span>
-                            </Badge>
-                          )}
                         </span>
-                      </span>
+                      )}
                     </span>
                   </span>
                 </button>

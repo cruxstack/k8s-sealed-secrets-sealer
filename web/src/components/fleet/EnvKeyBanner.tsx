@@ -1,49 +1,89 @@
-import { AlertTriangle, KeyRound } from "lucide-react";
+import { KeyRound, TriangleAlert } from "lucide-react";
 import type { Fleet } from "@/api/types";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { cn, formatDateTime, shortFingerprint } from "@/lib/utils";
+import { Card, CardContent } from "@/components/ui/card";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { cn, shortFingerprint } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 
-/** The env and its key state: the env key, or a warning that there is none. */
+/** What to expect while no key is held by every cluster. */
+function outOfSyncDetail(fleet: Fleet): string {
+  const agents = fleet.agents ?? [];
+  if (agents.length > 0 && agents.every((a) => !a.checked_in)) {
+    return "No agent has checked in yet; sealing starts once the clusters report their keys.";
+  }
+  if (agents.some((a) => a.in_scope && (a.missing_keys ?? []).length > 0)) {
+    return "The Missing column below counts the keys each cluster lacks; key sync restores them on its next check-ins.";
+  }
+  return "Key sync restores what each cluster lacks on its next check-ins.";
+}
+
+/**
+ * The env's key state: the env key values are sealed with, or why there is
+ * none and sealing is unavailable.
+ */
 export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
   const key = fleet.env_key;
   const inSync = fleet.keys_in_sync && key !== null;
+  const env = <span className="font-medium text-foreground">{fleet.env}</span>;
 
   return (
     <Card
       role="region"
-      aria-label="Environment key"
-      className={cn(!inSync && "border-warning/60")}
+      aria-label="Env key"
+      className={cn(!inSync && "border-destructive/40")}
     >
-      <CardContent className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-3">
+      <CardContent
+        role={inSync ? undefined : "alert"}
+        className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between"
+      >
+        <div className="flex items-start gap-3">
           <div
             className={cn(
-              "flex h-10 w-10 items-center justify-center rounded-lg",
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
               inSync
-                ? "bg-primary/10 text-primary"
-                : "bg-warning/15 text-warning",
+                ? "bg-success-subtle text-success"
+                : "bg-destructive-subtle text-destructive",
             )}
           >
             {inSync ? (
               <KeyRound className="h-5 w-5" aria-hidden="true" />
             ) : (
-              <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+              <TriangleAlert className="h-5 w-5" aria-hidden="true" />
             )}
           </div>
-          <div>
+          <div className="space-y-0.5">
             <h2 className="text-lg font-semibold">
-              Environment <span className="font-mono">{fleet.env}</span>
+              {inSync
+                ? "Keys in sync"
+                : fleet.no_usable_key
+                  ? "New key needed"
+                  : "Keys out of sync"}
             </h2>
-            <p className="text-sm text-muted-foreground">
-              Values are sealed with the newest key every cluster holds.
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              {inSync ? (
+                <>
+                  Values in the {env} env are sealed with the env key, the
+                  newest key every cluster holds.
+                </>
+              ) : fleet.no_usable_key ? (
+                <>
+                  Every key the clusters share is revoked or not valid yet, so
+                  sealing in the {env} env is unavailable. Let a controller
+                  renew its key, or reinstate a key revoked by mistake.
+                </>
+              ) : (
+                <>
+                  No key is held by every cluster yet, so sealing in the {env}{" "}
+                  env is unavailable. {outOfSyncDetail(fleet)}
+                </>
+              )}
             </p>
           </div>
         </div>
 
         {inSync && key ? (
-          <dl className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 text-sm">
+          <dl className="grid shrink-0 grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 text-sm">
             <dt className="text-muted-foreground">Env key</dt>
             <dd className="flex items-center gap-1">
               <code className="font-mono" title={key.fingerprint}>
@@ -53,32 +93,13 @@ export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
             </dd>
             <dt className="text-muted-foreground">Valid from</dt>
             <dd>
-              <time dateTime={key.not_before}>
-                {formatDateTime(key.not_before)}
-              </time>
+              <RelativeTime iso={key.not_before} />
             </dd>
           </dl>
-        ) : fleet.no_usable_key ? (
-          <div role="alert" className="flex flex-col gap-1 md:items-end">
-            <Badge variant="warning" className="text-xs">
-              New key needed
-            </Badge>
-            <p className="max-w-md text-sm text-muted-foreground md:text-right">
-              Every key the clusters share is revoked or not valid yet, so
-              sealing is unavailable. Let a controller renew its key, or
-              reinstate a key revoked by mistake.
-            </p>
-          </div>
         ) : (
-          <div role="alert" className="flex flex-col gap-1 md:items-end">
-            <Badge variant="warning" className="text-xs">
-              Keys out of sync
-            </Badge>
-            <p className="max-w-md text-sm text-muted-foreground md:text-right">
-              No key is held by every cluster yet, so sealing is unavailable.
-              The table shows which keys each cluster is missing.
-            </p>
-          </div>
+          <Badge variant="destructive" className="shrink-0 self-start text-xs">
+            Sealing unavailable
+          </Badge>
         )}
       </CardContent>
     </Card>

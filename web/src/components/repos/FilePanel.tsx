@@ -1,14 +1,25 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
-import { BookOpen, ExternalLink, FileWarning, Info } from "lucide-react";
+import { BookOpen, ExternalLink, Info, ShieldAlert } from "lucide-react";
 import type {
   RepositoryFile,
   SealSession,
   SealedSecretDocument,
 } from "@/api/types";
 import { CopyButton } from "@/components/fleet/CopyButton";
-import { cn } from "@/lib/utils";
+import { cn, sentence } from "@/lib/utils";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { RegionTag } from "@/components/ui/region-tag";
+import { CardHeading } from "@/components/ui/section-heading";
+import {
+  Dash,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Tooltip,
   TooltipContent,
@@ -17,7 +28,7 @@ import {
 import { FilePath, fileStatus } from "./FileList";
 import { fileHints } from "./hints";
 import { KeyList } from "./KeyList";
-import { NO_PENDING, keyStatuses, pendingDocs } from "./keys";
+import { NO_PENDING, keyStatuses, pendingDocs, revokedDocs } from "./keys";
 import { SealForm, type SealFormHandle } from "./SealForm";
 
 const SCOPES: Record<
@@ -39,16 +50,10 @@ const SCOPES: Record<
   },
 };
 
-function Dash() {
-  return (
-    <span className="text-muted-foreground" aria-label="none">
-      —
-    </span>
-  );
-}
-
 function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
   const s = SCOPES[scope];
+  // a scope that is refused needs attention; it is not a failure
+  const refused = scope === "cluster-wide";
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -58,11 +63,15 @@ function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
           aria-label={`${s.label} scope: ${s.detail}`}
         >
           <Badge
-            variant={scope === "cluster-wide" ? "destructive" : "outline"}
-            className="cursor-help"
+            variant="outline"
+            className={cn(
+              "cursor-help",
+              refused && "border-warning/60 text-warning",
+            )}
           >
+            {refused && <ShieldAlert className="h-3 w-3" aria-hidden="true" />}
             {s.label}
-            <Info className="h-3 w-3 opacity-60" aria-hidden="true" />
+            <Info className="h-3 w-3" aria-hidden="true" />
           </Badge>
         </button>
       </TooltipTrigger>
@@ -76,8 +85,8 @@ function ScopeBadge({ scope }: { scope: SealedSecretDocument["scope"] }) {
 
 /**
  * The documents a value is sealed for: where each lives, and its scope. When
- * the seal is limited to some regions, the others are dimmed. A document
- * values can't be sealed into says why.
+ * the seal is limited to some regions, the others say they are left out. A
+ * document values can't be sealed into says why.
  */
 function Documents({
   file,
@@ -96,42 +105,50 @@ function Documents({
   const left = (d: SealedSecretDocument) =>
     regions !== null && !regions.includes(d.region ?? "");
   const count = docs.filter((d) => !left(d)).length;
+  const note = !sealing
+    ? null
+    : regions !== null
+      ? `Sealed for ${count} of these ${docs.length} documents`
+      : docs.length === 1
+        ? "Sealed for this document"
+        : `Sealed for all ${docs.length}`;
   return (
     <div className="border-t border-border">
-      <h3 className="px-5 pt-4 pb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-        {!sealing
-          ? docs.length === 1
-            ? "1 document"
-            : `${docs.length} documents`
-          : regions !== null
-            ? `Sealed for ${count} of these ${docs.length} documents`
-            : docs.length === 1
-              ? "Sealed for this document"
-              : `Sealed for these ${docs.length} documents`}
-      </h3>
-      <table className="w-full text-sm">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-3">
+        <CardHeading as="h3" count={docs.length}>
+          Documents
+        </CardHeading>
+        {note && (
+          <p
+            className={cn(
+              "text-xs",
+              regions !== null ? "text-primary" : "text-muted-foreground",
+            )}
+          >
+            {note}
+          </p>
+        )}
+      </div>
+      <Table containerClassName="mx-4 mb-4">
         <caption className="sr-only">
           SealedSecret documents in {file.path}
         </caption>
-        <thead className="sr-only">
+        <TableHeader>
           <tr>
-            <th scope="col">Namespace / name</th>
-            <th scope="col">Region</th>
-            <th scope="col">Scope</th>
+            <TableHead>Namespace / name</TableHead>
+            <TableHead>Region</TableHead>
+            <TableHead className="text-right">Scope</TableHead>
           </tr>
-        </thead>
+        </TableHeader>
         <tbody>
           {docs.map((d) => (
-            <tr
-              key={d.index}
-              className={cn(
-                "border-t border-border/60 align-top transition-opacity first:border-0",
-                left(d) && "opacity-45",
-              )}
-            >
+            <TableRow key={d.index} className="align-top">
               <th
                 scope="row"
-                className="w-full py-2 pr-3 pl-5 text-left font-mono text-[13px] font-medium [overflow-wrap:anywhere]"
+                className={cn(
+                  "w-full px-4 py-2.5 text-left font-mono text-[13px] font-medium [overflow-wrap:anywhere]",
+                  left(d) && "text-muted-foreground",
+                )}
               >
                 {d.namespace || <Dash />}
                 <span className="text-muted-foreground">/</span>
@@ -143,21 +160,20 @@ function Documents({
                 )}
                 {d.problem && (
                   <p className="mt-1 max-w-md font-sans text-xs font-normal text-warning">
-                    {d.problem}
+                    {sentence(d.problem)}
                   </p>
                 )}
               </th>
-              <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">
-                {d.region || <Dash />}
-              </td>
-              <td className="py-1.5 pr-5 pl-3 text-right">
+              <TableCell className="py-2.5 whitespace-nowrap">
+                {d.region ? <RegionTag region={d.region} /> : <Dash />}
+              </TableCell>
+              <TableCell className="py-2 text-right">
                 <ScopeBadge scope={d.scope} />
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
         </tbody>
-      </table>
-      <div className="h-2" />
+      </Table>
     </div>
   );
 }
@@ -176,9 +192,9 @@ function Panel({
   return (
     <section
       aria-label={file.path}
-      className="overflow-hidden rounded-xl border bg-card shadow-xs"
+      className="overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
-      <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
         <div className="min-w-0 space-y-1">
           <h2 className="flex items-center gap-1 text-[15px] leading-6">
             <FilePath path={file.path} />
@@ -227,7 +243,9 @@ export function FilePanel({
   const status = fileStatus(file);
   const docs = file.documents ?? [];
   const hints = fileHints(file);
-  const pending = pendingDocs(session?.changes ?? [], file.path);
+  const changes = session?.changes ?? [];
+  const pending = pendingDocs(changes, file.path);
+  const revoked = revokedDocs(changes, file.path);
   const form = useRef<SealFormHandle>(null);
   const [current, setCurrent] = useState("");
   // the regions the form's seal is limited to; null for every document
@@ -245,13 +263,24 @@ export function FilePanel({
   if (status === "unreadable") {
     return (
       <Panel file={file}>
-        <p className="flex items-center gap-2 px-5 py-4 text-sm text-warning">
-          <FileWarning className="h-4 w-4 shrink-0" aria-hidden="true" />
-          Could not read this file: {file.error}
-        </p>
+        <div className="p-4">
+          <Alert
+            variant="destructive"
+            role="alert"
+            heading="Could not read this file"
+          >
+            {sentence(file.error ?? "")} Fix it in the repository, then reload.
+          </Alert>
+        </div>
       </Panel>
     );
   }
+
+  const keys = keyStatuses(
+    file,
+    sealing ? pending : NO_PENDING,
+    sealing ? revoked : NO_PENDING,
+  );
 
   return (
     <Panel
@@ -259,7 +288,7 @@ export function FilePanel({
       aside={
         <>
           {hints.description && (
-            <p className="text-sm text-foreground/85">{hints.description}</p>
+            <p className="text-sm text-foreground">{hints.description}</p>
           )}
           <p className="text-xs text-muted-foreground">
             {docs.length === 1
@@ -275,7 +304,7 @@ export function FilePanel({
               <BookOpen className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
               Docs
               <ExternalLink
-                className="ml-1.5 h-3 w-3 opacity-60"
+                className="ml-1.5 h-3 w-3 text-muted-foreground"
                 aria-hidden="true"
               />
               <span className="sr-only"> (opens in a new tab)</span>
@@ -284,9 +313,10 @@ export function FilePanel({
         )
       }
     >
-      {docs.length > 0 && (
+      {/* a file nothing can be sealed into lists only the keys it holds */}
+      {docs.length > 0 && (sealing || keys.length > 0) && (
         <KeyList
-          keys={keyStatuses(file, sealing ? pending : NO_PENDING)}
+          keys={keys}
           docs={docs.length}
           current={sealing ? current : undefined}
           onPick={sealing ? (k, rs) => form.current?.pick(k, rs) : undefined}
@@ -310,11 +340,26 @@ export function FilePanel({
           autoFocus={focusForm}
         />
       ) : (
-        <p className="border-t border-border bg-muted/30 px-5 py-4 text-sm text-muted-foreground">
-          {docs.length === 0
-            ? `This file has no SealedSecret for the ${env} env.`
-            : "A document in this file can't be sealed into, so the file can't be either. Fix it in the repository, then reload."}
-        </p>
+        <div
+          className={cn(
+            "p-4",
+            (keys.length > 0 || docs.length === 0) && "border-t border-border",
+          )}
+        >
+          {docs.length === 0 ? (
+            <Alert variant="info">
+              This file has no SealedSecret for the {env} env.
+            </Alert>
+          ) : (
+            <Alert
+              variant="warning"
+              heading="Values can't be sealed into this file"
+            >
+              A document below can't be sealed into, so the file can't be
+              either. Fix it in the repository, then reload.
+            </Alert>
+          )}
+        </div>
       )}
       <Documents
         file={file}

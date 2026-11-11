@@ -26,7 +26,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { EnvAccess } from "@/api/types";
+import type { EnvAccess, SealingStatus } from "@/api/types";
 import { useAuth } from "@/lib/auth";
 import { useEnv } from "@/lib/env";
 import { modKey } from "@/lib/shortcuts";
@@ -34,12 +34,20 @@ import { cn } from "@/lib/utils";
 import { useLogout } from "@/api/queries/auth";
 import { statusQueryOptions } from "@/api/queries/status";
 
-function NavLink({ env, children }: { env: string; children: string }) {
+function NavLink({
+  env,
+  to,
+  children,
+}: {
+  env: string;
+  to: "/$env/secrets" | "/$env/fleet";
+  children: string;
+}) {
   return (
     <Link
-      to="/$env/secrets"
+      to={to}
       params={{ env }}
-      className="rounded-md px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground"
+      className="inline-flex h-9 items-center rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3"
       inactiveProps={{ className: "text-muted-foreground" }}
       activeProps={{
         className: "bg-muted text-foreground",
@@ -61,7 +69,7 @@ function SearchButton() {
       onClick={palette.open}
       aria-label="Search repositories and pages"
       aria-keyshortcuts="Meta+K Control+K"
-      className="h-9 gap-2 px-2.5 text-muted-foreground sm:w-64 sm:justify-start"
+      className="w-9 gap-2 px-0 text-muted-foreground sm:w-64 sm:justify-start sm:px-2.5"
     >
       <Search className="h-4 w-4" aria-hidden="true" />
       <span className="hidden sm:inline">Search repositories…</span>
@@ -73,23 +81,37 @@ function SearchButton() {
   );
 }
 
-const SEALING = {
-  ready: { dot: "bg-success", label: "sealing works" },
+/**
+ * Whether sealing works, by color and by shape, so it never rests on color
+ * alone: a circle when it works, a triangle when some clusters are not
+ * ready, a square when it is unavailable, and a ring while it is checked.
+ */
+const SEALING: Record<
+  SealingStatus["sealing"],
+  { shape: string; label: string }
+> = {
+  ready: { shape: "h-2 w-2 rounded-full bg-success", label: "sealing works" },
   degraded: {
-    dot: "bg-warning",
+    shape: "h-2 w-2.5 bg-warning [clip-path:polygon(50%_0,100%_100%,0_100%)]",
     label: "sealing works, some clusters are not ready",
   },
-  unavailable: { dot: "bg-destructive", label: "sealing is unavailable" },
-} as const;
+  unavailable: {
+    shape: "h-2 w-2 rounded-[1px] bg-destructive",
+    label: "sealing is unavailable",
+  },
+};
 
-/** The env's name with a dot that says whether sealing works. */
-function EnvDot({ dot }: { dot: string | undefined }) {
+/** The env's sealing state, as a small shape beside its name. */
+function EnvDot({ state }: { state: SealingStatus["sealing"] | undefined }) {
   return (
     <span
       className={cn(
-        "h-1.5 w-1.5 rounded-full",
-        dot ?? "bg-muted-foreground/40",
+        "shrink-0",
+        state
+          ? SEALING[state].shape
+          : "h-2 w-2 rounded-full border border-muted-foreground",
       )}
+      data-sealing={state ?? "unknown"}
       aria-hidden="true"
     />
   );
@@ -105,7 +127,7 @@ function EnvBadge({ env, admin }: { env: string; admin: boolean }) {
   const label = `Environment ${env}${state ? `: ${state.label}` : ""}`;
   const badge = (
     <Badge variant="outline" className="gap-1.5">
-      <EnvDot dot={state?.dot} />
+      <EnvDot state={data?.sealing} />
       {env}
     </Badge>
   );
@@ -159,15 +181,18 @@ function EnvSwitcher({ env, envs }: { env: EnvAccess; envs: EnvAccess[] }) {
             variant="outline"
             className="gap-1.5 hover:bg-muted data-[state=open]:bg-muted"
           >
-            <EnvDot dot={state?.dot} />
+            <EnvDot state={data?.sealing} />
             {env.name}
-            <ChevronsUpDown className="h-3 w-3 opacity-60" aria-hidden="true" />
+            <ChevronsUpDown
+              className="h-3 w-3 text-muted-foreground"
+              aria-hidden="true"
+            />
           </Badge>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-          Environments
+          Envs
         </DropdownMenuLabel>
         {envs.map((e) => (
           <DropdownMenuItem
@@ -182,7 +207,7 @@ function EnvSwitcher({ env, envs }: { env: EnvAccess; envs: EnvAccess[] }) {
             ) : (
               <span className="mr-2 h-4 w-4" aria-hidden="true" />
             )}
-            <span className="font-mono">{e.name}</span>
+            <span className="font-medium">{e.name}</span>
             {e.admin && (
               <span className="ml-auto text-xs text-muted-foreground">
                 admin
@@ -198,7 +223,7 @@ function EnvSwitcher({ env, envs }: { env: EnvAccess; envs: EnvAccess[] }) {
           <DropdownMenuItem asChild>
             <Link to="/$env/fleet" params={{ env: env.name }}>
               <Server className="mr-2 h-4 w-4" aria-hidden="true" />
-              Open the {env.name} fleet
+              Fleet
             </Link>
           </DropdownMenuItem>
         )}
@@ -214,11 +239,11 @@ export function Header() {
 
   return (
     <header className="sticky top-0 z-10 h-14 w-full border-b border-border bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/60">
-      <div className="flex h-full items-center justify-between px-4 md:px-8">
-        <div className="flex items-center gap-3">
+      <div className="flex h-full items-center justify-between gap-2 px-4 md:px-8">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <Link
             to="/"
-            className="flex items-center gap-3 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            className="flex shrink-0 items-center gap-3 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             aria-label="Sealer home"
           >
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary shadow-xs">
@@ -241,14 +266,21 @@ export function Header() {
           {user && env && (
             <nav
               aria-label="Main"
-              className="ml-1 flex items-center gap-1 sm:ml-4"
+              className="flex items-center gap-0.5 sm:ml-4 sm:gap-1"
             >
-              <NavLink env={env.name}>Secrets</NavLink>
+              <NavLink env={env.name} to="/$env/secrets">
+                Secrets
+              </NavLink>
+              {env.admin && (
+                <NavLink env={env.name} to="/$env/fleet">
+                  Fleet
+                </NavLink>
+              )}
             </nav>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-2">
           {user && <SearchButton />}
           <ThemeToggle />
           {user && (
@@ -256,17 +288,18 @@ export function Header() {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  className="relative h-8 w-8 rounded-full p-0"
+                  size="icon"
+                  className="relative rounded-full p-0"
                   aria-label={`Account menu for ${user.login}`}
                 >
                   {user.avatar_url ? (
                     <img
                       src={user.avatar_url}
                       alt=""
-                      className="h-8 w-8 rounded-full"
+                      className="h-9 w-9 rounded-full"
                     />
                   ) : (
-                    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-sm font-semibold uppercase">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-sm font-semibold uppercase">
                       {user.login.slice(0, 1)}
                     </span>
                   )}

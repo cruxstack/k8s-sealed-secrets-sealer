@@ -114,9 +114,16 @@ describe("FleetView", () => {
     });
 
     const banner = await screen.findByRole("region", {
-      name: /environment key/i,
+      name: "Env key",
     });
     expect(within(banner).getByText("dev")).toBeInTheDocument();
+    expect(
+      within(banner).getByRole("heading", { name: "Keys in sync" }),
+    ).toBeInTheDocument();
+    // when it became valid, as a relative time with the date in its title
+    const valid = banner.querySelector("time");
+    expect(valid).toHaveAttribute("dateTime", KEY_A.not_before);
+    expect(valid).toHaveTextContent(/ ago$|^in /);
     const fp = within(banner).getByTitle(KEY_A.fingerprint);
     expect(fp).toHaveTextContent("SHA256:AAAAaaaaBBBB…");
     expect(
@@ -163,6 +170,12 @@ describe("FleetView", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/keys out of sync/i);
+    // sealing is unavailable: destructive, as in the header and workspace
+    expect(within(alert).getByText("Sealing unavailable")).toHaveClass(
+      "text-destructive",
+    );
+    // it points at the column that says what each cluster lacks
+    expect(alert).toHaveTextContent(/the missing column below/i);
     // without an env key, no agent is marked as holding it
     expect(screen.queryByText("env key")).not.toBeInTheDocument();
     expect(
@@ -203,7 +216,7 @@ describe("FleetView", () => {
       ],
     });
 
-    await screen.findByRole("region", { name: /environment key/i });
+    await screen.findByRole("region", { name: "Env key" });
     expect(screen.getByText("1 of 3 healthy")).toHaveClass("text-warning");
     expect(within(row("use1-blue")).getByText("Healthy")).toBeInTheDocument();
     expect(
@@ -214,10 +227,44 @@ describe("FleetView", () => {
       within(row("use1-green")).getByText("has not checked in recently"),
     ).toBeInTheDocument();
     const never = row("use2-blue");
-    expect(within(never).getByText("Never checked in")).toBeInTheDocument();
+    // red, as the conventions say: an agent that never checked in can't seal
+    expect(within(never).getByText("Never checked in")).toHaveClass(
+      "text-destructive",
+    );
     expect(within(never).getByText("has never checked in")).toBeInTheDocument();
     // registered capabilities still show for an agent that never checked in
     expect(within(never).getByText("seal")).toBeInTheDocument();
+    // capabilities are sorted, and the region is a tag
+    expect(
+      within(
+        within(row("use1-blue")).getByRole("list", { name: "Capabilities" }),
+      )
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["keys", "seal"]);
+    expect(within(never).getByText("use2")).toHaveClass("font-mono");
+  });
+
+  it("says when no agent has checked in yet", async () => {
+    renderFleet({
+      env: "prod",
+      env_key: null,
+      keys_in_sync: false,
+      key_limit: 250,
+      keys: [],
+      agents: [
+        agent({
+          id: "use1-blue",
+          checked_in: false,
+          healthy: false,
+          in_scope: false,
+          last_checkin: undefined,
+        }),
+      ],
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/no agent has checked in yet/i);
+    expect(alert).not.toHaveTextContent(/missing column/i);
   });
 
   it("flags agents that report only their active key", async () => {
@@ -229,7 +276,7 @@ describe("FleetView", () => {
       keys: [],
       agents: [agent({ id: "use1-blue", keys_complete: false })],
     });
-    await screen.findByRole("region", { name: /environment key/i });
+    await screen.findByRole("region", { name: "Env key" });
     expect(
       within(row("use1-blue")).getByText("(active only)"),
     ).toBeInTheDocument();
@@ -267,7 +314,11 @@ describe("FleetView", () => {
     ).toBeInTheDocument();
     const revoked = keyRow(KEY_C.fingerprint);
     expect(within(revoked).getByText("Revoked")).toBeInTheDocument();
-    expect(within(revoked).getByText("by alice 2h ago")).toBeInTheDocument();
+    expect(revoked).toHaveTextContent("by alice 2h ago");
+    expect(within(revoked).getByText("2h ago")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/^Revoked by alice, /),
+    );
     expect(
       within(revoked).getByRole("button", { name: /reinstate key/i }),
     ).toBeInTheDocument();
@@ -394,10 +445,11 @@ describe("FleetView", () => {
       }),
     );
     const banner = await screen.findByRole("region", {
-      name: /environment key/i,
+      name: "Env key",
     });
     const alert = within(banner).getByRole("alert");
     expect(alert).toHaveTextContent("New key needed");
+    expect(alert).toHaveTextContent("Sealing unavailable");
     expect(alert).toHaveTextContent(/revoked or not valid yet/);
     expect(alert).not.toHaveTextContent(/keys out of sync/i);
   });
@@ -471,8 +523,11 @@ describe("FleetView", () => {
 
   it("shows a load error", async () => {
     renderFleet(null, 500);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /could not load the fleet: the server encountered an error/i,
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/could not load the fleet/i);
+    // the server's message, as a sentence
+    expect(alert).toHaveTextContent(
+      "The server encountered an error — please try again.",
     );
   });
 });

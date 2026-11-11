@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -153,7 +153,7 @@ describe("auth routing", () => {
     expect(api.calls.map((c) => c.url)).not.toContain("/fleet");
   });
 
-  it("shows admins the fleet", async () => {
+  it("shows admins the fleet, marked as the current page", async () => {
     apiClient.defaults.adapter = fakeApi({ me: ADMIN }).adapter;
     renderApp("/fleet");
 
@@ -163,6 +163,40 @@ describe("auth routing", () => {
     expect(
       screen.queryByText("The fleet is for admins"),
     ).not.toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(
+      within(nav).getByRole("link", { name: "Secrets" }),
+    ).not.toHaveAttribute("aria-current");
+  });
+
+  it("shows a page that does not exist in the app's shell, with the way home", async () => {
+    apiClient.defaults.adapter = fakeApi({ me: ME }).adapter;
+    renderApp("/dev/no-such-page");
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Page not found" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("/dev/no-such-page")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Go to Secrets" })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    // inside the shell: the header and its account menu are there
+    expect(
+      screen.getByRole("button", { name: /account menu for octocat/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a deeper unknown path as not found too", async () => {
+    apiClient.defaults.adapter = fakeApi({ me: ME }).adapter;
+    renderApp("/dev/secrets/example-org/apps/extra/parts");
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Page not found" }),
+    ).toBeInTheDocument();
   });
 
   it("puts every page in an env, starting with the user's first", async () => {
@@ -196,6 +230,7 @@ describe("auth routing", () => {
         name: "You can't use the prod env",
       }),
     ).toBeInTheDocument();
+    // the way forward is a button-styled link
     expect(screen.getByRole("link", { name: "Go to dev" })).toHaveAttribute(
       "href",
       "/dev/secrets",

@@ -10,6 +10,7 @@ import {
   keyStatuses,
   missingKeys,
   pendingDocs,
+  revokedDocs,
   type PendingDocs,
 } from "./keys";
 
@@ -39,6 +40,35 @@ function file(...documents: SealedSecretDocument[]): RepositoryFile {
 }
 
 /**
+ * Pending changes in a file: each key with the namespaces of the documents
+ * it waits in, sealed with a revoked key when `revoked`.
+ */
+function changes(
+  f: RepositoryFile,
+  byKey: Record<string, string[]>,
+  revoked = false,
+): PendingChange[] {
+  return Object.entries(byKey).map(([key, namespaces]) => ({
+    id: key,
+    path: f.path,
+    key,
+    targets: (f.documents ?? [])
+      .filter((d) => namespaces.includes(d.namespace))
+      .map((d) => ({
+        index: d.index,
+        namespace: d.namespace,
+        name: d.name,
+        scope: "strict",
+        region: d.region,
+      })),
+    sealed_at: "",
+    sealed_by: { id: "a" },
+    fingerprint: "",
+    key_revoked: revoked,
+  }));
+}
+
+/**
  * Pending values in a file: each key with the namespaces of the documents
  * it waits in.
  */
@@ -46,26 +76,7 @@ function pending(
   f: RepositoryFile,
   byKey: Record<string, string[]>,
 ): PendingDocs {
-  const changes: PendingChange[] = Object.entries(byKey).map(
-    ([key, namespaces]) => ({
-      id: key,
-      path: f.path,
-      key,
-      targets: (f.documents ?? [])
-        .filter((d) => namespaces.includes(d.namespace))
-        .map((d) => ({
-          index: d.index,
-          namespace: d.namespace,
-          name: d.name,
-          scope: "strict",
-          region: d.region,
-        })),
-      sealed_at: "",
-      sealed_by: { id: "a" },
-      fingerprint: "",
-    }),
-  );
-  return pendingDocs(changes, f.path);
+  return pendingDocs(changes(f, byKey), f.path);
 }
 
 describe("keyStatuses", () => {
@@ -293,5 +304,40 @@ describe("documents with the same namespace and name in each region", () => {
       pending: 1,
       lacking: ["apps/billing in use1"],
     });
+  });
+});
+
+describe("revoked keys", () => {
+  it("marks a key whose pending value was sealed with a revoked key", () => {
+    const f = file(
+      doc("use1-blue", ["token"], [], "use1"),
+      doc("use2-blue", [], [], "use2"),
+    );
+    const stale = changes(f, { token: ["use2-blue"] }, true);
+    const fresh = changes(f, { url: ["use1-blue", "use2-blue"] });
+    const all = [...stale, ...fresh];
+    const keys = keyStatuses(
+      f,
+      pendingDocs(all, f.path),
+      revokedDocs(all, f.path),
+    );
+    const token = keys.find((k) => k.key === "token");
+    // the revoked value needs sealing again; it is not just pending
+    expect(token).toMatchObject({ state: "revoked", revoked: 1, pending: 1 });
+    expect(token?.regions.map((r) => [r.region, r.state])).toEqual([
+      ["use1", "set"],
+      ["use2", "revoked"],
+    ]);
+    // a value sealed with a good key is pending as before
+    expect(keys.find((k) => k.key === "url")?.state).toBe("new");
+  });
+
+  it("counts only changes sealed with a revoked key", () => {
+    const f = file(doc("blue", []));
+    expect(revokedDocs(changes(f, { token: ["blue"] }), f.path).size).toBe(0);
+    expect(
+      revokedDocs(changes(f, { token: ["blue"] }, true), f.path).get("token")
+        ?.size,
+    ).toBe(1);
   });
 });
