@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import apiClient from "@/api/client";
 import type {
+  FileReseal,
   PullRequest,
   Seal,
   SealSession,
@@ -86,6 +87,38 @@ export async function requestSeal(
   const { data } = await apiClient.post<Seal>(
     `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}/seals`,
     body,
+  );
+  return data;
+}
+
+/**
+ * Reseals every value of a file's documents for the env that is on an
+ * older key: the results become pending changes. Values with a pending
+ * change in the session are left alone. The control plane refuses (409)
+ * with a sentence when it cannot.
+ */
+export async function requestReseal(
+  owner: string,
+  repo: string,
+  sessionId: string,
+  path: string,
+): Promise<FileReseal> {
+  const { data } = await apiClient.post<FileReseal>(
+    `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}/reseals`,
+    { path },
+  );
+  return data;
+}
+
+/** A file reseal's progress. */
+export async function getReseal(
+  owner: string,
+  repo: string,
+  sessionId: string,
+  resealId: string,
+): Promise<FileReseal> {
+  const { data } = await apiClient.get<FileReseal>(
+    `${repoPath(owner, repo)}/session/${encodeURIComponent(sessionId)}/reseals/${encodeURIComponent(resealId)}`,
   );
   return data;
 }
