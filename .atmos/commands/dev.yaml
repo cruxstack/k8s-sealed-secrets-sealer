@@ -7,7 +7,7 @@ commands:
       - name: up
         dependencies: &stack_tools
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             k3d-io/k3d: 5.9.0
             tilt-dev/tilt: 0.37.8
             helm/helm: 3.22.1

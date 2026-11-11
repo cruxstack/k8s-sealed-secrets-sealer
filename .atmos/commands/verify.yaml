@@ -7,7 +7,7 @@ commands:
       - name: pr
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             golangci/golangci-lint: 2.15.0
             helm/helm: 3.22.1
             yannh/kubeconform: 0.8.0

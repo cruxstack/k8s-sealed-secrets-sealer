@@ -7,7 +7,7 @@ commands:
       - name: lint
         dependencies: &go_lint_tools
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             golangci/golangci-lint: 2.15.0
         description: golangci-lint with the repository's .golangci.yml
         steps:
@@ -49,7 +49,7 @@ commands:
       - name: tidy
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
         description: Fail when go.mod or go.sum is not tidy
         steps:
           - type: shell
@@ -58,7 +58,7 @@ commands:
       - name: vuln
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
         description: |
           govulncheck against the Go vulnerability database. It runs through
           `go run` at a pinned version, verified by the Go checksum database.
@@ -81,7 +81,7 @@ commands:
       - name: all
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             golangci/golangci-lint: 2.15.0
             helm/helm: 3.22.1
             yannh/kubeconform: 0.8.0

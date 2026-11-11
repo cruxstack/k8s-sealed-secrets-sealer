@@ -20,7 +20,7 @@ commands:
       - name: artifacts
         dependencies:
           tools:
-            golang/go: 1.27.3
+            golang/go: 1.27.4
             helm/helm: 3.22.1
         description: |
           Build a release's files into release/: the control plane's Lambda
