@@ -327,3 +327,25 @@ func TestCleanup_GivesUpWaitingForARunningCount(t *testing.T) {
 		t.Fatalf("secrets left = %v", got)
 	}
 }
+
+// While a restore's or removal's restart rolls, the check-in loop neither
+// waits to ask whether deleted keys are still loaded nor to restart.
+func TestKeySync_CheckInLoopDoesNotWaitForARollingRestart(t *testing.T) {
+	c := newCluster(t, envelope.NewFakeKMS("escrow"), nil, "dev", controllerDeployment())
+	c.sync.restartMu.Lock() // a restart rolls
+	defer c.sync.restartMu.Unlock()
+	done := make(chan bool, 1)
+	go func() {
+		loaded := c.sync.DeletedLoaded()
+		c.sync.LoadRestored(context.Background(), "")
+		done <- loaded
+	}()
+	select {
+	case loaded := <-done:
+		if loaded {
+			t.Fatal("deleted keys reported loaded with none deleted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the check-in loop waited for a rolling restart")
+	}
+}
