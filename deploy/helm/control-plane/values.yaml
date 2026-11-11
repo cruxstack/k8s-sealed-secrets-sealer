@@ -31,7 +31,8 @@ env: ""
 # and keyRenewPeriod; teams it sets replace github.allowedTeams and
 # adminTeams. adminToken gives an env its own admin token instead of
 # APP_ADMIN_TOKEN; it is written into the Deployment, so give the ARN of an
-# SSM parameter holding it.
+# SSM parameter holding it. adminTokenKeyChanges: true lets the env's admin
+# token change keys (see adminTokenKeyChanges below).
 envs: []
 # the control plane's external URL (required); also the audience agent login
 # tokens must carry unless agentAudience is set
@@ -51,6 +52,13 @@ registry:
 # 32 random bytes), APP_GITHUB_OAUTH_CLIENT_SECRET, APP_GITHUB_APP_PRIVATE_KEY
 # (PEM) and, to enable the admin API, APP_ADMIN_TOKEN (required)
 existingSecret: ""
+
+# Let the admin token revoke and reinstate sealing keys, not only read the
+# fleet (APP_ADMIN_TOKEN_KEY_CHANGES). Off by default: the token is often
+# given to monitoring, and signed-in admins change keys from the fleet page
+# either way. In v0.7.0 and v0.7.1 the token could always change keys. With
+# envs, set it on each env that allows it instead.
+adminTokenKeyChanges: false
 
 # GitHub: sign-in and repository access. One GitHub App can provide both: its
 # client ID and secret sign users in, and its App ID and private key read

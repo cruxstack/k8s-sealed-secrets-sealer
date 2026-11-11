@@ -1006,7 +1006,9 @@ keep being used afterwards, which is why every escrow upload names its source
 and why incident response includes revoking keys.
 
 **Revoking a key.** An env admin revokes a key from the fleet page, or a
-script does with the admin token:
+script does with the admin token, in an env that allows it
+(`adminTokenKeyChanges`; the token often goes to monitoring, so by default
+it only reads the fleet):
 
 ```sh
 curl -X POST -H "Authorization: Bearer $APP_ADMIN_TOKEN" \
@@ -1265,8 +1267,8 @@ one. The pull requests are a second, lasting record: each commit's
   but names none of them. The UI shows the status as a dot on the env
   badge, and the fleet only to admins. Admins also revoke and reinstate
   keys there. Automation reads the same fleet through the admin API, with
-  a token rather than a sign-in
-  ([docs/operations.md](operations.md#admin-api)).
+  a token rather than a sign-in, and changes keys with it only where the
+  env allows it ([docs/operations.md](operations.md#admin-api)).
 - **One sign-in for every env.** A deployment serving several envs signs
   people in once. At sign-in the control plane works out, for each env,
   whether its teams admit the person and whether they administer it; the
@@ -1520,7 +1522,8 @@ agent identity (an IAM role, or an issuer and service account) registered
 in two of them, at start and when a registry changes: one login would
 otherwise be accepted by both. It also refuses two envs naming the same
 transit key, since only separate keys let key policies keep envs apart.
-The admin token is shared unless an env sets its own (`adminToken`).
+The admin token is shared unless an env sets its own (`adminToken`), and
+changes keys only in envs that set `adminTokenKeyChanges`.
 
 The trade-off is isolation. A deployment per env keeps envs apart down to
 the IAM role: whoever can change the dev deployment cannot touch prod. A

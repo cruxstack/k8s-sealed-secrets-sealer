@@ -75,9 +75,16 @@ spec:
             - name: APP_LOG_FORMAT
               value: {{ .Values.log.format | quote }}
             {{- if .Values.envs }}
+            {{- if .Values.adminTokenKeyChanges }}
+            {{- fail "adminTokenKeyChanges is set for each env with envs: set it on the envs that allow it" }}
+            {{- end }}
             - name: APP_ENVS
               value: {{ include "sealer.envs" . | quote }}
             {{- else }}
+            {{- if .Values.adminTokenKeyChanges }}
+            - name: APP_ADMIN_TOKEN_KEY_CHANGES
+              value: "true"
+            {{- end }}
             - name: APP_ENV_NAME
               value: {{ required "env (or envs) is required" .Values.env | quote }}
             - name: APP_REGISTRY_FILE

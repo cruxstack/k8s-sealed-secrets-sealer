@@ -12,14 +12,24 @@ a GitHub sign-in. It exists only when `APP_ADMIN_TOKEN` is set (in the
 control plane chart, through `existingSecret`) or an env sets its own
 `adminToken`, and a token must be at least 32 bytes. `APP_ADMIN_TOKEN`
 reaches every env that doesn't set its own; an env's `adminToken` reaches
-only that env. Besides reading the fleet, a token can revoke and reinstate
-keys; nothing else in the admin API changes anything.
+only that env.
+
+A token only reads the fleet, unless the env lets it change keys:
+`APP_ADMIN_TOKEN_KEY_CHANGES=true` with a single env (the chart's
+`adminTokenKeyChanges`), or `adminTokenKeyChanges: true` on the env in
+`APP_ENVS` (the chart's `envs`). Then it revokes and reinstates keys too;
+elsewhere those routes answer `403`. Give an env that allows it its own
+`adminToken`, so a token handed to monitoring cannot change its keys.
+Signed-in admins change keys from the fleet page either way. Nothing else
+in the admin API changes anything.
 
 | Route                                                        | Answers                                     |
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /api/v1/envs/{env}/admin/fleet`                         | The env's fleet                             |
-| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key")     |
-| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key                    |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key"),    |
+|                                                              | where the env allows it                     |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key, where the env     |
+|                                                              | allows it                                   |
 | `GET /api/v1/admin/fleet`,                                   | The same, when the control plane serves a   |
 | `POST /api/v1/admin/keys/{fingerprint}/revoke`,              | single env                                  |
 | `POST /api/v1/admin/keys/{fingerprint}/reinstate`            |                                             |
@@ -264,6 +274,11 @@ never need the control plane.
 
 ### From v0.7.0 or v0.7.1
 
+- The admin token no longer revokes or reinstates keys unless the env
+  allows it: `APP_ADMIN_TOKEN_KEY_CHANGES=true`, or `adminTokenKeyChanges`
+  in the chart or on an env in `envs`/`APP_ENVS`. Until then those routes
+  answer `403`. Reading the fleet is unchanged, and signed-in admins change
+  keys as before.
 - Agents now say which escrowed copy a failed restore tried and whether
   the copy was at fault, so only a bad copy is skipped. Agents of v0.7.1
   and before don't, and their failures move them on to the next copy, as
@@ -389,8 +404,9 @@ the fleet view says it holds back the env key (design §7).
 
 ### A compromised key
 
-Revoke it, from the fleet page's Keys table or with the admin API
-(`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A revoked key is never the env key and is never restored into a cluster again;
+Revoke it, from the fleet page's Keys table or, where the env allows it, with
+the admin API (`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A
+revoked key is never the env key and is never restored into a cluster again;
 clusters that hold it keep it, so values sealed with it still decrypt. Seals
 still running with it fail, and people with pending changes sealed with it see
 them marked "Seal again": their pull request is refused until they seal those

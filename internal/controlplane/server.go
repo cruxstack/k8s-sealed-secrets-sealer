@@ -58,6 +58,10 @@ type Options struct {
 	Store          store.Store
 	// AdminToken enables the admin API. Empty disables it.
 	AdminToken string
+	// AdminTokenKeyChanges lets the admin token revoke and reinstate keys.
+	// Without it the token only reads the fleet; signed-in admins change
+	// keys either way.
+	AdminTokenKeyChanges bool
 	// Users admits people to the env's user API; nil disables it. Signing
 	// in is the Host's.
 	Users UserGuard
@@ -109,6 +113,9 @@ type Server struct {
 	transitKey string
 	hsts       bool
 	now        func() time.Time
+
+	// adminTokenKeyChanges lets the admin token change keys
+	adminTokenKeyChanges bool
 
 	keyRenewPeriod time.Duration
 	pollInterval   time.Duration
@@ -165,6 +172,8 @@ func New(opts Options) *Server {
 		transitKey: opts.TransitKeyID,
 		hsts:       opts.HSTS,
 		now:        now,
+
+		adminTokenKeyChanges: opts.AdminTokenKeyChanges,
 
 		keyRenewPeriod: keyRenewPeriod,
 		pollInterval:   pollInterval,
@@ -246,8 +255,16 @@ func (s *Server) Handler() http.Handler {
 	const revoke, reinstate = "/keys/{fingerprint}/revoke", "/keys/{fingerprint}/reinstate"
 	if s.adminToken != "" {
 		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.fleet))
-		mux.HandleFunc("POST /api/v1/admin"+revoke, s.requireAdmin(s.setKeyStatus(store.KeyRevoked)))
-		mux.HandleFunc("POST /api/v1/admin"+reinstate, s.requireAdmin(s.setKeyStatus(store.KeyActive)))
+		// the token is often shared, and given to monitoring: changing keys
+		// with it is allowed per env
+		keyStatus := func(status string) http.HandlerFunc {
+			if !s.adminTokenKeyChanges {
+				return s.requireAdmin(adminTokenKeyChangesOff)
+			}
+			return s.requireAdmin(s.setKeyStatus(status))
+		}
+		mux.HandleFunc("POST /api/v1/admin"+revoke, keyStatus(store.KeyRevoked))
+		mux.HandleFunc("POST /api/v1/admin"+reinstate, keyStatus(store.KeyActive))
 	}
 
 	if u := s.users; u != nil {

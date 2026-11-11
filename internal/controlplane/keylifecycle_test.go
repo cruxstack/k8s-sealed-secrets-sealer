@@ -98,6 +98,8 @@ agents:
 		Users:        users.Env("dev"),
 		PollInterval: 10 * time.Millisecond,
 		Now:          sh.clock,
+
+		AdminTokenKeyChanges: true,
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
 	for _, id := range []string{"a", "b", "c"} {
@@ -238,6 +240,31 @@ func TestKeyStatus_RevokeAndReinstate(t *testing.T) {
 	}
 	if rec := kh.do(http.MethodPost, "/api/v1/admin/keys/"+protocol.FingerprintPath(kb.Fingerprint)+"/revoke", "wrong", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("revoke with a wrong admin token = %d", rec.Code)
+	}
+}
+
+// The admin token reads the fleet, and changes keys only where the env
+// allows it: it is often shared, and given to monitoring.
+func TestKeyStatus_AdminTokenChangesKeysOnlyWhenAllowed(t *testing.T) {
+	h := newHarness(t, adminToken)
+	k := protoKey(t, time.Now().Add(-time.Hour))
+	if rec := h.do(http.MethodPost, "/agent/v1/checkin", h.login(), checkIn(k)); rec.Code != http.StatusOK {
+		t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
+	}
+	for _, action := range []string{"revoke", "reinstate"} {
+		path := "/api/v1/admin/keys/" + protocol.FingerprintPath(k.Fingerprint) + "/" + action
+		if rec := h.do(http.MethodPost, path, "wrong", nil); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s with a wrong token = %d", action, rec.Code)
+		}
+		if rec := h.do(http.MethodPost, path, adminToken, nil); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "adminTokenKeyChanges") {
+			t.Fatalf("%s with the admin token = %d %s", action, rec.Code, rec.Body)
+		}
+	}
+	if rec, _, _ := h.store.GetKey(context.Background(), k.Fingerprint); rec.Status == store.KeyRevoked {
+		t.Fatal("the admin token revoked a key")
+	}
+	if rec := h.do(http.MethodGet, "/api/v1/admin/fleet", adminToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("fleet = %d", rec.Code)
 	}
 }
 
