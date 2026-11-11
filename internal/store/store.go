@@ -160,12 +160,16 @@ type Store interface {
 	// Seal returns a seal requested in a session.
 	Seal(ctx context.Context, sessionID, commandID string) (Seal, bool, error)
 	// ReserveChange holds a place among a session's at most max pending
-	// changes for the change a seal is about to make, until until, by when
-	// the seal has made it or expired. existing lists the session's pending
-	// changes as just read. It fails with ErrTooManyChanges when they and
-	// the places other seals hold come to max without changeID, even with
-	// concurrent calls.
-	ReserveChange(ctx context.Context, sessionID, changeID string, existing []string, max int, until, now time.Time) error
+	// changes for the change a seal (sealID, its command) is about to make,
+	// until until, by when the seal has made it or expired. existing lists
+	// the session's pending changes as just read. It fails with
+	// ErrTooManyChanges when they and the places other seals hold come to
+	// max without changeID, even with concurrent calls.
+	ReserveChange(ctx context.Context, sessionID, changeID, sealID string, existing []string, max int, until, now time.Time) error
+	// ReleaseChange gives up the place a seal holds, once its change is
+	// stored (the change then counts itself, and removing it frees its
+	// place) or the seal failed.
+	ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error
 	// PutChange stores a pending change, replacing the one for the same
 	// file and key unless that came from a newer seal, and reports whether
 	// it did.

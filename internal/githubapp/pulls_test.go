@@ -2,6 +2,7 @@ package githubapp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -159,6 +160,67 @@ func TestCreatePullRequest_MovesABranchThatHoldsOtherFiles(t *testing.T) {
 	}
 	if view, _ := f.mock.PullRequest("example-org", "apps", 2); view.Files[0].After != "fresh\n" || view.State != "open" {
 		t.Fatalf("pull request = %+v", view)
+	}
+}
+
+// An attempt can move the branch and fail before it updates the pull
+// request's text; the next finds the branch right, and must still bring
+// the title and description up to date.
+func TestCreatePullRequest_UpdatesTheTextOfAPullRequestItReuses(t *testing.T) {
+	f := newFixture(t)
+	c := f.client(t, nil)
+	ctx := context.Background()
+	if _, err := c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-01j", "one value")); err != nil {
+		t.Fatal(err)
+	}
+	pr := newPull(t, c, "sealer/dev/alice-01j", "two values")
+	f.mock.FailNext(http.MethodPatch, "/pulls/1", mockgithub.ServerError)
+	if _, err := c.CreatePullRequest(ctx, "example-org", "apps", pr); err == nil {
+		t.Fatal("the update did not fail")
+	}
+	got, err := c.CreatePullRequest(ctx, "example-org", "apps", pr)
+	if err != nil || got.Number != 1 {
+		t.Fatalf("retry = %+v, %v", got, err)
+	}
+	view, _ := f.mock.PullRequest("example-org", "apps", 1)
+	if view.Files[0].After != "two values\n" || view.Title != pr.Title || view.Body != pr.Body {
+		t.Fatalf("pull request = %+v", view)
+	}
+}
+
+// A retry must not force the branch over commits someone else pushed to
+// the pull request since, such as a reviewer's.
+func TestCreatePullRequest_LeavesABranchWithOthersCommits(t *testing.T) {
+	f := newFixture(t)
+	c := f.client(t, nil)
+	ctx := context.Background()
+	first, err := c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-01j", "one value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewed, ok := f.mock.Push("example-org", "apps", "sealer/dev/alice-01j", "reviewer", map[string]string{"README.md": "fixed\n"})
+	if !ok {
+		t.Fatal("push failed")
+	}
+	_, err = c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-01j", "two values"))
+	if !errors.Is(err, ErrBranchChanged) {
+		t.Fatalf("retry over a reviewer's commit = %v, want ErrBranchChanged", err)
+	}
+	if head, _ := c.BranchHead(ctx, "example-org", "apps", "sealer/dev/alice-01j"); head != reviewed {
+		t.Fatalf("branch at %s, want the reviewer's %s", head, reviewed)
+	}
+	if view, _ := f.mock.PullRequest("example-org", "apps", first.Number); view.Title != "Seal one value" {
+		t.Fatalf("pull request = %+v", view)
+	}
+
+	// nor over someone else's commit on the session's base
+	theirs, _ := f.mock.Push("example-org", "apps", "sealer/dev/alice-02j", "someone", map[string]string{"README.md": "theirs\n"})
+	_, err = c.CreatePullRequest(ctx, "example-org", "apps", newPull(t, c, "sealer/dev/alice-02j", "mine"))
+	if !errors.Is(err, ErrBranchChanged) {
+		t.Fatalf("pull request over someone else's commit = %v, want ErrBranchChanged", err)
+	}
+	if head, _ := c.BranchHead(ctx, "example-org", "apps", "sealer/dev/alice-02j"); head != theirs {
+		t.Fatalf("branch at %s, want %s", head, theirs)
 	}
 }
 

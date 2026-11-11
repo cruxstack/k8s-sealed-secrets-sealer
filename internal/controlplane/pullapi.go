@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
@@ -147,6 +148,13 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &fileErr):
 		log.WarnContext(ctx, "pull request refused", "event", "pr.failed", "error", err)
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case errors.Is(err, githubapp.ErrBranchChanged):
+		// an earlier attempt opened the pull request, and someone has
+		// pushed to it since
+		log.WarnContext(ctx, "pull request refused", "event", "pr.failed", "error", err)
+		writeError(w, http.StatusConflict, "someone else has pushed to this session's pull request (branch "+branch+
+			"), so it was left as it is; change the pull request on GitHub, or discard this session and seal the values in a new one")
 		return
 	case err != nil:
 		log.WarnContext(ctx, "pull request failed", "event", "pr.failed", "error", err)

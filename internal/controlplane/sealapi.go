@@ -223,13 +223,13 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 	}
 	// seals still running count toward the cap too: each holds its
 	// change's place until it is done
+	commandID := ulid.Make().String()
 	reservedAt := s.now().UTC()
-	err = s.store.ReserveChange(ctx, sess.ID, changeID(file.Path, in.Key, sealFor), existing,
+	err = s.store.ReserveChange(ctx, sess.ID, changeID(file.Path, in.Key, sealFor), commandID, existing,
 		maxChangesPerSession, reservedAt.Add(sealChangeHold), reservedAt)
 	switch {
 	case errors.Is(err, store.ErrTooManyChanges):
-		writeError(w, http.StatusConflict, fmt.Sprintf(
-			"this session holds %d pending changes, the most it can; open a pull request with them first", maxChangesPerSession))
+		writeError(w, http.StatusConflict, sessionFull(changes))
 		return
 	case err != nil:
 		s.internalError(w, r, "failed to reserve a pending change", err)
@@ -258,7 +258,6 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	commandID := ulid.Make().String()
 	value := []byte(in.Value)
 	sealed, err := envelope.Seal(ctx, s.transit, s.transitKey, value, protocol.SealContext(s.env, commandID, agent.ID))
 	clear(value)
@@ -333,6 +332,39 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		"user", user.Login, "user_id", user.ID, "repository", sess.Owner+"/"+sess.Repo, "path", file.Path,
 		"key", in.Key, "regions", sealFor, "targets", len(targets), "agent_id", agent.ID, "fingerprint", envKey)
 	httpserver.WriteJSON(w, http.StatusAccepted, s.viewSeal(seal, sealQueued, ""))
+}
+
+// sessionFull says why a session has no room for another change. Changes
+// newer seals of the same key cover between them are not shown, yet count:
+// removing one of those brings them back. So do seals still running.
+func sessionFull(changes []store.Change) string {
+	shown := map[string]bool{}
+	for _, c := range store.Effective(changes) {
+		shown[c.ID] = true
+	}
+	var hidden []string
+	for _, c := range changes {
+		if !shown[c.ID] {
+			name := plain(c.Path) + ": " + c.Key
+			if len(c.Regions) > 0 {
+				name += " in " + plain(strings.Join(c.Regions, ", "))
+			}
+			hidden = append(hidden, name)
+		}
+	}
+	msg := fmt.Sprintf("this session holds %d pending changes, the most it can", maxChangesPerSession)
+	if len(hidden) > 0 {
+		const named = 5
+		list := strings.Join(hidden[:min(len(hidden), named)], "; ")
+		if len(hidden) > named {
+			list += fmt.Sprintf("; and %d more", len(hidden)-named)
+		}
+		msg += fmt.Sprintf(", including %s not shown, under newer seals of the same key (%s)", plural(len(hidden), "change"), list)
+	}
+	if running := maxChangesPerSession - len(changes); running > 0 {
+		msg += fmt.Sprintf(", and %s still running", plural(running, "seal"))
+	}
+	return msg + "; open a pull request with them first"
 }
 
 // chooseSealer picks the agent for a seal and returns it with the env key.
@@ -514,6 +546,14 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 		summary = string(b)
 	}
 
+	// the seal's change holds its own place now, or the seal failed:
+	// either way it gives up the place it held, so removing the change
+	// frees one
+	if found {
+		if err := s.store.ReleaseChange(ctx, seal.SessionID, changeID(seal.Path, seal.Key, seal.Regions), cmd.ID, now); err != nil {
+			log.WarnContext(ctx, "failed to release the seal's place among pending changes", "error", err)
+		}
+	}
 	ok, err := s.store.FinishCommand(ctx, agent.ID, cmd.ID, status, summary, errMsg, now)
 	if err != nil {
 		s.internalError(w, r, "failed to record command result", err)
@@ -538,15 +578,15 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 }
 
 // sealPending reports whether a finished seal's value is still a pending
-// change of its session: not when a newer seal of the same key replaced it
-// or covered all its documents.
+// change of its session, as the session shows it: not when a newer seal of
+// the same key replaced it, or newer seals cover all its documents.
 func (s *Server) sealPending(ctx context.Context, seal store.Seal) (bool, error) {
 	changes, err := s.store.Changes(ctx, seal.SessionID, false)
 	if err != nil {
 		return false, err
 	}
 	id := changeID(seal.Path, seal.Key, seal.Regions)
-	return slices.ContainsFunc(changes, func(c store.Change) bool {
+	return slices.ContainsFunc(store.Effective(changes), func(c store.Change) bool {
 		return c.ID == id && c.CommandID == seal.CommandID
 	}), nil
 }

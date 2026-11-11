@@ -373,13 +373,21 @@ func (m *Memory) Seal(_ context.Context, sessionID, commandID string) (Seal, boo
 	return s, ok, nil
 }
 
-func (m *Memory) ReserveChange(_ context.Context, sessionID, changeID string, existing []string, maxChanges int, until, now time.Time) error {
+func (m *Memory) ReserveChange(_ context.Context, sessionID, changeID, sealID string, existing []string, maxChanges int, until, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	kept, err := reserveChange(m.reserved[sessionID], changeID, existing, maxChanges, until, now)
+	kept, err := reserveChange(m.reserved[sessionID], changeID, sealID, existing, maxChanges, until, now)
 	if err != nil {
 		return err
 	}
+	m.reserved[sessionID] = kept
+	return nil
+}
+
+func (m *Memory) ReleaseChange(_ context.Context, sessionID, changeID, sealID string, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept, _ := releaseChange(m.reserved[sessionID], changeID, sealID, now)
 	m.reserved[sessionID] = kept
 	return nil
 }

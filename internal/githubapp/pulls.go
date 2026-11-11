@@ -30,6 +30,11 @@ const (
 
 var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 
+// ErrBranchChanged is returned when a branch an earlier attempt left holds
+// a commit the App did not make on Parent, such as a reviewer's pushed to
+// its pull request: the branch is not moved over it.
+var ErrBranchChanged = errors.New("the branch has commits the sealer did not make")
+
 // ValidBranch reports whether s is a branch name the client creates: a
 // conservative subset of what Git allows.
 func ValidBranch(s string) bool {
@@ -107,7 +112,9 @@ func (p NewPullRequest) check() error {
 // but its answer was lost: a Branch left by an earlier attempt is kept when
 // it already holds these files and moved to the new commit otherwise, and a
 // pull request open from it is returned, its title and description brought
-// up to date, instead of opening another. A branch it created is deleted
+// up to date, instead of opening another. A branch is moved only from the
+// App's own commit on Parent; one with anyone else's commits, such as a
+// reviewer's, fails with ErrBranchChanged. A branch it created is deleted
 // again only when GitHub refuses the pull request outright: after a timeout
 // the pull request may exist, and deleting its branch would close it.
 func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr NewPullRequest) (PullRequest, error) {
@@ -148,10 +155,11 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 		return PullRequest{}, err
 	}
 
-	parentTree, err := c.commitTree(ctx, tok, owner, repo, pr.Parent)
+	parent, err := c.readCommit(ctx, tok, owner, repo, pr.Parent)
 	if err != nil {
 		return PullRequest{}, err
 	}
+	parentTree := parent.Tree.SHA
 	var tree struct {
 		SHA string `json:"sha"`
 	}
@@ -162,9 +170,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 	if !ValidSHA(tree.SHA) {
 		return PullRequest{}, errors.New("failed to create a tree: github returned no object id")
 	}
-	var commit struct {
-		SHA string `json:"sha"`
-	}
+	var commit gitCommit
 	commitIn := map[string]any{"message": pr.Message, "tree": tree.SHA, "parents": []string{pr.Parent}}
 	if err := c.do(ctx, http.MethodPost, c.repoURL(owner, repo, "git", "commits"), tok, commitIn, maxResponseBytes, &commit); err != nil {
 		return PullRequest{}, fmt.Errorf("failed to create a commit: %w", err)
@@ -172,8 +178,9 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 	if !ValidSHA(commit.SHA) {
 		return PullRequest{}, errors.New("failed to create a commit: github returned no object id")
 	}
+	commit.Tree.SHA = tree.SHA
 
-	head, err := c.pushBranch(ctx, tok, owner, repo, pr.Branch, commit.SHA, tree.SHA)
+	head, err := c.pushBranch(ctx, tok, owner, repo, pr, commit)
 	if err != nil {
 		return PullRequest{}, err
 	}
@@ -183,13 +190,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 			return PullRequest{}, err
 		}
 		if ok {
-			if head.moved {
-				update := map[string]string{"title": pr.Title, "body": pr.Body}
-				if err := c.do(ctx, http.MethodPatch, c.repoURL(owner, repo, "pulls", strconv.Itoa(open.Number)), tok, update, maxResponseBytes, nil); err != nil {
-					return PullRequest{}, fmt.Errorf("failed to update pull request #%d: %w", open.Number, err)
-				}
-			}
-			return PullRequest{Number: open.Number, URL: open.HTMLURL, Branch: pr.Branch, Commit: head.sha}, nil
+			return c.reusePull(ctx, tok, owner, repo, open, pr, head.sha)
 		}
 	}
 
@@ -206,7 +207,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 	var refusal *StatusError
 	if errors.As(err, &refusal) && refusal.Status == http.StatusUnprocessableEntity {
 		if open, ok, lookupErr := c.openPull(ctx, tok, owner, repo, pr.Branch); lookupErr == nil && ok {
-			return PullRequest{Number: open.Number, URL: open.HTMLURL, Branch: pr.Branch, Commit: head.sha}, nil
+			return c.reusePull(ctx, tok, owner, repo, open, pr, head.sha)
 		}
 	}
 	// leave no branch behind when GitHub said no for good, and there is
@@ -219,23 +220,38 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo string, pr N
 	return PullRequest{}, fmt.Errorf("failed to open the pull request: %w", err)
 }
 
+// reusePull returns a pull request an earlier attempt opened from the
+// branch, with the title and description brought up to date: the attempt
+// that changed the branch may have failed before it changed them.
+func (c *Client) reusePull(ctx context.Context, tok, owner, repo string, open ghPull, pr NewPullRequest, head string) (PullRequest, error) {
+	if open.Title != pr.Title || open.Body != pr.Body {
+		update := map[string]string{"title": pr.Title, "body": pr.Body}
+		if err := c.do(ctx, http.MethodPatch, c.repoURL(owner, repo, "pulls", strconv.Itoa(open.Number)), tok, update, maxResponseBytes, nil); err != nil {
+			return PullRequest{}, fmt.Errorf("failed to update pull request #%d: %w", open.Number, err)
+		}
+	}
+	return PullRequest{Number: open.Number, URL: open.HTMLURL, Branch: pr.Branch, Commit: head}, nil
+}
+
 // branchState is where pushBranch left a branch.
 type branchState struct {
 	sha string
-	// created is set for a branch that did not exist; moved for one that
-	// did, and now points at the new commit.
-	created, moved bool
+	// created is set for a branch that did not exist
+	created bool
 }
 
-// pushBranch points a branch at a commit. It creates the branch or, when an
-// earlier attempt left it behind, keeps it if its commit has the same tree,
-// and moves it to the commit otherwise. The branch is the session's own, so
-// moving it by force loses nothing but that earlier attempt.
-func (c *Client) pushBranch(ctx context.Context, tok, owner, repo, branch, commit, tree string) (branchState, error) {
-	refIn := map[string]string{"ref": "refs/heads/" + branch, "sha": commit}
+// pushBranch points pr's branch at commit. It creates the branch or, when
+// an earlier attempt left it behind, keeps it if its commit has the same
+// tree, and moves it to commit otherwise. It moves it only from a commit
+// the App made on pr.Parent, an earlier attempt's: moving it by force then
+// loses nothing but that attempt. Anyone else's commit, such as a
+// reviewer's pushed to the pull request, fails with ErrBranchChanged.
+func (c *Client) pushBranch(ctx context.Context, tok, owner, repo string, pr NewPullRequest, commit gitCommit) (branchState, error) {
+	branch := pr.Branch
+	refIn := map[string]string{"ref": "refs/heads/" + branch, "sha": commit.SHA}
 	err := c.do(ctx, http.MethodPost, c.repoURL(owner, repo, "git", "refs"), tok, refIn, maxResponseBytes, nil)
 	if err == nil {
-		return branchState{sha: commit, created: true}, nil
+		return branchState{sha: commit.SHA, created: true}, nil
 	}
 	// GitHub refuses a branch that exists with 422
 	var refusal *StatusError
@@ -249,39 +265,64 @@ func (c *Client) pushBranch(ctx context.Context, tok, owner, repo, branch, commi
 	if headErr != nil {
 		return branchState{}, headErr
 	}
-	existingTree, err := c.commitTree(ctx, tok, owner, repo, existing)
+	head, err := c.readCommit(ctx, tok, owner, repo, existing)
 	if err != nil {
 		return branchState{}, err
 	}
-	if existingTree == tree {
+	if head.Tree.SHA == commit.Tree.SHA {
 		return branchState{sha: existing}, nil
 	}
-	move := map[string]any{"sha": commit, "force": true}
+	if !commit.madeLike(head, pr.Parent) {
+		return branchState{}, fmt.Errorf("failed to update branch %s: %w", branch, ErrBranchChanged)
+	}
+	move := map[string]any{"sha": commit.SHA, "force": true}
 	if err := c.do(ctx, http.MethodPatch, c.repoURL(owner, repo, branchRef(branch)...), tok, move, maxResponseBytes, nil); err != nil {
 		return branchState{}, fmt.Errorf("failed to move branch %s: %w", branch, err)
 	}
-	return branchState{sha: commit, moved: true}, nil
+	return branchState{sha: commit.SHA}, nil
 }
 
-// commitTree returns the tree of a commit.
-func (c *Client) commitTree(ctx context.Context, tok, owner, repo, commit string) (string, error) {
-	var out struct {
-		Tree struct {
-			SHA string `json:"sha"`
-		} `json:"tree"`
-	}
-	if err := c.do(ctx, http.MethodGet, c.repoURL(owner, repo, "git", "commits", commit), tok, nil, maxResponseBytes, &out); err != nil {
-		return "", fmt.Errorf("failed to read commit %s: %w", commit, err)
+// gitCommit is a commit as GitHub's Git database API describes it.
+type gitCommit struct {
+	SHA  string `json:"sha"`
+	Tree struct {
+		SHA string `json:"sha"`
+	} `json:"tree"`
+	Parents []struct {
+		SHA string `json:"sha"`
+	} `json:"parents"`
+	// Committer is the App's bot for commits the App made through the API
+	Committer struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"committer"`
+}
+
+// madeLike reports whether other was made as c was, by the same committer
+// on parent alone: an earlier attempt's commit, not someone else's.
+func (c gitCommit) madeLike(other gitCommit, parent string) bool {
+	return c.Committer.Name != "" && other.Committer == c.Committer &&
+		len(other.Parents) == 1 && other.Parents[0].SHA == parent
+}
+
+// readCommit reads a commit.
+func (c *Client) readCommit(ctx context.Context, tok, owner, repo, sha string) (gitCommit, error) {
+	var out gitCommit
+	if err := c.do(ctx, http.MethodGet, c.repoURL(owner, repo, "git", "commits", sha), tok, nil, maxResponseBytes, &out); err != nil {
+		return gitCommit{}, fmt.Errorf("failed to read commit %s: %w", sha, err)
 	}
 	if !ValidSHA(out.Tree.SHA) {
-		return "", fmt.Errorf("failed to read commit %s: it has no tree", commit)
+		return gitCommit{}, fmt.Errorf("failed to read commit %s: it has no tree", sha)
 	}
-	return out.Tree.SHA, nil
+	out.SHA = sha
+	return out, nil
 }
 
 type ghPull struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
 	Head    struct {
 		Ref string `json:"ref"`
 	} `json:"head"`

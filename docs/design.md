@@ -456,7 +456,7 @@ cluster. Across versions:
    fingerprint) with an expiry of 2 minutes, storing the encrypted value
    beside the payload rather than in it, and returns `202` with the command
    ID. The UI polls the seal's status every second: queued, sealing, sealed,
-   failed or expired, or superseded when a newer seal of the key replaced
+   failed or expired, or superseded when newer seals of the key replaced
    the value in the session.
 7. The agent leases the command. Leasing removes the encrypted value from the
    stored command, so it reaches the agent once. The agent re-validates the
@@ -497,7 +497,11 @@ cluster. Across versions:
     can fail part way, or GitHub can act and its answer be lost; trying
     again keeps the branch when it holds the same files and moves it to the
     new commit otherwise, and returns the pull request already open from
-    it, with its title and description brought up to date. The App makes
+    it, with its title and description brought up to date. It moves the
+    branch only from the App's own commit on the base commit: when someone
+    else has pushed to it, a reviewer say, it is left alone and the user is
+    told to change the pull request on GitHub or start a new session. The
+    App makes
     the commit without an author, so GitHub signs it. The commit (a
     `Requested-by:` trailer) and the pull request (a mention) record who
     requested it; they name files, keys and documents, never values or
@@ -1175,10 +1179,16 @@ shows creating one.
   the query. Of two sessions opened at once, one is written and the other
   counts again.
 - **Change places:** a version, and the changes that seals still running
-  will make, each held until its seal's command expires and a minute more.
-  A seal counts the session's pending changes and these places, and adds its
-  own on condition the version has not moved, so seals still running count
-  toward the 50. A seal that fails keeps its place until it lapses.
+  will make, by change and seal, each held until its seal's command expires
+  and a minute more. A seal counts the session's pending changes and these
+  places, and adds its own on condition the version has not moved, so
+  seals still running count toward the 50. A seal gives its place up when
+  its result comes in: its change then counts itself, and removing the
+  change frees the place at once. A seal that never reports keeps its
+  place until it lapses. Every stored change counts, including one that
+  newer changes of the key cover between them, which the session does not
+  show (removing one of those brings it back); a seal refused at the cap
+  names those.
 - **Seal:** the command carrying a requested seal and the agent it went to,
   with the file, key, regions, targets and requesting user, so the UI can
   follow its progress.
@@ -1266,7 +1276,8 @@ one. The pull requests are a second, lasting record: each commit's
   every operation is first checked against the signed-in user's own permission
   on that repository: read to list and discover, write to create a session,
   seal and open a pull request. Write access is re-checked on every seal and
-  PR. The permission comes from
+  PR. Reading one's own session asks GitHub nothing: its seals and pull
+  request check again. The permission comes from
   `GET /repos/{owner}/{repo}/collaborators/{login}/permission`, and the answer
   must name the signed-in user's GitHub ID (logins can change hands). Results
   are cached for 2 minutes per Lambda instance. A repository the user cannot

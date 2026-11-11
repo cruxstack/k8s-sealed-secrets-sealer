@@ -25,8 +25,8 @@ const (
 	skSessions = "SESSIONS"
 	skChanges  = "CHANGES"
 
-	// maxReserveAttempts bounds the tries of a ReserveChange that keeps
-	// losing to concurrent seals in the same session.
+	// maxReserveAttempts bounds the tries of a ReserveChange or
+	// ReleaseChange that keeps losing to concurrent seals in the session.
 	maxReserveAttempts = 8
 )
 
@@ -432,15 +432,40 @@ func (d *Dynamo) Seal(ctx context.Context, sessionID, commandID string) (Seal, b
 	return item.Seal, true, nil
 }
 
-func (d *Dynamo) ReserveChange(ctx context.Context, sessionID, changeID string, existing []string, maxChanges int, until, now time.Time) error {
+func (d *Dynamo) ReserveChange(ctx context.Context, sessionID, changeID, sealID string, existing []string, maxChanges int, until, now time.Time) error {
+	err := d.updatePlaces(ctx, sessionID, func(reserved map[string]int64) (map[string]int64, bool, error) {
+		kept, err := reserveChange(reserved, changeID, sealID, existing, maxChanges, until, now)
+		return kept, err == nil, err
+	})
+	if err != nil && !errors.Is(err, ErrTooManyChanges) {
+		return fmt.Errorf("failed to reserve change %s in session %s: %w", changeID, sessionID, err)
+	}
+	return err
+}
+
+func (d *Dynamo) ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error {
+	err := d.updatePlaces(ctx, sessionID, func(reserved map[string]int64) (map[string]int64, bool, error) {
+		kept, held := releaseChange(reserved, changeID, sealID, now)
+		return kept, held, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to release change %s in session %s: %w", changeID, sessionID, err)
+	}
+	return nil
+}
+
+// updatePlaces changes the places seals hold in a session with change,
+// which returns them changed and whether to write them. It writes only
+// over the version it read, and reads again when another seal wrote first.
+func (d *Dynamo) updatePlaces(ctx context.Context, sessionID string, change func(map[string]int64) (map[string]int64, bool, error)) error {
 	pk := sessionPrefix + sessionID
 	for range maxReserveAttempts {
 		g, err := d.guard(ctx, pk, skChanges)
 		if err != nil {
-			return fmt.Errorf("failed to read reserved changes of session %s: %w", sessionID, err)
+			return fmt.Errorf("failed to read reserved changes: %w", err)
 		}
-		kept, err := reserveChange(g.Reserved, changeID, existing, maxChanges, until, now)
-		if err != nil {
+		kept, write, err := change(g.Reserved)
+		if err != nil || !write {
 			return err
 		}
 		lapses := int64(0)
@@ -456,7 +481,7 @@ func (d *Dynamo) ReserveChange(ctx context.Context, sessionID, changeID string, 
 			Reserved:  kept,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to encode reserved changes of session %s: %w", sessionID, err)
+			return fmt.Errorf("failed to encode reserved changes: %w", err)
 		}
 		condition, names, values := guardCondition(g.Version)
 		_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
@@ -469,14 +494,14 @@ func (d *Dynamo) ReserveChange(ctx context.Context, sessionID, changeID string, 
 		var moved *types.ConditionalCheckFailedException
 		switch {
 		case errors.As(err, &moved):
-			// another seal in the session reserved first
+			// another seal in the session wrote first
 			continue
 		case err != nil:
-			return fmt.Errorf("failed to reserve change %s in session %s: %w", changeID, sessionID, err)
+			return err
 		}
 		return nil
 	}
-	return fmt.Errorf("failed to reserve change %s in session %s: too many seals at once", changeID, sessionID)
+	return errors.New("too many seals at once")
 }
 
 func (d *Dynamo) PutChange(ctx context.Context, c Change) (bool, error) {

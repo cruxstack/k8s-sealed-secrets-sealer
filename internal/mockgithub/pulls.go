@@ -101,16 +101,26 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Not Found")
 		return
 	}
+	writeJSON(w, http.StatusOK, commitJSON(sha, c))
+}
+
+// commitJSON is a commit as the Git database API describes it. Its author
+// commits it too, as GitHub has an App's bot do for commits made through
+// the API without either.
+func commitJSON(sha string, c commit) map[string]any {
 	parents := []map[string]string{}
 	for _, p := range c.Parents {
 		parents = append(parents, map[string]string{"sha": p})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sha":     sha,
-		"message": c.Message,
-		"tree":    map[string]string{"sha": c.Tree},
-		"parents": parents,
-	})
+	person := map[string]string{"name": c.Author, "email": c.Author + "@users.noreply.github.com"}
+	return map[string]any{
+		"sha":       sha,
+		"message":   c.Message,
+		"tree":      map[string]string{"sha": c.Tree},
+		"parents":   parents,
+		"author":    person,
+		"committer": person,
+	}
 }
 
 // createTree builds a tree from base_tree and the given entries. Trees are
@@ -192,8 +202,8 @@ func (s *Server) createCommit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sha := st.putCommit(commit{Tree: in.Tree, Parents: in.Parents, Message: in.Message, Author: "sealer[bot]", Date: time.Now().UTC()})
-	writeJSON(w, http.StatusCreated, map[string]string{"sha": sha})
+	c := commit{Tree: in.Tree, Parents: in.Parents, Message: in.Message, Author: "sealer[bot]", Date: time.Now().UTC()}
+	writeJSON(w, http.StatusCreated, commitJSON(st.putCommit(c), c))
 }
 
 func (s *Server) createRef(w http.ResponseWriter, r *http.Request) {

@@ -255,6 +255,38 @@ func (s *Server) gitBlob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Push commits files on top of a branch as author, as a person pushing to
+// a pull request's branch would, and returns the commit. A branch that does
+// not exist starts from the default branch. False means the repository does
+// not exist. For tests.
+func (s *Server) Push(owner, repo, branch, author string, files map[string]string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.repos[strings.ToLower(owner+"/"+repo)]
+	if !ok {
+		return "", false
+	}
+	head, ok := st.refs["heads/"+branch]
+	if !ok {
+		head = st.refs["heads/"+st.DefaultBranch]
+	}
+	tree := map[string]string{}
+	for p, blob := range st.trees[st.commits[head].Tree] {
+		tree[p] = blob
+	}
+	for p, content := range files {
+		tree[p] = st.putBlob([]byte(content))
+	}
+	sha := st.putCommit(commit{Tree: st.putTree(tree), Parents: []string{head}, Message: "Push", Author: author, Date: time.Now().UTC()})
+	st.refs["heads/"+branch] = sha
+	for i, p := range st.pulls {
+		if p.Head == branch && !p.Closed {
+			st.pulls[i].HeadSHA = sha
+		}
+	}
+	return sha, true
+}
+
 // File returns a file's content on a branch, for tests.
 func (s *Server) File(owner, repo, branch, filePath string) (string, bool) {
 	s.mu.Lock()
