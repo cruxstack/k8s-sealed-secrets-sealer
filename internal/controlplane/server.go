@@ -58,9 +58,9 @@ type Options struct {
 	Store          store.Store
 	// AdminToken enables the admin API. Empty disables it.
 	AdminToken string
-	// AdminTokenKeyChanges lets the admin token revoke and reinstate keys.
-	// Without it the token only reads the fleet; signed-in admins change
-	// keys either way.
+	// AdminTokenKeyChanges lets the admin token revoke, reinstate and
+	// delete keys. Without it the token only reads the fleet; signed-in
+	// admins change keys either way.
 	AdminTokenKeyChanges bool
 	// Users admits people to the env's user API; nil disables it. Signing
 	// in is the Host's.
@@ -273,19 +273,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentPutEscrow))
 	mux.HandleFunc("GET /agent/v1/escrow/{fingerprint}", s.requireAgent(s.agentGetEscrow))
 
-	const revoke, reinstate = "/keys/{fingerprint}/revoke", "/keys/{fingerprint}/reinstate"
+	const revoke, reinstate, del = "/keys/{fingerprint}/revoke", "/keys/{fingerprint}/reinstate", "/keys/{fingerprint}/delete"
 	if s.adminToken != "" {
 		mux.HandleFunc("GET /api/v1/admin/fleet", s.requireAdmin(s.fleet))
 		// the token is often shared, and given to monitoring: changing keys
 		// with it is allowed per env
-		keyStatus := func(status string) http.HandlerFunc {
+		keyChange := func(h http.HandlerFunc) http.HandlerFunc {
 			if !s.adminTokenKeyChanges {
 				return s.requireAdmin(adminTokenKeyChangesOff)
 			}
-			return s.requireAdmin(s.setKeyStatus(status))
+			return s.requireAdmin(h)
 		}
-		mux.HandleFunc("POST /api/v1/admin"+revoke, keyStatus(store.KeyRevoked))
-		mux.HandleFunc("POST /api/v1/admin"+reinstate, keyStatus(store.KeyActive))
+		mux.HandleFunc("POST /api/v1/admin"+revoke, keyChange(s.setKeyStatus(store.KeyRevoked)))
+		mux.HandleFunc("POST /api/v1/admin"+reinstate, keyChange(s.setKeyStatus(store.KeyActive)))
+		mux.HandleFunc("POST /api/v1/admin"+del, keyChange(s.deleteKey))
 	}
 
 	if u := s.users; u != nil {
@@ -294,6 +295,7 @@ func (s *Server) Handler() http.Handler {
 		admin := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireCSRF(u.RequireAdmin(h))) }
 		mux.HandleFunc("POST /api/v1"+revoke, admin(s.setKeyStatus(store.KeyRevoked)))
 		mux.HandleFunc("POST /api/v1"+reinstate, admin(s.setKeyStatus(store.KeyActive)))
+		mux.HandleFunc("POST /api/v1"+del, admin(s.deleteKey))
 		mux.HandleFunc("GET /api/v1/status", u.RequireUser(s.status))
 		// calls that cost GitHub requests, KMS or agent work are rate
 		// limited per user, after sign-in and CSRF checks

@@ -39,8 +39,11 @@ func (s *Server) readSnapshot(ctx context.Context) (fleetSnapshot, error) {
 	return fleetSnapshot{reg: reg, states: states, revoked: revoked}, nil
 }
 
-// loadFleet reads the fleet afresh and computes it at now.
-func (s *Server) loadFleet(ctx context.Context, now time.Time) (fleet.Fleet, error) {
+// loadFleet reads the fleet afresh and computes it at now. With usage it
+// also reads every agent's latest count of key references, with one
+// batch read, for the key references and the delete gate; check-ins and
+// the sealing status do without.
+func (s *Server) loadFleet(ctx context.Context, now time.Time, usage bool) (fleet.Fleet, error) {
 	snap, err := s.readSnapshot(ctx)
 	if err != nil {
 		return fleet.Fleet{}, err
@@ -48,6 +51,15 @@ func (s *Server) loadFleet(ctx context.Context, now time.Time) (fleet.Fleet, err
 	keys, err := s.fleetKeys(ctx, snap, nil)
 	if err != nil {
 		return fleet.Fleet{}, err
+	}
+	if usage {
+		ids := make([]string, 0, len(snap.reg.Agents))
+		for _, a := range snap.reg.Agents {
+			ids = append(ids, a.ID)
+		}
+		if keys.Usage, err = s.store.KeyUsages(ctx, ids); err != nil {
+			return fleet.Fleet{}, err
+		}
 	}
 	return fleet.Compute(s.env, snap.reg, snap.states, keys, now), nil
 }

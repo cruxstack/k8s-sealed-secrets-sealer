@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -454,5 +455,202 @@ func TestCompute_KeyLimit(t *testing.T) {
 	f = Compute("dev", testRegistry(t, "b"), map[string]store.AgentState{"b": b}, Keys{}, now)
 	if !strings.Contains(issues(agent(t, f, "b")), "125 keys, over half of the 250") {
 		t.Errorf("b issues = %v", agent(t, f, "b").Issues)
+	}
+}
+
+// cleanupRegistry registers a and b with cleanup, c without.
+func cleanupRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	y := "issuers: [{name: local, url: \"https://k8s.example.com\", jwksFile: k.json}]\nagents:\n"
+	for _, a := range []struct{ id, caps string }{{"a", "seal, keys, cleanup"}, {"b", "seal, keys, cleanup"}, {"c", "seal, keys"}} {
+		y += "  - {id: " + a.id + ", cluster: " + a.id + ", region: use1, capabilities: [" + a.caps + "], identity: {k8s: {issuer: local, subject: \"system:serviceaccount:" + a.id + ":agent\"}}}\n"
+	}
+	r, err := registry.Parse([]byte(y), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func counting(id string, keys ...store.KeyRef) store.AgentState {
+	s := state(id, time.Second, keys...)
+	s.Capabilities = []string{protocol.CapabilitySeal, protocol.CapabilityKeys, protocol.CapabilityCleanup}
+	return s
+}
+
+func TestCompute_KeyReferences(t *testing.T) {
+	reg := cleanupRegistry(t)
+	used, unused := key("SHA256:used", 30), key("SHA256:unused", 60)
+	counted := now.Add(-time.Minute)
+	f := Compute("dev", reg, map[string]store.AgentState{
+		"a": counting("a", unused, used),
+		"b": counting("b", unused, used),
+		"c": state("c", time.Second, unused, used),
+	}, Keys{Usage: map[string]store.KeyUsage{
+		"a": {AgentID: "a", CountedAt: counted, Namespaces: []string{"apps", "sealed-secrets"}, SealedSecrets: 3, Values: 5, Unmatched: 2,
+			Keys: map[string]store.KeyUse{used.Fingerprint: {Values: 3, SealedSecrets: 2}}},
+		"b": {AgentID: "b", CountedAt: counted, SealedSecrets: 1, Values: 1,
+			Keys: map[string]store.KeyUse{used.Fingerprint: {Values: 1, SealedSecrets: 1}}},
+	}}, now)
+
+	refs := listed(t, f, used.Fingerprint).References
+	if refs.Values != 4 || refs.SealedSecrets != 3 || len(refs.Clusters) != 2 || !slices.Equal(refs.Uncounted, []string{"c"}) {
+		t.Fatalf("references of the used key = %+v", refs)
+	}
+	if c := refs.Clusters[0]; c.Agent != "a" || c.Cluster != "a" || c.Values != 3 || c.SealedSecrets != 2 || !c.CountedAt.Equal(counted) {
+		t.Errorf("a's references = %+v", c)
+	}
+	// clusters that counted none are listed too
+	if refs := listed(t, f, unused.Fingerprint).References; refs.Values != 0 || len(refs.Clusters) != 2 || refs.Clusters[1].Values != 0 {
+		t.Errorf("references of the unused key = %+v", refs)
+	}
+	// active keys are not offered for deletion
+	if k := listed(t, f, unused.Fingerprint); k.Deletable || k.DeleteBlocked != BlockedActive {
+		t.Errorf("active key: deletable %v, blocked %q", k.Deletable, k.DeleteBlocked)
+	}
+
+	a := agent(t, f, "a")
+	if u := a.KeyUsage; u == nil || !u.CountedAt.Equal(counted) || u.Values != 5 || u.Unmatched != 2 || !slices.Equal(u.Namespaces, []string{"apps", "sealed-secrets"}) {
+		t.Errorf("a's usage = %+v", a.KeyUsage)
+	}
+	if !slices.ContainsFunc(a.Issues, func(s string) bool {
+		return s == "2 values in this cluster's SealedSecrets match none of its keys: the controller cannot decrypt them"
+	}) {
+		t.Errorf("a's issues = %q", a.Issues)
+	}
+	// every namespace is null, not an empty list
+	if u := agent(t, f, "b").KeyUsage; u == nil || u.Namespaces != nil {
+		t.Errorf("b's usage = %+v", u)
+	}
+	if u := agent(t, f, "c").KeyUsage; u != nil {
+		t.Errorf("c never counted, usage = %+v", u)
+	}
+	b, err := json.Marshal(agent(t, f, "b").KeyUsage)
+	if err != nil || !strings.Contains(string(b), `"namespaces":null`) {
+		t.Errorf("b's usage as JSON = %s, %v", b, err)
+	}
+}
+
+func TestCompute_DeleteGate(t *testing.T) {
+	reg := cleanupRegistry(t)
+	k := key("SHA256:k", 60)
+	revokedAt := now.Add(-30 * time.Minute)
+	after, before, stale := now.Add(-time.Minute), revokedAt.Add(-time.Minute), now.Add(-UsageFresh-time.Second)
+	usage := func(at time.Time, values int, err string) store.KeyUsage {
+		u := store.KeyUsage{CountedAt: at, Error: err}
+		if values > 0 {
+			u.Values, u.SealedSecrets = values, 1
+			u.Keys = map[string]store.KeyUse{k.Fingerprint: {Values: values, SealedSecrets: 1}}
+		}
+		return u
+	}
+	states := func(withC bool) map[string]store.AgentState {
+		out := map[string]store.AgentState{"a": counting("a", k), "b": counting("b", k)}
+		if withC {
+			out["c"] = state("c", time.Second, k)
+		}
+		return out
+	}
+	cases := map[string]struct {
+		states  map[string]store.AgentState
+		usage   map[string]store.KeyUsage
+		blocked string
+	}{
+		"every cluster counted none since it was revoked": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": usage(after, 0, "")},
+		},
+		// a cluster down, but its count recent, still counts
+		"a cluster down with a recent count": {
+			states: map[string]store.AgentState{"a": counting("a", k), "b": func() store.AgentState {
+				s := counting("b", k)
+				s.LastCheckIn = now.Add(-20 * time.Minute)
+				return s
+			}()},
+			usage: map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": usage(after, 0, "")},
+		},
+		"values sealed with it": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 3, ""), "b": usage(after, 0, "")},
+			blocked: "3 values in 1 SealedSecret use it (a).",
+		},
+		"one value": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 1, ""), "b": usage(stale, 0, "")},
+			blocked: "1 value in 1 SealedSecret uses it (a).",
+		},
+		// references block whatever else holds
+		"values in two clusters, and a cluster without cleanup": {
+			states:  states(true),
+			usage:   map[string]store.KeyUsage{"a": usage(after, 12, ""), "b": usage(before, 2, "")},
+			blocked: "14 values in 2 SealedSecrets use it (a, b).",
+		},
+		"a cluster without cleanup": {
+			states: states(true), usage: map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": usage(after, 0, "")},
+			blocked: "c cannot count the values sealed with it: it needs the cleanup capability.",
+		},
+		"a failed count": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 0, "forbidden"), "b": usage(after, 0, "")},
+			blocked: "The last count of the values sealed with it failed in a.",
+		},
+		"a count from before the revocation": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(before, 0, ""), "b": usage(after, 0, "")},
+			blocked: "Waiting for a to count the values sealed with it since it was revoked; clusters count every few minutes.",
+		},
+		"a count over an hour old, and one never made": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(stale, 0, "")},
+			blocked: "Waiting for a and b to count the values sealed with it since it was revoked; clusters count every few minutes.",
+		},
+		"no cluster checked in": {
+			states:  map[string]store.AgentState{},
+			blocked: "No cluster has checked in, so none has counted the values sealed with it.",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := Compute("dev", reg, tc.states, Keys{
+				Revoked: map[string]store.RevokedKey{k.Fingerprint: {Fingerprint: k.Fingerprint, NotBefore: k.NotBefore, By: "alice", At: revokedAt}},
+				Usage:   tc.usage,
+			}, now)
+			got := listed(t, f, k.Fingerprint)
+			if got.DeleteBlocked != tc.blocked || got.Deletable != (tc.blocked == "") {
+				t.Fatalf("deletable %v, blocked %q; want %q", got.Deletable, got.DeleteBlocked, tc.blocked)
+			}
+		})
+	}
+}
+
+// A deleted key is a revoked key for everything else; it is listed with
+// who deleted it while a cluster still reports it or it can be reinstated.
+func TestCompute_DeletedKey(t *testing.T) {
+	reg := cleanupRegistry(t)
+	old, deleted, gone := key("SHA256:old", 60), key("SHA256:deleted", 1), key("SHA256:gone", 90)
+	deletedAt, purgeAt := now.Add(-time.Hour), now.Add(29*24*time.Hour)
+	past := now.Add(-time.Second)
+	record := func(k store.KeyRef, purge *time.Time) store.RevokedKey {
+		return store.RevokedKey{Fingerprint: k.Fingerprint, NotBefore: k.NotBefore, By: "alice", At: deletedAt.Add(-time.Hour),
+			Status: store.KeyDeleted, DeletedBy: "bob", DeletedAt: &deletedAt, PurgeAt: purge}
+	}
+	keys := Keys{Revoked: map[string]store.RevokedKey{
+		deleted.Fingerprint: record(deleted, &purgeAt),
+		gone.Fingerprint:    record(gone, &past),
+		old.Fingerprint:     record(old, &past),
+	}}
+	f := Compute("dev", reg, map[string]store.AgentState{
+		"a": counting("a", old, deleted),
+		"b": counting("b", key("SHA256:mid", 30)),
+	}, keys, now)
+
+	if f.EnvKey != nil || slices.Contains(agent(t, f, "b").MissingKeys, deleted.Fingerprint) {
+		t.Fatalf("env key %+v, b missing %v", f.EnvKey, agent(t, f, "b").MissingKeys)
+	}
+	k := listed(t, f, deleted.Fingerprint)
+	if k.Status != store.KeyDeleted || k.RevokedBy != "alice" || k.DeletedBy != "bob" || k.DeletedAt == nil || k.PurgeAt == nil || k.Purged || k.Deletable || k.DeleteBlocked != BlockedDeleted {
+		t.Errorf("deleted key = %+v", k)
+	}
+	// purged but still in a cluster: listed, so its removal shows
+	if k := listed(t, f, old.Fingerprint); k.Status != store.KeyDeleted || !k.Purged || len(k.Holders) != 1 {
+		t.Errorf("purged key a cluster holds = %+v", k)
+	}
+	// purged and in no cluster: left out
+	if _, ok := f.Key(gone.Fingerprint); ok {
+		t.Error("a purged key no cluster holds is listed")
 	}
 }

@@ -32,11 +32,20 @@ import (
 )
 
 // faultyStore fails reads of every agent's state while failStateReads is
-// set, and counts reads of an agent's commands.
+// set, and writes of key usage while failUsageWrites is, and counts reads
+// of an agent's commands.
 type faultyStore struct {
 	store.Store
-	failStateReads atomic.Bool
-	commandReads   atomic.Int32
+	failStateReads  atomic.Bool
+	failUsageWrites atomic.Bool
+	commandReads    atomic.Int32
+}
+
+func (f *faultyStore) PutKeyUsage(ctx context.Context, u store.KeyUsage) (bool, error) {
+	if f.failUsageWrites.Load() {
+		return false, errors.New("throttled")
+	}
+	return f.Store.PutKeyUsage(ctx, u)
 }
 
 func (f *faultyStore) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]store.CommandRecord, error) {
@@ -62,13 +71,20 @@ type keyHarness struct {
 
 func newKeyHarness(t *testing.T) *keyHarness {
 	t.Helper()
-	reg, err := registry.Parse([]byte(`
+	return newKeyHarnessWith(t, `
 issuers: [{name: local, url: "https://k8s.example.com", jwksFile: k.json}]
 agents:
   - {id: a, cluster: a, region: use1, capabilities: [seal, keys, renewal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
   - {id: b, cluster: b, region: use1, capabilities: [seal, keys], identity: {k8s: {issuer: local, subject: "system:serviceaccount:b:agent"}}}
   - {id: c, cluster: c, region: use2, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:c:agent"}}}
-`), "")
+`)
+}
+
+// newKeyHarnessWith is newKeyHarness with another registry of agents a, b
+// and c.
+func newKeyHarnessWith(t *testing.T, registryYAML string) *keyHarness {
+	t.Helper()
+	reg, err := registry.Parse([]byte(registryYAML), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +263,7 @@ func TestKeyStatus_AdminTokenChangesKeysOnlyWhenAllowed(t *testing.T) {
 	if rec := h.do(http.MethodPost, "/agent/v1/checkin", h.login(), checkIn(k)); rec.Code != http.StatusOK {
 		t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
 	}
-	for _, action := range []string{"revoke", "reinstate"} {
+	for _, action := range []string{"revoke", "reinstate", "delete"} {
 		path := "/api/v1/admin/keys/" + protocol.FingerprintPath(k.Fingerprint) + "/" + action
 		if rec := h.do(http.MethodPost, path, "wrong", nil); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s with a wrong token = %d", action, rec.Code)
