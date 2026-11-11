@@ -645,6 +645,11 @@ curl -sSf -o /dev/null -X POST -H 'Content-Type: application/json' \
   "${mock}/_mock/repos/example-org/apps/commits" || die "could not push the reseal fixture to the mock"
 check "a file with a value sealed with an older key (${old_key}) is pushed to example-org/apps"
 
+# an agent reseals only onto the key its controller seals with: the env
+# key's own cluster's controller does, the clusters' keys being made in the
+# same second
+status="$(curl -sS -b "${work}/cookies-alice" "${control_plane}/api/v1/envs/dev/status")"
+jq -e '.can_reseal' <<<"$status" >/dev/null || die "the env cannot reseal: ${status}"
 head_commit="$(curl -sS "${page[@]}" -b "${work}/cookies-alice" "${control_plane}${apps}/files" | jq -r .commit)"
 out="$(as_alice POST "${apps}/session" "$(jq -nc --arg c "$head_commit" '{commit: $c}')")"
 [[ "${out%% *}" == 201 ]] || die "alice could not open a session for the reseal: ${out}"
@@ -689,7 +694,12 @@ diff <(grep -v '^    old-token: ' "${work}/reseal-before.yaml") <(grep -v '^    
 check "the pull request (#${manual_pr}) changes only old-token's encryptedData, and says resealing does not rotate values"
 
 # applied, every controller decrypts the resealed value to what it was, and
-# counts it under the env key
+# counts it under the env key: two values and one SealedSecret more than
+# it counted before, and nothing more under the older key
+refs_before="$(fleet_now)"
+env_before="$(jq -c --arg fp "$env_key" '[.keys[] | select(.fingerprint == $fp) | .references.clusters[]
+  | {key: .agent, value: {values, sealed_secrets}}] | from_entries' <<<"$refs_before")"
+old_before="$(jq --arg fp "$old_key" '[.keys[] | select(.fingerprint == $fp) | .references.values][0] // 0' <<<"$refs_before")"
 kubectl --context "$KUBE_CONTEXT" create --dry-run=client -o json -f "${work}/reseal-after.yaml" \
   | jq -s '{apiVersion: "v1", kind: "List", items: [.[] | if .kind == "List" then .items[] else . end]}' \
   | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
@@ -705,10 +715,12 @@ for name in $(stack_clusters); do
 done
 started=$SECONDS
 moved() {
-  jq -e --argjson n "$expected" --arg env "$env_key" --arg old "$old_key" '
-    (.keys[] | select(.fingerprint == $env) | .references
-      | (.clusters | length) == $n and ([.clusters[] | select(.values == 5 and .sealed_secrets == 3)] | length) == $n)
-    and (.keys[] | select(.fingerprint == $old) | .references.values == 0)
+  jq -e --argjson n "$expected" --arg env "$env_key" --arg old "$old_key" \
+    --argjson before "$env_before" --argjson old_before "$old_before" '
+    ([.keys[] | select(.fingerprint == $env) | .references.clusters[]
+      | select(.values == (($before[.agent].values // 0) + 2)
+        and .sealed_secrets == (($before[.agent].sealed_secrets // 0) + 1))] | length) == $n
+    and ([.keys[] | select(.fingerprint == $old) | .references.values][0] // 0) == $old_before
   ' <<<"$1" >/dev/null 2>&1
 }
 for _ in $(seq 1 45); do
@@ -811,5 +823,16 @@ as_dave() {
 [[ "$(as_dave POST "${apps}/session/${session}/reseals" "$(jq -nc --arg p "$reseal_path" '{path: $p}')")" == 403 ]] \
   || die "dave resealed a file"
 check "dave (not an admin) gets 403 on schedules and on resealing a file"
+
+# leave the stack as it was for --keep: the reseal SealedSecrets out of the
+# clusters, the schedule deleted, alice's reseal pull request closed
+for name in $(stack_clusters); do
+  kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" delete sealedsecret reseal --ignore-not-found >/dev/null
+done
+[[ "$(as_alice DELETE "/api/v1/envs/dev/reseal/schedules/${schedule}" | cut -d' ' -f1)" == 204 ]] \
+  || die "the e2e schedule could not be deleted"
+curl -sSf -o /dev/null -X POST "${mock}/_mock/repos/example-org/apps/pulls/${manual_pr}/close" \
+  || die "could not close #${manual_pr} in the mock"
+check "the reseal checks clean up after themselves"
 
 echo "e2e: ${passed} checks passed" >&2
