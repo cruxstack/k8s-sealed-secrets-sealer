@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +24,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/controlplane"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/envelope"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubsetup"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/repos"
@@ -33,93 +36,285 @@ import (
 
 // ControlPlane is the control plane for the envs it serves on one URL: their
 // HTTP handler, and their ticks, which advance reseal schedules and runs.
+//
+// With the GitHub App's credentials in an SSM parameter
+// (APP_GITHUB_APP_PARAMETER) that does not exist yet, it starts in setup
+// mode: agents check in as usual, and people see only the setup page,
+// which creates the App and writes the parameter. It then serves with the
+// new App, as other instances do once they read the parameter.
 type ControlPlane struct {
-	http.Handler
 	// TickInterval is how often Tick is to be called.
 	TickInterval time.Duration
-	envs         []*controlplane.Server
-	logger       *slog.Logger
+
+	cfgs    []*config.ControlPlane
+	awsCfg  aws.Config
+	logger  *slog.Logger
+	current atomic.Pointer[instance]
+	// stores are each env's table, kept when the App is set up and the
+	// envs are built again; build adds to it, under setupMu or alone
+	stores map[string]*store.Dynamo
+
+	// setup is where the App's credentials are stored; nil when the
+	// settings hold them
+	setup githubsetup.Store
+	// setupMu is held while the parameter is read or the App put to use
+	setupMu    sync.Mutex
+	configured atomic.Bool
+	// nextCheck is when a request next reads the parameter, in Unix
+	// nanoseconds, while the App is not set up
+	nextCheck atomic.Int64
 }
+
+// instance is what serves at one time: the handler, and the envs it ticks.
+type instance struct {
+	http.Handler
+	envs []*controlplane.Server
+}
+
+// setUpCheckInterval is how often an instance in setup mode reads the
+// GitHub App's parameter, as requests come in, to learn that another
+// instance set the App up.
+const setUpCheckInterval = 10 * time.Second
 
 // NewControlPlane returns the control plane for the envs it serves on one
 // URL (config.LoadControlPlanes): one sign-in and web UI for all of them,
 // and for each its own registry, store, transit key and agents. It makes no
-// network calls, except to create DynamoDB tables when the configuration
-// asks for it (local emulators only).
+// network calls, except to read the GitHub App's parameter when the
+// configuration names one, and to create DynamoDB tables when it asks for
+// it (local emulators only).
 func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *slog.Logger) (*ControlPlane, error) {
 	if len(cfgs) == 0 {
 		return nil, errors.New("no env to serve")
 	}
-	// settings every env shares come from the first
-	shared := cfgs[0]
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load aws configuration: %w", err)
 	}
+	var appStore githubsetup.Store
+	if arn := cfgs[0].GitHubAppParameter; arn != "" {
+		if appStore, err = githubsetup.NewSSMStore(awsCfg, arn, cfgs[0].SSMEndpoint); err != nil {
+			return nil, err
+		}
+	}
+	return newControlPlane(ctx, cfgs, awsCfg, appStore, logger)
+}
 
-	userSessions, err := userauth.NewSessions(shared.UserSessionKey, shared.PublicURL, shared.UserSessionTTL, nil)
+// newControlPlane is NewControlPlane with the GitHub App's credentials in
+// appStore, or in the settings when appStore is nil.
+func newControlPlane(ctx context.Context, cfgs []*config.ControlPlane, awsCfg aws.Config, appStore githubsetup.Store, logger *slog.Logger) (*ControlPlane, error) {
+	// settings every env shares come from the first
+	shared := cfgs[0]
+	c := &ControlPlane{
+		TickInterval: shared.TickInterval, cfgs: cfgs, awsCfg: awsCfg, logger: logger,
+		setup: appStore, stores: map[string]*store.Dynamo{},
+	}
+	logger.InfoContext(ctx, "starting control plane",
+		"version", version.Version, "envs", len(cfgs), "github_org", shared.GitHubOrg, "tick_interval", shared.TickInterval.String())
+
+	if appStore == nil {
+		inst, err := c.build(ctx, cfgs, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.current.Store(inst)
+		c.configured.Store(true)
+		return c, nil
+	}
+
+	loadCtx, cancel := context.WithTimeout(ctx, setUpReadTimeout)
+	defer cancel()
+	creds, err := appStore.Load(loadCtx)
+	switch {
+	case err == nil:
+		if err := c.configureLocked(ctx, creds); err != nil {
+			return nil, err
+		}
+		return c, nil
+	case !errors.Is(err, githubsetup.ErrNotSetUp):
+		return nil, err
+	}
+
+	setup := githubsetup.New(githubsetup.Options{
+		Store:     appStore,
+		Org:       shared.GitHubOrg,
+		PublicURL: shared.PublicURL,
+		GitHubURL: shared.GitHubURL,
+		APIURL:    shared.GitHubAPIURL,
+		OnCreated: c.configure,
+		Logger:    logger,
+	})
+	inst, err := c.build(ctx, cfgs, setup)
 	if err != nil {
 		return nil, err
 	}
-	policies := make([]userauth.EnvPolicy, len(cfgs))
-	for i, cfg := range cfgs {
-		policies[i] = userauth.EnvPolicy{Name: cfg.EnvName, Teams: cfg.GitHubAllowedTeams, AdminTeams: cfg.GitHubAdminTeams}
+	c.current.Store(inst)
+	c.nextCheck.Store(time.Now().Add(setUpCheckInterval).UnixNano())
+	logger.WarnContext(ctx, "the github app is not set up: an owner of the org sets it up at "+strings.TrimSuffix(shared.PublicURL, "/")+"/setup",
+		"event", "github_app.setup_needed", "github_org", shared.GitHubOrg, "parameter", shared.GitHubAppParameter)
+	return c, nil
+}
+
+// setUpReadTimeout bounds reading the GitHub App's parameter.
+const setUpReadTimeout = 15 * time.Second
+
+// ServeHTTP serves with the current instance. While the GitHub App is not
+// set up, it first reads its parameter if it has not lately, so an instance
+// learns that another set the App up.
+func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !c.configured.Load() {
+		c.checkSetUp(r.Context())
 	}
-	users := userauth.NewHandler(userauth.HandlerOptions{
-		Sessions: userSessions,
-		GitHub: userauth.NewGitHub(userauth.GitHubOptions{
+	c.current.Load().ServeHTTP(w, r)
+}
+
+// checkSetUp reads the GitHub App's parameter, at most once every
+// setUpCheckInterval and never while another request does, and starts
+// using the App once it is there.
+func (c *ControlPlane) checkSetUp(ctx context.Context) {
+	if time.Now().UnixNano() < c.nextCheck.Load() || !c.setupMu.TryLock() {
+		return
+	}
+	defer c.setupMu.Unlock()
+	if c.configured.Load() {
+		return
+	}
+	c.nextCheck.Store(time.Now().Add(setUpCheckInterval).UnixNano())
+	// the request may end first; reading and building must not
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), setUpReadTimeout)
+	defer cancel()
+	creds, err := c.setup.Load(ctx)
+	switch {
+	case errors.Is(err, githubsetup.ErrNotSetUp):
+		return
+	case err != nil:
+		c.logger.WarnContext(ctx, "failed to read the github app's parameter", "error", err)
+		return
+	}
+	if err := c.configureLocked(ctx, creds); err != nil {
+		c.logger.ErrorContext(ctx, "failed to start using the github app", "app_id", creds.AppID, "error", err)
+	}
+}
+
+// configure starts using a GitHub App the setup page created.
+func (c *ControlPlane) configure(ctx context.Context, creds githubsetup.Credentials) error {
+	c.setupMu.Lock()
+	defer c.setupMu.Unlock()
+	return c.configureLocked(ctx, creds)
+}
+
+// configureLocked builds the control plane with the App's credentials and
+// serves with it from then on. The caller holds setupMu, or is the only
+// goroutine yet.
+func (c *ControlPlane) configureLocked(ctx context.Context, creds githubsetup.Credentials) error {
+	if c.configured.Load() {
+		return nil
+	}
+	cfgs := make([]*config.ControlPlane, len(c.cfgs))
+	for i, cfg := range c.cfgs {
+		withApp := *cfg
+		withApp.GitHubAppID = creds.AppID
+		withApp.GitHubAppPrivateKey = []byte(creds.PrivateKey)
+		withApp.GitHubOAuthClientID = creds.ClientID
+		withApp.GitHubOAuthClientSecret = creds.ClientSecret
+		cfgs[i] = &withApp
+	}
+	inst, err := c.build(ctx, cfgs, nil)
+	if err != nil {
+		return err
+	}
+	c.current.Store(inst)
+	c.configured.Store(true)
+	c.logger.InfoContext(ctx, "serving with the github app from its parameter", "app_id", creds.AppID, "app_slug", creds.Slug)
+	return nil
+}
+
+// build returns what serves the envs: with the GitHub App the settings in
+// cfgs name or, given setup, without one, serving the setup page and the
+// agents.
+func (c *ControlPlane) build(ctx context.Context, cfgs []*config.ControlPlane, setup *githubsetup.Handler) (*instance, error) {
+	shared := cfgs[0]
+	var gh *envGitHub
+	var users *userauth.Handler
+	if setup == nil {
+		userSessions, err := userauth.NewSessions(shared.UserSessionKey, shared.PublicURL, shared.UserSessionTTL, nil)
+		if err != nil {
+			return nil, err
+		}
+		policies := make([]userauth.EnvPolicy, len(cfgs))
+		for i, cfg := range cfgs {
+			policies[i] = userauth.EnvPolicy{Name: cfg.EnvName, Teams: cfg.GitHubAllowedTeams, AdminTeams: cfg.GitHubAdminTeams}
+		}
+		users = userauth.NewHandler(userauth.HandlerOptions{
+			Sessions: userSessions,
+			GitHub: userauth.NewGitHub(userauth.GitHubOptions{
+				ClientID:     shared.GitHubOAuthClientID,
+				ClientSecret: shared.GitHubOAuthClientSecret,
+				TokenURL:     shared.GitHubOAuthTokenURL,
+				APIURL:       shared.GitHubAPIURL,
+			}),
+			PublicURL:    shared.PublicURL,
+			AuthorizeURL: shared.GitHubURL + "/login/oauth/authorize",
 			ClientID:     shared.GitHubOAuthClientID,
-			ClientSecret: shared.GitHubOAuthClientSecret,
-			TokenURL:     shared.GitHubOAuthTokenURL,
-			APIURL:       shared.GitHubAPIURL,
-		}),
-		PublicURL:    shared.PublicURL,
-		AuthorizeURL: shared.GitHubURL + "/login/oauth/authorize",
-		ClientID:     shared.GitHubOAuthClientID,
-		Org:          shared.GitHubOrg,
-		Envs:         policies,
-		Logger:       logger,
-	})
-	// one GitHub App reads and writes for every env, so the envs share what
-	// it learns from GitHub too
-	githubApp, err := githubapp.New(githubapp.Options{
-		APIURL:         shared.GitHubAPIURL,
-		AppID:          shared.GitHubAppID,
-		PrivateKey:     shared.GitHubAppPrivateKey,
-		Org:            shared.GitHubOrg,
-		InstallationID: shared.GitHubAppInstallationID,
-		Logger:         logger,
-	})
-	if err != nil {
-		return nil, err
+			Org:          shared.GitHubOrg,
+			Envs:         policies,
+			Logger:       c.logger,
+		})
+		// one GitHub App reads and writes for every env, so the envs share
+		// what it learns from GitHub too
+		app, err := githubapp.New(githubapp.Options{
+			APIURL:         shared.GitHubAPIURL,
+			AppID:          shared.GitHubAppID,
+			PrivateKey:     shared.GitHubAppPrivateKey,
+			Org:            shared.GitHubOrg,
+			InstallationID: shared.GitHubAppInstallationID,
+			Logger:         c.logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		gh = &envGitHub{users: users, app: app, cache: repos.NewCache()}
 	}
-	githubCache := repos.NewCache()
 
 	envs := make([]*controlplane.Server, len(cfgs))
 	registries := newEnvRegistries()
 	for i, cfg := range cfgs {
-		log := logger
+		log := c.logger
 		if len(cfgs) > 1 {
-			log = logger.With("env", cfg.EnvName)
+			log = c.logger.With("env", cfg.EnvName)
 		}
-		if envs[i], err = newEnv(ctx, awsCfg, cfg, users.Env(cfg.EnvName), githubApp, githubCache, registries, log); err != nil {
+		st, ok := c.stores[cfg.EnvName]
+		if !ok {
+			var err error
+			if st, err = newStore(ctx, c.awsCfg, cfg, log); err != nil {
+				return nil, fmt.Errorf("env %s: %w", cfg.EnvName, err)
+			}
+			c.stores[cfg.EnvName] = st
+		}
+		var err error
+		if envs[i], err = newEnv(ctx, c.awsCfg, cfg, st, gh, registries, log); err != nil {
 			return nil, fmt.Errorf("env %s: %w", cfg.EnvName, err)
 		}
 	}
-	logger.InfoContext(ctx, "starting control plane",
-		"version", version.Version, "envs", len(cfgs), "github_org", shared.GitHubOrg, "tick_interval", shared.TickInterval.String())
-	return &ControlPlane{
-		Handler: controlplane.NewHost(controlplane.HostOptions{
-			Version: version.Version,
-			Users:   users,
-			Envs:    envs,
-			WebUI:   webui.Handler(),
-			HSTS:    strings.HasPrefix(shared.PublicURL, "https://"),
-		}),
-		TickInterval: shared.TickInterval,
-		envs:         envs,
-		logger:       logger,
-	}, nil
+	host := controlplane.HostOptions{
+		Version: version.Version,
+		Envs:    envs,
+		WebUI:   webui.Handler(),
+		HSTS:    strings.HasPrefix(shared.PublicURL, "https://"),
+	}
+	if setup != nil {
+		host.Setup, host.SetupFormAction = setup, setup.FormAction()
+	} else {
+		host.Users = users
+	}
+	return &instance{Handler: controlplane.NewHost(host), envs: envs}, nil
+}
+
+// envGitHub is what an env reaches GitHub with: sign-in, and the GitHub App
+// every env shares with its cache.
+type envGitHub struct {
+	users *userauth.Handler
+	app   *githubapp.Client
+	cache *repos.Cache
 }
 
 // tickTime bounds a tick the ticker starts: ticks advance work a bounded
@@ -127,13 +322,15 @@ func NewControlPlane(ctx context.Context, cfgs []*config.ControlPlane, logger *s
 const tickTime = 50 * time.Second
 
 // Tick advances every env's reseal schedules and runs once, each env in its
-// share of the time ctx leaves, and returns the errors it met.
+// share of the time ctx leaves, and returns the errors it met. Until the
+// GitHub App is set up there is nothing to advance.
 func (c *ControlPlane) Tick(ctx context.Context) error {
 	var errs []error
-	for i, env := range c.envs {
+	envs := c.current.Load().envs
+	for i, env := range envs {
 		envCtx, cancel := ctx, context.CancelFunc(func() {})
 		if deadline, ok := ctx.Deadline(); ok {
-			envCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(c.envs)-i))
+			envCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(envs)-i))
 		}
 		if err := env.Tick(envCtx); err != nil {
 			errs = append(errs, fmt.Errorf("env %s: %w", env.Env(), err))
@@ -163,14 +360,11 @@ func (c *ControlPlane) RunTicker(ctx context.Context) error {
 	}
 }
 
-// newEnv returns one env's server. Its registry must not register an
-// identity that another env in registries does.
-func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, users controlplane.UserGuard, githubApp *githubapp.Client, githubCache *repos.Cache, registries *envRegistries, logger *slog.Logger) (*controlplane.Server, error) {
+// newEnv returns one env's server: with gh, its user and repository APIs,
+// and without it only the agent and admin APIs. Its registry must not
+// register an identity that another env in registries does.
+func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, st *store.Dynamo, gh *envGitHub, registries *envRegistries, logger *slog.Logger) (*controlplane.Server, error) {
 	sessions, err := agentauth.NewSessions(cfg.AgentSessionKey, cfg.PublicURL, cfg.EnvName, nil)
-	if err != nil {
-		return nil, err
-	}
-	st, err := newStore(ctx, awsCfg, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -195,16 +389,21 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 	if agents.reloadable() {
 		reload = agents.reload
 	}
-	repoService, err := repos.New(repos.Options{
-		GitHub:      githubApp,
-		Env:         cfg.EnvName,
-		Annotations: manifest.Annotations{Env: cfg.EnvAnnotation, Region: cfg.RegionAnnotation},
-		FileGlobs:   cfg.DiscoveryFileGlobs,
-		Cache:       githubCache,
-		Logger:      logger,
-	})
-	if err != nil {
-		return nil, err
+	// a nil *userauth.EnvGuard in the interface would not read as nil
+	var users controlplane.UserGuard
+	var repoService *repos.Service
+	if gh != nil {
+		users = gh.users.Env(cfg.EnvName)
+		if repoService, err = repos.New(repos.Options{
+			GitHub:      gh.app,
+			Env:         cfg.EnvName,
+			Annotations: manifest.Annotations{Env: cfg.EnvAnnotation, Region: cfg.RegionAnnotation},
+			FileGlobs:   cfg.DiscoveryFileGlobs,
+			Cache:       gh.cache,
+			Logger:      logger,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	transit, err := newKMS(awsCfg, cfg)
 	if err != nil {

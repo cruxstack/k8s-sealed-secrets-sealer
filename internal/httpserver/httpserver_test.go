@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +45,20 @@ func TestServe_ShutsDownWhenContextEnds(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not shut down")
+	}
+}
+
+func TestSecurityHeaders_FormActions(t *testing.T) {
+	serve := func(h func(http.Handler) http.Handler) string {
+		rec := httptest.NewRecorder()
+		h(http.NotFoundHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		return rec.Header().Get("Content-Security-Policy")
+	}
+	if got := serve(SecurityHeaders(false)); !strings.Contains(got, "form-action 'self';") {
+		t.Errorf("default policy = %q", got)
+	}
+	if got := serve(SecurityHeaders(false, "https://github.com")); !strings.Contains(got, "form-action 'self' https://github.com;") ||
+		!strings.Contains(got, "script-src 'self';") {
+		t.Errorf("policy with a form action = %q", got)
 	}
 }

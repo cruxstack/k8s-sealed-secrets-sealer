@@ -32,10 +32,12 @@ func TestIsSSMParameterARN(t *testing.T) {
 func TestResolveParameters(t *testing.T) {
 	const keyARN = "arn:aws:ssm:us-east-1:123456789012:parameter/sealer/dev/github-app-key"
 	const registryARN = "arn:aws:ssm:eu-west-1:123456789012:parameter/sealer/dev/registry"
+	const appARN = "arn:aws:ssm:eu-west-1:123456789012:parameter/sealer/github-app"
 	environ := []string{
 		"APP_ENV_NAME=dev",
 		"APP_GITHUB_APP_PRIVATE_KEY=" + keyARN,
 		"APP_REGISTRY=" + registryARN,
+		"APP_GITHUB_APP_PARAMETER=" + appARN,
 		// only APP_ settings are read from SSM
 		"OTHER=" + keyARN,
 		"MALFORMED",
@@ -63,7 +65,10 @@ func TestResolveParameters(t *testing.T) {
 		"APP_GITHUB_APP_PRIVATE_KEY": "-----BEGIN RSA PRIVATE KEY-----\nk\n",
 		// the registry is read by loadControlPlanes, which keeps its ARN
 		"APP_REGISTRY": registryARN,
-		"OTHER":        keyARN,
+		// the control plane reads the App's parameter itself, and it may
+		// not exist yet
+		"APP_GITHUB_APP_PARAMETER": appARN,
+		"OTHER":                    keyARN,
 	} {
 		if got, _ := lookup(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)

@@ -21,7 +21,7 @@ The stack is one k3d cluster that stands in for a whole environment:
 | Namespace                  | Contents                                          |
 | -------------------------- | ------------------------------------------------- |
 | `sealer-system`            | Control plane, DynamoDB Local, local KMS, GitHub  |
-|                            | mock                                              |
+|                            | and SSM mocks                                     |
 | `<cluster>-sealed-secrets` | That cluster's sealed-secrets controller and keys |
 | `<cluster>-sealer`         | That cluster's agent                              |
 | `<cluster>-apps`           | Where tests apply SealedSecrets for that cluster  |
@@ -162,6 +162,17 @@ GitHub's rate limit headers. Go tests can give the mock a rate limit to
 refuse calls past (`Options.RateLimit`), or have it fail a request, after
 acting on it or not (`FailNext`).
 
+The control plane reads the App's credentials from an SSM mock
+(`cmd/mock-ssm`, `github.appParameter` in `dev/values/control-plane.yaml`),
+which Tilt seeds with the mock's App. Start a stack with
+`SEALER_GITHUB_APP_SETUP=true` (`SEALER_GITHUB_APP_SETUP=true atmos dev
+agent up`, say) and the mock starts empty: the control plane serves its
+setup page at http://localhost:4100/setup, and creating the App posts its
+manifest to the GitHub mock, which shows what the App asks for, creates it
+in whatever org the form was posted to, and installs it on every fixture
+repository. Apps created this way live in the mocks' memory, so restart the
+stack to set up again.
+
 The UI is built into the control plane binary; Tilt rebuilds it when
 `web/` changes. For hot reload while working on the UI, run
 `atmos web dev` (Vite on http://localhost:5173, proxying `/api` to the
@@ -200,6 +211,11 @@ Each of `atmos check all`'s checks also runs alone: `atmos check tidy`,
 with a running development stack. Pass `--keep` to leave the cluster up after
 the run for inspection. Besides bringing the stack up, it checks that:
 
+- with no GitHub App yet (the SSM mock starts empty), every page goes to
+  the setup page and sign-in is refused; an App created in another org is
+  refused; one created in `example-org` from the setup page's manifest is
+  stored, used at once and installed, and signs everyone in for the checks
+  below;
 - only registered service accounts can log in, only with tokens for the
   control plane's audience, and that check-ins, commands and escrow need a
   session token;
@@ -362,22 +378,24 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_GITHUB_ORG`                   | control plane | required                           |
 | `APP_GITHUB_ALLOWED_TEAMS`         | control plane | unset: any org member              |
 | `APP_GITHUB_ADMIN_TEAMS`           | control plane | unset: no admins                   |
-| `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required                           |
-| `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required                           |
+| `APP_GITHUB_OAUTH_CLIENT_ID`       | control plane | required, unless the parameter     |
+| `APP_GITHUB_OAUTH_CLIENT_SECRET`   | control plane | required, unless the parameter     |
 | `APP_GITHUB_URL`                   | control plane | `https://github.com`               |
 | `APP_GITHUB_API_URL`               | control plane | `https://api.github.com`           |
 | `APP_GITHUB_OAUTH_TOKEN_URL`       | control plane | `APP_GITHUB_URL` + token path      |
 | `APP_ALLOW_INSECURE_GITHUB`        | control plane | `false` (local mocks only)         |
 | `APP_USER_SESSION_KEY`             | control plane | required, at least 32 bytes        |
 | `APP_USER_SESSION_TTL`             | control plane | `8h` (15m to 24h)                  |
-| `APP_GITHUB_APP_ID`                | control plane | required                           |
-| `APP_GITHUB_APP_PRIVATE_KEY`       | control plane | required, PEM                      |
+| `APP_GITHUB_APP_ID`                | control plane | required, unless the parameter     |
+| `APP_GITHUB_APP_PRIVATE_KEY`       | control plane | PEM; required unless the parameter |
 | `APP_GITHUB_APP_INSTALLATION_ID`   | control plane | looked up on the org               |
 | `APP_ENV_ANNOTATION`               | control plane | `k8s-sealed-secrets-sealer/env`    |
 | `APP_REGION_ANNOTATION`            | control plane | `k8s-sealed-secrets-sealer/region` |
 | `APP_DISCOVERY_FILE_GLOBS`         | control plane | `*sealed*.yaml,*sealed*.yml`       |
 | `APP_KEY_RENEW_PERIOD`             | control plane | `720h`                             |
 | `APP_TICK_INTERVAL`                | control plane | `1m` (1s to 10m)                   |
+| `APP_GITHUB_APP_PARAMETER`         | control plane | unset: the App's four settings     |
+| `APP_SSM_ENDPOINT`                 | control plane | AWS (set for emulators)            |
 | `APP_KEY_COMMAND_SETTLE`           | control plane | `2m` (10s to 10m)                  |
 | `APP_KMS_TRANSIT_KEY_ID`           | both          | required (agent: with `seal`)      |
 | `APP_KMS_ESCROW_KEY_ID`            | agent         | required with `keys`               |

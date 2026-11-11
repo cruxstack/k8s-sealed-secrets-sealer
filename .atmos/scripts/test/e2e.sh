@@ -8,6 +8,8 @@ export SEALER_CONTROL_PLANE_PORT="${SEALER_CONTROL_PLANE_PORT:-4200}"
 export SEALER_DYNAMODB_PORT="${SEALER_DYNAMODB_PORT:-4202}"
 export SEALER_KMS_PORT="${SEALER_KMS_PORT:-4203}"
 export SEALER_GITHUB_PORT="${SEALER_GITHUB_PORT:-4204}"
+# the stack starts with no GitHub App: the checks set it up first
+export SEALER_GITHUB_APP_SETUP=true
 source .atmos/scripts/lib/dev.sh
 
 port_forward_pids=()
@@ -98,6 +100,7 @@ kubectl --context "$KUBE_CONTEXT" -n sealer-system port-forward svc/mock-github 
   "${SEALER_GITHUB_PORT}:8080" >/dev/null 2>&1 &
 port_forward_pids+=($!)
 control_plane="http://localhost:${SEALER_CONTROL_PLANE_PORT}"
+mock="http://localhost:${SEALER_GITHUB_PORT}"
 for _ in $(seq 1 30); do
   curl -sf "${control_plane}/healthz" >/dev/null 2>&1 \
     && curl -sf "http://localhost:${SEALER_GITHUB_PORT}/healthz" >/dev/null 2>&1 && break
@@ -112,6 +115,52 @@ automount="$(kubectl --context "$KUBE_CONTEXT" -n sealer-system get deploy seale
   -o jsonpath='{.spec.template.spec.automountServiceAccountToken}')"
 [[ "$automount" == "false" ]] || die "control plane mounts a service account token"
 check "control plane has no Kubernetes API token"
+
+# --- GitHub App setup: the SSM mock holds no App, so the control plane
+# serves its setup page. An App created in another org is refused; one
+# created in the org is stored, used at once, and installed. ---
+[[ "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "${control_plane}/fleet")" == "302 ${control_plane}/setup" ]] \
+  || die "a page did not go to the setup page"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "${control_plane}/api/v1/auth/login")" == 503 ]] \
+  || die "sign-in answered before the GitHub App was set up"
+setup_status="$(curl -sS "${control_plane}/api/v1/setup")"
+jq -e '.org == "example-org" and (.permissions | length) == 4' <<<"$setup_status" >/dev/null || die "setup status: ${setup_status}"
+check "with no GitHub App, every page is the setup page and nobody signs in"
+
+setup_jar="${work}/cookies-setup"
+# start_setup: starts a setup as the page does; prints the form it posts to
+# GitHub, {action, manifest}
+start_setup() {
+  curl -sS -X POST -H 'X-Requested-With: XMLHttpRequest' -c "$setup_jar" -b "$setup_jar" "${control_plane}/api/v1/setup/github-app"
+}
+# create_app <org> <form>: posts the manifest to the GitHub mock for org,
+# confirms the App under a name of org's own (App names are unique on
+# GitHub), and prints where GitHub sends the browser back
+create_app() {
+  local manifest state
+  manifest="$(jq -r .manifest <<<"$2")"
+  state="$(jq -r '.action | capture("state=(?<s>[^&]+)").s' <<<"$2")"
+  curl -sSf -o /dev/null --data-urlencode "manifest=${manifest}" "${mock}/organizations/$1/settings/apps/new?state=${state}"
+  curl -sS -o /dev/null -w '%{redirect_url}' --data-urlencode "manifest=${manifest}" --data-urlencode "state=${state}" \
+    --data-urlencode "name=Sealer for $1" "${mock}/_mock/organizations/$1/apps"
+}
+back="$(create_app other-org "$(start_setup)")"
+[[ "$back" == "${control_plane}/api/v1/setup/github-app/callback?"* ]] || die "GitHub did not send the browser back: ${back}"
+[[ "$(curl -sS -o /dev/null -w '%{redirect_url}' -b "$setup_jar" -c "$setup_jar" "$back")" == "${control_plane}/setup?error=wrong_owner" ]] \
+  || die "an App owned by another org was not refused"
+check "an App created in another org is refused"
+
+install="$(curl -sS -o /dev/null -w '%{redirect_url}' -b "$setup_jar" -c "$setup_jar" "$(create_app example-org "$(start_setup)")")"
+[[ "$install" == "${mock}/apps/sealer-for-example-org/installations/new" ]] || die "the setup did not send the browser to install the App: ${install}"
+[[ "$(curl -sS -o /dev/null -w '%{redirect_url}' "$install")" == "${control_plane}/?installation_id="* ]] \
+  || die "installing the App did not send the browser back to the control plane"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "${control_plane}/api/v1/setup")" == 404 ]] || die "the setup page is still served"
+[[ -n "$(log_events sealer-system sealer-control-plane github_app.created)" ]] || die "the control plane did not log github_app.created"
+log="$(kubectl --context "$KUBE_CONTEXT" -n sealer-system logs deploy/sealer-control-plane 2>/dev/null || true)"
+if grep -q 'PRIVATE KEY' <<<"$log"; then
+  die "a private key appears in the control plane's log"
+fi
+check "an org owner creates the GitHub App on the setup page; it is stored, used at once, and installed"
 
 # --- agent login: only registered service accounts, only for this audience ---
 audience="$control_plane"
@@ -617,7 +666,6 @@ check "reinstated, the key is restored to every cluster from escrow, and the env
 # repository while that pull request is open; closed in GitHub, the tick
 # sees it so. The control plane ticks every second here, and checks an open
 # reseal pull request about every 15. ---
-mock="http://localhost:${SEALER_GITHUB_PORT}"
 fleet="$(fleet_now)"
 # an older key every cluster holds: one of the keys the clusters made
 # together, not the env key, preferring the one not deleted above

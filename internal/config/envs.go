@@ -23,7 +23,7 @@ var envScoped = []string{
 // reservedEnvNames are the web UI's and the host's own top-level paths,
 // which env names, the first segment of the UI's other paths, cannot be.
 var reservedEnvNames = []string{
-	"agent", "api", "assets", "auth", "fleet", "healthz", "login", "readyz", "repos", "secrets", "static",
+	"agent", "api", "assets", "auth", "fleet", "healthz", "login", "readyz", "repos", "secrets", "setup", "static",
 }
 
 // envEntry is one env in APP_ENVS. Settings it leaves out are shared: they

@@ -505,6 +505,42 @@ signs people in. [docs/operations.md](operations.md) covers running all
 this: the admin API, size limits and cost, upgrades, backups and
 troubleshooting.
 
+### The GitHub App
+
+The control plane can create its GitHub App itself. Point
+`APP_GITHUB_APP_PARAMETER` (the chart's `github.appParameter`) at an SSM
+parameter in the control plane's own account, with a hierarchical name,
+such as `arn:aws:ssm:us-east-2:111111111111:parameter/sealer/github-app`,
+and leave `APP_GITHUB_APP_ID`, `APP_GITHUB_APP_PRIVATE_KEY`,
+`APP_GITHUB_OAUTH_CLIENT_ID` and `APP_GITHUB_OAUTH_CLIENT_SECRET` unset. Its
+role needs `ssm:GetParameter` and `ssm:PutParameter` on that parameter,
+which is a SecureString under the account's `aws/ssm` key.
+
+Until the parameter exists, every page is the setup page,
+`https://sealer.example.com/setup`, and nobody can sign in; agents check in
+as usual. An owner of the org opens it and creates the App on GitHub, which
+suggests the name `Sealer for <org>` and lets them change it. GitHub sends
+them back; the control plane checks that the App belongs to the org,
+writes its ID, private key, client ID and secret to the parameter, starts
+using it, and sends them on to install the App on the repositories that
+hold SealedSecrets. Other instances take it up within about ten seconds.
+The App asks for repository Contents and Pull requests (read and write),
+Metadata (read) and organization Members (read), has no webhook, and only
+the org can install it. Its installation is looked up on the org, so
+`APP_GITHUB_APP_INSTALLATION_ID` stays unset.
+
+The parameter is written once. To replace the App, delete it on GitHub and
+the parameter in SSM, and set it up again; the control plane serves the
+setup page from its next start, or within ten seconds on instances that
+have not started using the old App.
+
+To create the App by hand instead, in the org's settings: homepage
+`https://sealer.example.com`, callback URL
+`https://sealer.example.com/api/v1/auth/callback`, webhook off, the
+permissions above, and installable only on the org. Generate a private key
+and a client secret, set the four settings from it (the private key and
+client secret may be SSM parameter ARNs), and install it.
+
 ## 5. Documents in the repositories
 
 A file can hold a document for each env and region; the env annotation picks

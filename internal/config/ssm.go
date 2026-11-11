@@ -31,10 +31,12 @@ type ParameterReader func(ctx context.Context, arn string) (string, error)
 // resolveTimeout bounds reading every parameter at start.
 const resolveTimeout = 15 * time.Second
 
-// rereadSettings are read from SSM by loadControlPlanes rather than
-// resolveParameters, which keeps their ARNs so the control plane can read
-// them again: the agent registry may change while it runs.
-var rereadSettings = []string{"APP_REGISTRY"}
+// rereadSettings keep their ARNs rather than being read by
+// resolveParameters: the agent registry, which loadControlPlanes reads and
+// the control plane reads again as it changes, and the GitHub App's
+// parameter, which the control plane reads itself and the setup page
+// writes.
+var rereadSettings = []string{"APP_REGISTRY", "APP_GITHUB_APP_PARAMETER"}
 
 // resolveParameters returns a lookup over environ in which every APP_
 // variable whose value is an SSM parameter ARN reads as that parameter's

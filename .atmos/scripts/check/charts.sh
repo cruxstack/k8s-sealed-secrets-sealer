@@ -31,6 +31,12 @@ validate deploy/helm/control-plane "${control_plane[@]}" --set aws.region=us-eas
   --set github.oauthTokenURL=http://mock-github:8080/login/oauth/access_token \
   --set github.installationID=777 --set 'discovery.fileGlobs={*.sealed.yaml,secrets/*/*.yaml}' \
   --set kms.region=us-east-1 --set kms.endpoint=http://local-kms:8080
+# the GitHub App's credentials in an SSM parameter, written by the setup page
+validate deploy/helm/control-plane --set env=dev --set publicURL=https://sealer.dev.example.com \
+  --set registry.configMapName=sealer-registry --set existingSecret=sealer \
+  --set dynamodb.table=sealer --set github.org=example-org --set kms.transitKeyId=alias/sealer-transit \
+  --set github.appParameter=arn:aws:ssm:us-east-1:111111111111:parameter/sealer/github-app \
+  --set ssm.endpoint=http://mock-ssm:8080
 # several envs on one URL: APP_ENVS instead of the one env's settings
 envs=(--set publicURL=https://sealer.example.com --set registry.configMapName=sealer-registry
   --set existingSecret=sealer --set github.org=example-org --set github.oauthClientID=client-id

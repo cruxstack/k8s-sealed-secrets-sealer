@@ -28,9 +28,10 @@ github:
   org: example-org
   allowedTeams: [sealers]
   adminTeams: [sealer-admins]
-  oauthClientID: local-client-id
-  # the mock's App; Tilt generates its key pair (APP_GITHUB_APP_PRIVATE_KEY)
-  appID: "1"
+  # The App's credentials, in the SSM mock (dev/k3d/mock-ssm.yaml): Tilt
+  # seeds it with the GitHub mock's App (local-client-id, App 1, and the key
+  # pair Tilt generates), or leaves it empty for the setup page
+  appParameter: arn:aws:ssm:us-east-1:000000000000:parameter/sealer/github-app
   url: http://localhost:4104
   apiURL: http://mock-github.sealer-system.svc.cluster.local:8080
   oauthTokenURL: http://mock-github.sealer-system.svc.cluster.local:8080/login/oauth/access_token
@@ -44,6 +45,9 @@ existingSecret: sealer-control-plane-local
 dynamodb:
   endpoint: http://dynamodb-local.sealer-system.svc.cluster.local:8000
   createTable: true
+
+ssm:
+  endpoint: http://mock-ssm.sealer-system.svc.cluster.local:8080
 
 kms:
   endpoint: http://local-kms.sealer-system.svc.cluster.local:8080

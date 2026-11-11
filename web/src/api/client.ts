@@ -38,6 +38,21 @@ export const navigation = {
   assign(url: string) {
     window.location.assign(url);
   },
+  /** Navigate by posting a form, as the GitHub App setup does to GitHub. */
+  postForm(action: string, fields: Record<string, string>) {
+    const form = document.createElement("form");
+    form.method = "post";
+    form.action = action;
+    for (const [name, value] of Object.entries(fields)) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+  },
 };
 
 /** The login page URL that brings the user back to where they are now. */
@@ -183,7 +198,13 @@ const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use((config) => {
-  if (apiEnv && config.url && !config.url.startsWith("/auth/")) {
+  // signing in and setting up the GitHub App are for every env at once
+  if (
+    apiEnv &&
+    config.url &&
+    !config.url.startsWith("/auth/") &&
+    !config.url.startsWith("/setup")
+  ) {
     config.url = `/envs/${encodeURIComponent(apiEnv)}${config.url}`;
   }
   const method = (config.method ?? "GET").toUpperCase();
