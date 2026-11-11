@@ -90,10 +90,11 @@ type Store interface {
 	// request's signature) until expires, and reports whether this call
 	// recorded it. A false result means the key was already used.
 	PutReplayIfAbsent(ctx context.Context, key string, expires time.Time) (bool, error)
-	// CountRequest counts a request against key in the fixed window that
-	// ends at windowEnd, and reports whether it is within limit. A request
-	// over the limit is not counted.
-	CountRequest(ctx context.Context, key string, limit int, windowEnd time.Time) (bool, error)
+	// CountRequest counts n requests, or calls a request made, against key
+	// in the fixed window that ends at windowEnd, if fewer than limit are
+	// counted, and reports whether it did. With n 0 it only reports whether
+	// the limit is reached.
+	CountRequest(ctx context.Context, key string, n, limit int, windowEnd time.Time) (bool, error)
 
 	// PutCommand queues a command.
 	PutCommand(ctx context.Context, c CommandRecord) error

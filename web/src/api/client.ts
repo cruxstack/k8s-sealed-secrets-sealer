@@ -146,9 +146,16 @@ export function extractApiError(error: unknown): string {
 // Client
 // ---------------------------------------------------------------------------
 
+// X-Requested-With tells the control plane a request comes from this page's
+// scripts, not a navigation another site started: calls that cost GitHub
+// requests refuse cross-site requests, so another site cannot spend the
+// user's rate limits.
 const apiClient = axios.create({
   baseURL: "/api/v1",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+  },
   withCredentials: true,
 });
 

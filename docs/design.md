@@ -1197,7 +1197,8 @@ shows creating one.
   has accepted the login, so each signed request logs an agent in only once.
   It is kept 35 minutes, longer than STS accepts the signature.
 - **Rate window:** how many requests of one kind a user (or session) made in
-  one fixed minute (section 12). A request over the limit is not counted.
+  one fixed minute, or how many permission lookups their repository lists
+  made in ten (section 12). A request over the limit is not counted.
 
 **Audit trail.** The table keeps no audit records: commands and sessions
 expire, and agent state is replaced on every check-in. The audit trail is
@@ -1318,10 +1319,18 @@ one. The pull requests are a second, lasting record: each commit's
   enforced with DynamoDB, in each env's own table: they are per user and
   env, so someone who uses two envs has each env's allowance. Each call that
   costs GitHub requests, KMS or agent work has a fixed one-minute window,
-  generous for a person using the UI and tight for a script. A request over
-  a limit gets 429 with `Retry-After` and logs `request.rate_limited`; a
-  request that fails still counts. When the count cannot be written the
-  request goes through: the limits guard the service and must not stop it.
+  generous for a person using the UI and tight for a script. A repository
+  list costs a permission lookup per repository the instance has not
+  checked lately, so the lookups lists make are limited as well: 1,000 per
+  user and env in each ten minutes, which a list may finish past. A request
+  over a limit gets 429 with `Retry-After` and logs `request.rate_limited`;
+  a request that fails still counts. When the count cannot be written, as
+  when DynamoDB throttles a busy counter, the instance counts the request
+  itself: the limits must not lift when the store struggles. A limited
+  `GET` must come from the UI's own scripts (`Sec-Fetch-Site: same-origin`,
+  or the `X-Requested-With` header the UI sends), so another site's page
+  cannot spend a user's limits with links; a proxy in front must pass one
+  of them on.
 
   | Call                      | Requests a minute, per env  |
   | ------------------------- | --------------------------- |
@@ -1335,7 +1344,11 @@ one. The pull requests are a second, lasting record: each commit's
   serves: the installation's repositories for 5 minutes, a repository's
   details for 1 minute, permissions for 2 (10 for the list), and commits'
   discovered files and parsed blobs, which never change, until it needs
-  the room. Lookups of the same thing at once make one call. The control
+  the room. Lookups of the same thing at once make one call, which runs
+  apart from the requests waiting for it, for up to 30 seconds: a request
+  that gives up stops waiting, and the others still get the answer. The UI
+  fetches a listing of a session's commit once, and the repository list
+  again only when it is stale, not when the tab regains focus. The control
   plane never retries a GitHub call. When GitHub refuses one for the rate
   limit, the user gets `503` with `Retry-After` and when to try again, and
   `github.rate_limited` is logged. `github.rate_limit_low` warns, once per

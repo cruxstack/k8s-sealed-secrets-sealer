@@ -221,6 +221,8 @@ func (sh *sealHarness) do(login, method, path string, body any, csrf bool) *http
 	}
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
+	// as a browser sends the UI's requests
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.AddCookie(&http.Cookie{Name: "sealer_session", Value: token})
 	if csrf {
 		req.Header.Set(userauth.CSRFHeader, sh.users.CSRFToken(token))

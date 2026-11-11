@@ -40,11 +40,32 @@ type counting struct {
 	answerFor int64
 	// blobErr, when set, fails every blob read
 	blobErr error
-	// stall names a repository whose permission lookup waits until its
-	// context ends; permErr fails the others' when set
-	stall   string
+	// stalls maps a repository to a channel its permission lookups wait on
+	// until it is closed or their context ends; permErr fails the others'
+	// when set
+	stallMu sync.Mutex
+	stalls  map[string]chan struct{}
 	permErr error
 	mock    *mockgithub.Server
+}
+
+// stall holds permission lookups of a repository until release is called.
+func (c *counting) stall(repo string) (release func()) {
+	c.stallMu.Lock()
+	defer c.stallMu.Unlock()
+	if c.stalls == nil {
+		c.stalls = map[string]chan struct{}{}
+	}
+	ch := make(chan struct{})
+	c.stalls[repo] = ch
+	return func() {
+		c.stallMu.Lock()
+		defer c.stallMu.Unlock()
+		if c.stalls[repo] == ch {
+			delete(c.stalls, repo)
+		}
+		close(ch)
+	}
 }
 
 func (c *counting) Repositories(ctx context.Context) ([]githubapp.Repository, error) {
@@ -59,9 +80,15 @@ func (c *counting) Repository(ctx context.Context, owner, repo string) (githubap
 
 func (c *counting) Permission(ctx context.Context, owner, repo, login string) (githubapp.Permission, error) {
 	c.permissions.Add(1)
-	if owner+"/"+repo == c.stall {
-		<-ctx.Done()
-		return githubapp.Permission{}, ctx.Err()
+	c.stallMu.Lock()
+	stalled := c.stalls[owner+"/"+repo]
+	c.stallMu.Unlock()
+	if stalled != nil {
+		select {
+		case <-stalled:
+		case <-ctx.Done():
+			return githubapp.Permission{}, ctx.Err()
+		}
 	}
 	if c.permErr != nil {
 		return githubapp.Permission{}, c.permErr
@@ -150,6 +177,10 @@ func TestList_OnlyWhatEachUserCanRead(t *testing.T) {
 		if !slices.Equal(names(got.Repositories), want) || got.Incomplete {
 			t.Errorf("%s sees %v (incomplete %v), want %v", u.Login, names(got.Repositories), got.Incomplete, want)
 		}
+		// rate limits weigh a list by the lookups it made
+		if got.Lookups != 3 {
+			t.Errorf("%s's list made %d lookups, want 3", u.Login, got.Lookups)
+		}
 	}
 	// one listing of the installation for everyone, and a permission
 	// lookup per user and repository
@@ -160,8 +191,8 @@ func TestList_OnlyWhatEachUserCanRead(t *testing.T) {
 	// the list reuses permissions for listPermissionTTL; opening a
 	// repository needs one younger than the PermissionTTL
 	*now = now.Add(DefaultPermissionTTL + time.Second)
-	if _, err := s.List(ctx, alice); err != nil || gh.permissions.Load() != 9 {
-		t.Fatalf("permission lookups %d, %v", gh.permissions.Load(), err)
+	if got, err := s.List(ctx, alice); err != nil || gh.permissions.Load() != 9 || got.Lookups != 0 {
+		t.Fatalf("permission lookups %d (%d counted), %v", gh.permissions.Load(), got.Lookups, err)
 	}
 	if _, err := s.Require(ctx, alice, "example-org", "apps", true); err != nil || gh.permissions.Load() != 10 {
 		t.Fatalf("permission lookups %d, %v", gh.permissions.Load(), err)
@@ -177,7 +208,7 @@ func TestList_OnlyWhatEachUserCanRead(t *testing.T) {
 
 func TestList_WhatWasCheckedInTime(t *testing.T) {
 	s, gh, _ := newService(t, nil)
-	gh.stall = "example-org/platform"
+	releasePlatform := gh.stall("example-org/platform")
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	got, err := s.List(ctx, alice)
@@ -186,19 +217,70 @@ func TestList_WhatWasCheckedInTime(t *testing.T) {
 		t.Fatalf("list = %+v, %v", got, err)
 	}
 	// knowing none in time is an empty list, not an error
-	gh.stall = "example-org/apps"
+	releaseApps := gh.stall("example-org/apps")
 	ctx, cancel = context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	if got, err := s.List(ctx, bob); err != nil || !got.Incomplete || len(got.Repositories) != 0 {
 		t.Fatalf("bob's list = %+v, %v", got, err)
 	}
 
-	// the next list checks only what is missing
-	gh.stall = ""
+	// a check the list gave up waiting for goes on, and the next list uses
+	// its answer instead of asking again
 	before := gh.permissions.Load()
+	releasePlatform()
+	releaseApps()
 	got, err = s.List(context.Background(), alice)
-	if err != nil || got.Incomplete || len(got.Repositories) != 2 || gh.permissions.Load() != before+1 {
+	if err != nil || got.Incomplete || len(got.Repositories) != 2 || gh.permissions.Load() != before {
 		t.Fatalf("list = %+v, %v, %d lookups", got, err, gh.permissions.Load()-before)
+	}
+}
+
+// Callers share a lookup GitHub is answering. The first giving up, its
+// time running out, must not fail the others with it.
+func TestCache_SharedLookupOutlivesItsFirstCaller(t *testing.T) {
+	c := NewCache()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	lookup := func(ctx context.Context) (string, error) {
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+			return "answer", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	first, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := once(first, c, "key", lookup)
+		firstDone <- err
+	}()
+	<-started
+	secondDone := make(chan string, 1)
+	joining := make(chan struct{})
+	go func() {
+		close(joining)
+		v, err := once(context.Background(), c, "key", lookup)
+		if err != nil {
+			v = "error: " + err.Error()
+		}
+		secondDone <- v
+	}()
+
+	// the first caller gives up once the second waits on the same call;
+	// it alone sees that
+	<-joining
+	time.Sleep(50 * time.Millisecond)
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller = %v, want its own cancellation", err)
+	}
+	close(release)
+	if got := <-secondDone; got != "answer" {
+		t.Fatalf("second caller = %q, want the shared answer", got)
 	}
 }
 

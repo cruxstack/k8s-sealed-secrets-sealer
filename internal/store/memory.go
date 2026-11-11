@@ -131,14 +131,14 @@ func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.T
 	return true, nil
 }
 
-func (m *Memory) CountRequest(_ context.Context, key string, limit int, windowEnd time.Time) (bool, error) {
+func (m *Memory) CountRequest(_ context.Context, key string, n, limit int, windowEnd time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w := rateWindow{key: key, end: windowEnd.Unix()}
 	if m.requests[w] >= limit {
 		return false, nil
 	}
-	m.requests[w]++
+	m.requests[w] += n
 	return true, nil
 }
 

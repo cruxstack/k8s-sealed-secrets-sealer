@@ -169,6 +169,25 @@ describe("apiClient", () => {
     expect(seen.delete).toBe("tok+1");
   });
 
+  it("marks every request as the page's own", async () => {
+    const seen: (string | undefined)[] = [];
+    apiClient.defaults.adapter = (config) => {
+      seen.push(config.headers.get("X-Requested-With")?.toString());
+      return Promise.resolve({
+        data: {},
+        status: 200,
+        statusText: "OK",
+        headers: {},
+        config,
+      });
+    };
+
+    await apiClient.get("/repos");
+    await apiClient.post("/auth/logout");
+
+    expect(seen).toEqual(["XMLHttpRequest", "XMLHttpRequest"]);
+  });
+
   it("sends a 401 to the login page with the current path to return to", async () => {
     window.history.replaceState({}, "", "/fleet?tab=agents");
     const assign = vi.fn();

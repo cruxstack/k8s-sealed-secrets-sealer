@@ -23,12 +23,19 @@ const (
 
 // listRepos serves the repositories the signed-in user can read
 // (repos.Service.List). When time runs short, or GitHub fails part way,
-// those known to be readable are served, marked incomplete.
+// those known to be readable are served, marked incomplete. The permission
+// lookups a list makes on GitHub count against limitRepoChecks; once the
+// user's are spent, lists wait for the window to end.
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
+	key, _ := limitKey(r, limitRepoChecks)
+	if !s.admit(w, r, limitRepoChecks, key, 0) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), listReposTimeout)
 	defer cancel()
 	user := userauth.UserFrom(ctx)
 	list, err := s.repos.List(ctx, user)
+	s.charge(ctx, limitRepoChecks, key, list.Lookups)
 	if err != nil {
 		s.repoError(w, r, err)
 		return

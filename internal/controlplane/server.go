@@ -142,6 +142,8 @@ type Server struct {
 	// downloads of one restore
 	historyMu sync.Mutex
 	histories map[string]restoreHistory
+	// localCounts counts rate-limited requests while the store cannot
+	localCounts localCounts
 }
 
 // New returns a Server. It makes no network calls.
