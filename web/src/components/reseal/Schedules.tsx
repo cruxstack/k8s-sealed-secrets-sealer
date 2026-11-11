@@ -325,9 +325,10 @@ export function ScheduleSection({
   );
   const [deleting, setDeleting] = useState<ResealSchedule | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: RESEAL_KEY });
-  };
+  // a request counts as in flight until the lists it changed are read
+  // again, so its row can't be acted on twice in between (a second Run
+  // now before the schedule shows its run, say)
+  const refresh = () => queryClient.invalidateQueries({ queryKey: RESEAL_KEY });
   const run = useMutation({
     mutationFn: (s: ResealSchedule) => runSchedule(s.id),
     onSuccess: (_, s) =>

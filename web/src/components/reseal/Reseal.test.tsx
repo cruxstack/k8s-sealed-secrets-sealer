@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -12,6 +13,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
+import { AxiosError, type AxiosAdapter } from "axios";
 import apiClient from "@/api/client";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { routeTree } from "@/routeTree.gen";
@@ -35,9 +37,11 @@ const DAY = 86_400_000;
 function renderAt(
   path: string,
   opts: Partial<Parameters<typeof fakeApi>[0]> = {},
+  /** Stands between the page and the fake, to fail or slow a request. */
+  wrap: (adapter: AxiosAdapter) => AxiosAdapter = (a) => a,
 ) {
   const api = fakeApi({ me: ADMIN, ...opts });
-  apiClient.defaults.adapter = api.adapter;
+  apiClient.defaults.adapter = wrap(api.adapter);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -53,7 +57,7 @@ function renderAt(
       </QueryClientProvider>
     </ThemeProvider>,
   );
-  return { api, router };
+  return { api, router, queryClient };
 }
 
 const PAGE = "/dev/reseal";
@@ -66,8 +70,9 @@ async function renderReseal(
   reseal: ResealFixtures = {},
   opts: Partial<Parameters<typeof fakeApi>[0]> = {},
   path = PAGE,
+  wrap?: (adapter: AxiosAdapter) => AxiosAdapter,
 ) {
-  const rendered = renderAt(path, { reseal, ...opts });
+  const rendered = renderAt(path, { reseal, ...opts }, wrap);
   await screen.findByRole("heading", { level: 1, name: "Reseal" });
   return rendered;
 }
@@ -617,6 +622,9 @@ describe("reseal schedules", () => {
   it("deletes a schedule after confirming, cancelling its run", async () => {
     const { api } = await renderReseal({
       schedules: [{ ...APPS, active_run_id: "run-2" }],
+      runs: [
+        resealRun({ id: "run-2", status: "running", finished_at: undefined }),
+      ],
     });
     fireEvent.click(await screen.findByRole("button", { name: "Delete Apps" }));
     const dialog = await screen.findByRole("dialog", {
@@ -635,6 +643,12 @@ describe("reseal schedules", () => {
     );
     expect(
       await within(section("Schedules")).findByText("No schedules"),
+    ).toBeVisible();
+    // its run shows as cancelled
+    expect(
+      await within(document.getElementById("run-run-2")!).findByText(
+        "Cancelled",
+      ),
     ).toBeVisible();
   });
 
@@ -966,6 +980,217 @@ describe("reseal runs", () => {
     await renderReseal({ runs: [] });
     expect(
       await within(section("Runs")).findByText("No runs yet"),
+    ).toBeVisible();
+  });
+});
+
+/** An error response from the control plane, as axios raises it. */
+function httpError(
+  config: Parameters<AxiosAdapter>[0],
+  status: number,
+  error: string,
+): AxiosError {
+  return new AxiosError("error", "ERR_BAD_RESPONSE", config, undefined, {
+    status,
+    statusText: "",
+    data: { error },
+    headers: {},
+    config,
+  } as never);
+}
+
+/** Holds back the GETs of `path` until `release` is called. */
+function holdGets(path: string) {
+  let held = false;
+  const waiting: (() => void)[] = [];
+  return {
+    hold: () => {
+      held = true;
+    },
+    release: () => {
+      held = false;
+      waiting.splice(0).forEach((go) => go());
+    },
+    wrap:
+      (adapter: AxiosAdapter): AxiosAdapter =>
+      async (config) => {
+        const get = (config.method ?? "get").toLowerCase() === "get";
+        if (held && get && (config.url ?? "").endsWith(path)) {
+          await new Promise<void>((go) => waiting.push(go));
+        }
+        return adapter(config);
+      },
+  };
+}
+
+describe("reseal page, after review", () => {
+  const originalAdapter = apiClient.defaults.adapter;
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter;
+  });
+
+  it("opens a pull request's run when it is older than the list's latest", async () => {
+    const runs = Array.from({ length: 30 }, (_, i) =>
+      resealRun({ id: `run-${30 - i}`, started_at: iso((i + 1) * DAY) }),
+    );
+    const { api, router } = await renderReseal({
+      schedules: [resealSchedule({ id: "sch-apps" })],
+      runs,
+      pullRequests: [resealPullRequest({ number: 4, run_id: "run-1" })],
+    });
+    fireEvent.click(
+      await screen.findByRole("link", { name: "Apps: show its run" }),
+    );
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({ run: "run-1" }),
+    );
+    // read on its own, and shown open under the latest
+    const row = await waitFor(() => {
+      const r = document.getElementById("run-run-1");
+      expect(r).not.toBeNull();
+      return r as HTMLElement;
+    });
+    expect(api.calls.some((c) => c.url === "/reseal/runs/run-1")).toBe(true);
+    expect(
+      within(row).getByRole("button", { name: "Apps", expanded: true }),
+    ).toBeVisible();
+    expect(
+      await screen.findByText("It found no repository in its scope."),
+    ).toBeVisible();
+  });
+
+  it("says when a linked run is no longer kept", async () => {
+    await renderReseal(
+      { runs: [resealRun({ id: "run-2" })] },
+      {},
+      `${PAGE}?run=run-gone`,
+    );
+    expect(
+      await screen.findByText(
+        "The run this link opens isn't kept any more: runs are kept for 180 days after they finish.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("says when the status can't be read, rather than checking for good", async () => {
+    await renderReseal(
+      { schedules: [resealSchedule({ id: "sch-apps" })] },
+      {},
+      PAGE,
+      (adapter) => async (config) => {
+        if ((config.url ?? "").endsWith("/status")) {
+          throw httpError(config, 503, "the control plane is starting");
+        }
+        return adapter(config);
+      },
+    );
+    expect(
+      await screen.findByText(
+        "Couldn't check whether values can be resealed in dev",
+      ),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        availability(screen.getByRole("button", { name: "Run Apps now" })),
+      ).toBe(
+        "Couldn't check whether values can be resealed: The control plane is starting. Trying again.",
+      ),
+    );
+  });
+
+  it("keeps Run now busy until the schedule shows its run", async () => {
+    const schedules = holdGets("/reseal/schedules");
+    const { api } = await renderReseal(
+      { schedules: [resealSchedule({ id: "sch-apps" })], runs: [] },
+      {},
+      PAGE,
+      schedules.wrap,
+    );
+    const runNow = await screen.findByRole("button", { name: "Run Apps now" });
+    schedules.hold();
+    fireEvent.click(runNow);
+    await screen.findByText("Started a run of Apps");
+    // the run started, but the list that says so is still on its way
+    const again = screen.getByRole("button", { name: "Run Apps now" });
+    expect(availability(again)).toBe("Starting a run…");
+    fireEvent.click(again);
+    schedules.release();
+    await waitFor(() =>
+      expect(
+        availability(screen.getByRole("button", { name: "Run Apps now" })),
+      ).toMatch(/^A run is in progress/),
+    );
+    expect(
+      api.calls.filter((c) => c.method === "POST" && c.url.endsWith("/run")),
+    ).toHaveLength(1);
+  });
+
+  it("keeps Cancel busy until the run shows as cancelled", async () => {
+    const runs = holdGets("/reseal/runs");
+    await renderReseal(
+      {
+        runs: [
+          resealRun({ id: "run-6", status: "running", finished_at: undefined }),
+        ],
+      },
+      {},
+      PAGE,
+      runs.wrap,
+    );
+    const row = await waitFor(() => {
+      const r = document.getElementById("run-run-6");
+      expect(r).not.toBeNull();
+      return r as HTMLElement;
+    });
+    runs.hold();
+    fireEvent.click(
+      within(row).getByRole("button", { name: "Cancel the run of Apps" }),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "Cancel this run?" }),
+      ).getByRole("button", { name: "Cancel run" }),
+    );
+    await screen.findByText("Cancelled the run of Apps");
+    expect(
+      availability(
+        within(document.getElementById("run-run-6")!).getByRole("button", {
+          name: "Cancel the run of Apps",
+        }),
+      ),
+    ).toBe("Cancelling…");
+    runs.release();
+    await waitFor(() =>
+      expect(
+        within(document.getElementById("run-run-6")!).getByText("Cancelled"),
+      ).toBeVisible(),
+    );
+  });
+
+  it("shows a finished run's pull requests at once", async () => {
+    const { api, queryClient } = await renderReseal({
+      runs: [
+        resealRun({ id: "run-6", status: "running", finished_at: undefined }),
+      ],
+      pullRequests: [],
+    });
+    const prs = section("Reseal pull requests");
+    await within(prs).findByText("No open reseal pull requests");
+    expect(
+      within(section("Runs")).getByText("Refreshes every 10 seconds"),
+    ).toBeVisible();
+    // the run finishes and opens a pull request
+    api.reseal.runs[0]!.status = "succeeded";
+    api.reseal.pullRequests.push(
+      resealPullRequest({ number: 12, run_id: "run-6" }),
+    );
+    await act(() =>
+      queryClient.refetchQueries({ queryKey: ["reseal", "runs"] }),
+    );
+    expect(await within(prs).findByRole("link", { name: /#12/ })).toBeVisible();
+    // nothing runs now, so the lists refresh less often
+    expect(
+      within(section("Runs")).getByText("Refreshes every minute"),
     ).toBeVisible();
   });
 });

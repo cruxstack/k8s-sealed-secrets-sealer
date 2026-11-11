@@ -2,14 +2,16 @@ import { useEffect, useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, CircleStop, ExternalLink, History } from "lucide-react";
 import { toast } from "sonner";
-import { extractApiError } from "@/api/client";
+import { extractApiError, toApiError } from "@/api/client";
 import {
+  ACTIVE_REFRESH_MS,
   RESEAL_KEY,
   cancelRun,
   resealRunQueryOptions,
   resealRunsQueryOptions,
   resealSchedulesQueryOptions,
   runActive,
+  runsRefreshMs,
 } from "@/api/queries/reseal";
 import type {
   ResealCounts,
@@ -581,12 +583,28 @@ export function RunSection({
         description: "Pull requests it opened stay open.",
       });
     },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: RESEAL_KEY });
-    },
+    // in flight until the list shows it cancelled, so its icon can't
+    // be used twice in between
+    onSettled: () => queryClient.invalidateQueries({ queryKey: RESEAL_KEY }),
   });
-  const runs = data ?? [];
+  const latest = data ?? [];
+  // a run a link opens that the list doesn't hold (older than its latest,
+  // or another schedule's) is read on its own and shown last
+  const linked = useQuery({
+    ...resealRunQueryOptions(openRun ?? ""),
+    enabled:
+      openRun !== undefined &&
+      data !== undefined &&
+      !latest.some((r) => r.id === openRun),
+  });
+  const extra =
+    linked.data && !latest.some((r) => r.id === linked.data.id)
+      ? [linked.data]
+      : [];
+  const runs = [...latest, ...extra];
   const listed = runs.some((r) => r.id === openRun);
+  const linkFailed =
+    openRun !== undefined && !listed && linked.error ? linked.error : null;
 
   // a link to a run (from a pull request, or a schedule's last run) shows it
   useEffect(() => {
@@ -605,7 +623,11 @@ export function RunSection({
         count={data ? runCount(runs) : undefined}
         aside={
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <span>Refreshes every 10 seconds</span>
+            <span>
+              {runsRefreshMs(data) === ACTIVE_REFRESH_MS
+                ? "Refreshes every 10 seconds"
+                : "Refreshes every minute"}
+            </span>
             <ScheduleFilter
               value={scheduleId}
               runs={runs}
@@ -614,6 +636,13 @@ export function RunSection({
           </div>
         }
       />
+      {linkFailed && (
+        <Alert variant="info" role="status">
+          {toApiError(linkFailed).status === 404
+            ? "The run this link opens isn't kept any more: runs are kept for 180 days after they finish."
+            : `Could not load the run this link opens: ${sentence(extractApiError(linkFailed))}`}
+        </Alert>
+      )}
       {isPending ? (
         <Skeleton
           className="h-40 w-full"

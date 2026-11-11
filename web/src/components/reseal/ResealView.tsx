@@ -1,13 +1,53 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { extractApiError } from "@/api/client";
+import {
+  RESEAL_KEY,
+  resealRunsQueryOptions,
+  resealSchedulesQueryOptions,
+  runActive,
+} from "@/api/queries/reseal";
 import { statusQueryOptions } from "@/api/queries/status";
 import { Alert } from "@/components/ui/alert";
 import { useEnv } from "@/lib/env";
-import { resealBlocked } from "./format";
+import { sentence } from "@/lib/utils";
+import { resealBlocked, resealReason } from "./format";
 import { PullRequestSection } from "./PullRequests";
 import { RunSection } from "./Runs";
 import { ScheduleSection } from "./Schedules";
 import type { ResealSearch } from "./search";
+
+/**
+ * Refreshes the reseal pull requests, and the rest, as soon as a run
+ * finishes, since it may have opened some: they would otherwise show up
+ * at their next poll, a minute later.
+ */
+function useRefreshWhenRunsFinish(scheduleId: string | undefined) {
+  const queryClient = useQueryClient();
+  // the page's own queries, from the cache: no requests of their own
+  const { data: schedules } = useQuery(resealSchedulesQueryOptions);
+  const { data: runs } = useQuery(resealRunsQueryOptions(scheduleId));
+  const active = [
+    ...new Set([
+      ...(schedules ?? []).flatMap((s) =>
+        s.active_run_id ? [s.active_run_id] : [],
+      ),
+      ...(runs ?? []).filter(runActive).map((r) => r.id),
+    ]),
+  ]
+    .sort()
+    .join(" ");
+  const previous = useRef(active);
+  useEffect(() => {
+    const now = new Set(active.split(" "));
+    const finished = previous.current
+      .split(" ")
+      .some((id) => id !== "" && !now.has(id));
+    previous.current = active;
+    if (finished) void queryClient.invalidateQueries({ queryKey: RESEAL_KEY });
+  }, [active, queryClient]);
+}
 
 /**
  * The env's resealing, for its admins: the reseal pull requests first, as
@@ -21,11 +61,10 @@ export function ResealView({
   onSearchChange: (patch: Partial<ResealSearch>) => void;
 }) {
   const env = useEnv()?.name ?? "";
-  const { data: status } = useQuery(statusQueryOptions);
+  const { data: status, error: statusError } = useQuery(statusQueryOptions);
   // until the status is known, nothing can start a run
-  const blocked = status
-    ? resealBlocked(status)
-    : "Checking whether values can be resealed…";
+  const blocked = resealReason(status, statusError);
+  useRefreshWhenRunsFinish(search.schedule);
 
   return (
     <div className="space-y-6">
@@ -53,6 +92,17 @@ export function ResealView({
         . It doesn't rotate values: git history keeps the old ciphertext, so a
         value sealed with a key that may be exposed still needs a new value.
       </Alert>
+
+      {!status && statusError && (
+        <Alert
+          variant="warning"
+          role="status"
+          heading={`Couldn't check whether values can be resealed in ${env}`}
+        >
+          {sentence(extractApiError(statusError))} Run now waits until it can
+          check; this page asks again every 30 seconds.
+        </Alert>
+      )}
 
       {status && !status.can_reseal && (
         <Alert

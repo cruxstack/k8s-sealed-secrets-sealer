@@ -1,5 +1,5 @@
-import { queryOptions } from "@tanstack/react-query";
-import apiClient from "@/api/client";
+import { queryOptions, type Query } from "@tanstack/react-query";
+import apiClient, { ApiError } from "@/api/client";
 import type {
   ResealPullRequestList,
   ResealPullRequestState,
@@ -10,18 +10,54 @@ import type {
 } from "@/api/types";
 
 /**
- * How often schedules and runs refresh: a tick advances runs every minute
- * on Lambda (5 seconds in the local stack), so a running run's progress
- * shows within seconds of it.
+ * How often schedules and runs refresh while a run is active: a tick
+ * advances runs every minute on Lambda (5 seconds in the local stack), so
+ * its progress shows within seconds of it.
  */
-export const RESEAL_REFRESH_MS = 10_000;
+export const ACTIVE_REFRESH_MS = 10_000;
+
+/**
+ * How often they refresh while no run is active: a tick starts due runs
+ * once a minute, and Run now refreshes them itself.
+ */
+export const IDLE_REFRESH_MS = 60_000;
 
 /**
  * How often reseal pull requests refresh. Ticks read their state from
  * GitHub about every 15 minutes, and the list checks the viewer's access
- * to each repository, so more often would show nothing new.
+ * to each repository, so more often would show nothing new. A run that
+ * finishes refreshes them at once.
  */
 export const PULL_REQUESTS_REFRESH_MS = 60_000;
+
+/** How long to wait after a 429 that names no time. */
+const RATE_LIMITED_MS = 60_000;
+
+/**
+ * When to poll again after a failed request: never after a 401, 403 or
+ * 404, which asking again won't change; after what Retry-After says on a
+ * 429 or 503 (a minute without it on a 429); otherwise as usual.
+ */
+export function pollAfter(error: unknown, interval: number): number | false {
+  if (!(error instanceof ApiError)) return interval;
+  const { status, retryAfter } = error;
+  if (status === 401 || status === 403 || status === 404) return false;
+  if (retryAfter !== undefined) return Math.max(retryAfter * 1000, interval);
+  if (status === 429) return Math.max(RATE_LIMITED_MS, interval);
+  return interval;
+}
+
+/** A query's next poll: `interval` for its data, or after its error. */
+function poll<T>(
+  query: Pick<Query<T>, "state">,
+  interval: (data: T | undefined) => number | false,
+): number | false {
+  const next = interval(query.state.data);
+  if (next === false) return false;
+  return query.state.status === "error"
+    ? pollAfter(query.state.error, next)
+    : next;
+}
 
 /** How many runs the list shows; the API allows up to 50. */
 export const RUNS_LIMIT = 25;
@@ -40,9 +76,20 @@ export const resealSchedulesQueryOptions = queryOptions({
     );
     return data.schedules;
   },
-  refetchInterval: RESEAL_REFRESH_MS,
+  // faster while one of them runs
+  refetchInterval: (query) =>
+    poll(query, (schedules) =>
+      schedules?.some((s) => s.active_run_id)
+        ? ACTIVE_REFRESH_MS
+        : IDLE_REFRESH_MS,
+    ),
   staleTime: 5_000,
 });
+
+/** How often a list of runs refreshes: faster while one is active. */
+export function runsRefreshMs(runs: ResealRunSummary[] | undefined): number {
+  return runs?.some(runActive) ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS;
+}
 
 /** The latest runs, newest first: every schedule's, or one's. */
 export function resealRunsQueryOptions(scheduleId?: string) {
@@ -59,7 +106,7 @@ export function resealRunsQueryOptions(scheduleId?: string) {
       );
       return data.runs;
     },
-    refetchInterval: RESEAL_REFRESH_MS,
+    refetchInterval: (query) => poll(query, runsRefreshMs),
     staleTime: 5_000,
   });
 }
@@ -83,9 +130,9 @@ export function resealRunQueryOptions(id: string) {
       return data;
     },
     refetchInterval: (query) =>
-      query.state.data && !runActive(query.state.data)
-        ? false
-        : RESEAL_REFRESH_MS,
+      poll(query, (run) =>
+        run && !runActive(run) ? false : ACTIVE_REFRESH_MS,
+      ),
     staleTime: 5_000,
   });
 }
@@ -103,7 +150,7 @@ export function resealPullRequestsQueryOptions(state: PullRequestFilter) {
       );
       return data;
     },
-    refetchInterval: PULL_REQUESTS_REFRESH_MS,
+    refetchInterval: (query) => poll(query, () => PULL_REQUESTS_REFRESH_MS),
     staleTime: 30_000,
   });
 }
