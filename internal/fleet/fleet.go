@@ -545,7 +545,7 @@ func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key 
 		case store.KeyDeleted:
 			k.DeleteBlocked = BlockedDeleted
 		default:
-			k.DeleteBlocked = deleteBlocked(agents, k.References, keys.Revoked[k.Fingerprint], now)
+			k.DeleteBlocked = deleteBlocked(agents, *k, keys.Revoked[k.Fingerprint], now)
 			k.Deletable = k.DeleteBlocked == ""
 		}
 		out = append(out, *k)
@@ -589,11 +589,14 @@ func references(agents []Agent, fp string, now time.Time) KeyReferences {
 
 // deleteBlocked says, in one sentence, why a revoked key may not be
 // deleted at now, or returns "" when it may. A key any counted value is
-// sealed with is never deleted. Every in-scope cluster must also have
-// counted the values its SealedSecrets hold since the key was revoked (so
-// no new value can be sealed with it), within UsageFresh, and found none
-// sealed with the key.
-func deleteBlocked(agents []Agent, refs KeyReferences, r store.RevokedKey, now time.Time) string {
+// sealed with is never deleted, nor one that values a cluster without it
+// cannot decrypt may be sealed with, nor one with no escrowed copy to undo
+// the deletion from. Every in-scope cluster must also have counted the
+// values its SealedSecrets hold since the key was revoked (so no new value
+// can be sealed with it), within UsageFresh, and found none sealed with the
+// key.
+func deleteBlocked(agents []Agent, k Key, r store.RevokedKey, now time.Time) string {
+	refs := k.References
 	if refs.Values > 0 {
 		var where []string
 		for _, c := range refs.Clusters {
@@ -603,6 +606,12 @@ func deleteBlocked(agents []Agent, refs KeyReferences, r store.RevokedKey, now t
 		}
 		return fmt.Sprintf("%s in %s %s it (%s).",
 			count(refs.Values, "value"), count(refs.SealedSecrets, "SealedSecret"), plural(refs.Values, "uses", "use"), strings.Join(where, ", "))
+	}
+	if s := unmatchedElsewhere(agents, k.Fingerprint, now); s != "" {
+		return s
+	}
+	if k.EscrowCopies == 0 {
+		return "It has no escrowed copy, so deleting it could not be undone."
 	}
 	var scoped, noCleanup, failed, waiting []string
 	for _, a := range agents {
@@ -631,6 +640,29 @@ func deleteBlocked(agents []Agent, refs KeyReferences, r store.RevokedKey, now t
 		return fmt.Sprintf("Waiting for %s to count the values sealed with it since it was revoked; clusters count every few minutes.", list(waiting))
 	}
 	return ""
+}
+
+// unmatchedElsewhere says which in-scope clusters that do not hold key fp
+// have values none of their keys decrypts: those may be sealed with fp,
+// and could never be decrypted once its escrowed copies are purged. A
+// cluster that holds fp would have matched its values to it. It returns ""
+// when there are none.
+func unmatchedElsewhere(agents []Agent, fp string, now time.Time) string {
+	var parts []string
+	total := 0
+	for _, a := range agents {
+		if a.CheckedIn && counted(a, now) && a.usage.Unmatched > 0 && !holds(a, fp) {
+			parts = append(parts, a.ID+" has "+count(a.usage.Unmatched, "value"))
+			total += a.usage.Unmatched
+		}
+	}
+	switch {
+	case len(parts) == 0:
+		return ""
+	case len(parts) == 1:
+		return fmt.Sprintf("%s none of its keys decrypts; %s be sealed with this key.", parts[0], plural(total, "it may", "they may"))
+	}
+	return fmt.Sprintf("%s that none of their keys decrypts; they may be sealed with this key.", list(parts))
 }
 
 // usageView is what the fleet view shows of an agent's count.

@@ -551,13 +551,41 @@ func TestCompute_DeleteGate(t *testing.T) {
 		}
 		return out
 	}
+	unmatched := func(n int) store.KeyUsage {
+		u := usage(after, 0, "")
+		u.Values, u.Unmatched = n, n
+		return u
+	}
+	escrowed := map[string][]string{k.Fingerprint: {"a"}}
 	cases := map[string]struct {
 		states  map[string]store.AgentState
 		usage   map[string]store.KeyUsage
+		escrow  map[string][]string
 		blocked string
 	}{
 		"every cluster counted none since it was revoked": {
 			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": usage(after, 0, "")},
+		},
+		// values the cluster's keys, k among them, do not decrypt are not k's
+		"unmatched values in a cluster that holds it": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": unmatched(2), "b": usage(after, 0, "")},
+		},
+		// b lacks k, and has values none of its keys decrypts: they may
+		// be sealed with k, and could never be decrypted after the purge
+		"unmatched values in a cluster that lacks it": {
+			states:  map[string]store.AgentState{"a": counting("a", k), "b": counting("b")},
+			usage:   map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": unmatched(2)},
+			blocked: "b has 2 values none of its keys decrypts; they may be sealed with this key.",
+		},
+		"unmatched values in two clusters that lack it": {
+			states:  map[string]store.AgentState{"a": counting("a"), "b": counting("b")},
+			usage:   map[string]store.KeyUsage{"a": unmatched(1), "b": unmatched(3)},
+			blocked: "a has 1 value and b has 3 values that none of their keys decrypts; they may be sealed with this key.",
+		},
+		"no escrowed copy": {
+			states: states(false), usage: map[string]store.KeyUsage{"a": usage(after, 0, ""), "b": usage(after, 0, "")},
+			escrow:  map[string][]string{},
+			blocked: "It has no escrowed copy, so deleting it could not be undone.",
 		},
 		// a cluster down, but its count recent, still counts
 		"a cluster down with a recent count": {
@@ -605,9 +633,14 @@ func TestCompute_DeleteGate(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			escrow := escrowed
+			if tc.escrow != nil {
+				escrow = tc.escrow
+			}
 			f := Compute("dev", reg, tc.states, Keys{
 				Revoked: map[string]store.RevokedKey{k.Fingerprint: {Fingerprint: k.Fingerprint, NotBefore: k.NotBefore, By: "alice", At: revokedAt}},
 				Usage:   tc.usage,
+				Escrow:  escrow,
 			}, now)
 			got := listed(t, f, k.Fingerprint)
 			if got.DeleteBlocked != tc.blocked || got.Deletable != (tc.blocked == "") {

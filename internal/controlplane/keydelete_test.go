@@ -353,6 +353,9 @@ func TestKeyDelete_NeedsEveryClusterToCount(t *testing.T) {
 	}
 	kh.advance(time.Minute)
 	kh.cleanupCheckIn("a", counts(kh.clock(), nil), old, env)
+	if code := kh.upload("a", old); code != http.StatusOK {
+		t.Fatalf("upload = %d", code)
+	}
 	want := "c cannot count the values sealed with it: it needs the cleanup capability."
 	if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusConflict || errorOf(t, rec) != want {
 		t.Fatalf("delete = %d %s", rec.Code, rec.Body)
@@ -364,6 +367,54 @@ func TestKeyDelete_NeedsEveryClusterToCount(t *testing.T) {
 	// c is never sent a removal
 	if cmds := kh.poll("c"); slices.ContainsFunc(cmds, func(c protocol.Command) bool { return c.Type == protocol.CommandKeysDelete }) {
 		t.Fatalf("c commands = %+v", cmds)
+	}
+}
+
+// A key with no escrowed copy is not deleted: the deletion could not be
+// undone. Values a cluster without the key cannot decrypt hold it back
+// too: they may be sealed with it.
+func TestKeyDelete_NeedsAnUndoAndNoUnmatchedValuesElsewhere(t *testing.T) {
+	kh := newKeyHarnessWith(t, cleanupRegistry)
+	old := newTestKey(t, time.Now().Add(-48*time.Hour))
+	env := newTestKey(t, time.Now().Add(-time.Hour))
+	scan := func() time.Time { return kh.clock().Add(-time.Second) }
+	kh.cleanupCheckIn("a", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), env)
+	if rec := kh.setStatus(old.Fingerprint, "revoke"); rec.Code != http.StatusOK {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	kh.advance(time.Minute)
+	kh.cleanupCheckIn("a", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+	// b lacks the key, and has two values none of its keys decrypts
+	bu := counts(scan(), map[string]int{env.Fingerprint: 1})
+	bu.Values, bu.Unmatched, bu.SealedSecrets = 3, 2, 2
+	kh.cleanupCheckIn("b", bu, env)
+
+	noEscrow := "It has no escrowed copy, so deleting it could not be undone."
+	unmatched := "b has 2 values none of its keys decrypts; they may be sealed with this key."
+	if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusConflict || errorOf(t, rec) != unmatched {
+		t.Fatalf("delete with unmatched values in b = %d %s", rec.Code, rec.Body)
+	}
+	kh.advance(time.Minute)
+	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), env)
+	if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusConflict || errorOf(t, rec) != noEscrow {
+		t.Fatalf("delete with no escrowed copy = %d %s", rec.Code, rec.Body)
+	}
+	// a revoked key is not escrowed: reinstated, a escrows it, and revoked
+	// again it can go
+	kh.setStatus(old.Fingerprint, "reinstate")
+	if got := kh.cleanupCheckIn("a", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env).EscrowNeeded; !slices.Contains(got, old.Fingerprint) {
+		t.Fatalf("a escrow_needed = %v", got)
+	}
+	if code := kh.upload("a", old); code != http.StatusOK {
+		t.Fatalf("upload = %d", code)
+	}
+	kh.setStatus(old.Fingerprint, "revoke")
+	kh.advance(time.Minute)
+	kh.cleanupCheckIn("a", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), env)
+	if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body)
 	}
 }
 
