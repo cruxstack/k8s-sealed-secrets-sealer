@@ -136,7 +136,7 @@ type Server struct {
 	// copy of each key. Losing either only costs reads and writes.
 	knownMu     sync.Mutex
 	knownKeys   map[string]bool
-	knownEscrow map[string][]string
+	knownEscrow map[string]knownCopies
 
 	// histories caches each agent's restore failures for the escrow
 	// downloads of one restore
@@ -184,7 +184,7 @@ func New(opts Options) *Server {
 		pollInterval:   pollInterval,
 		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
-		knownEscrow:    map[string][]string{},
+		knownEscrow:    map[string]knownCopies{},
 		histories:      map[string]restoreHistory{},
 	}
 	s.agents.Store(&agentAccess{reg: opts.Registry, logins: opts.Logins})

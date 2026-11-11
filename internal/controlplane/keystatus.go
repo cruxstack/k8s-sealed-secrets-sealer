@@ -10,6 +10,7 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/httpserver"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -205,6 +206,29 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 		"event", "key.deleted", "env", s.env, "fingerprint", key.Fingerprint, "user", by,
 		"not_before", key.NotBefore, "purge_at", purge)
 	httpserver.WriteJSON(w, http.StatusOK, statusOf(key))
+}
+
+// undoDeletion returns a deleted key to revoked when a cluster shows that
+// values are still sealed with it, by its count or by refusing to remove
+// it: its escrowed copies stop expiring, so it can be reinstated. After its
+// purge time the copies may be gone, but the key, revoked again, can still
+// be reinstated, and a cluster holding it escrows it anew. The agent's
+// issue about the refusal stays.
+func (s *Server) undoDeletion(ctx context.Context, agent *registry.Agent, r store.RevokedKey, use store.KeyUse, now time.Time) {
+	err := s.store.UndeleteKey(ctx, r)
+	switch {
+	case errors.Is(err, store.ErrKeyChanged):
+		// undone already, or reinstated
+		return
+	case err != nil:
+		s.logger.ErrorContext(ctx, "failed to undo the deletion of a sealing key values are sealed with",
+			"env", s.env, "agent_id", agent.ID, "fingerprint", r.Fingerprint, "error", err)
+		return
+	}
+	s.forgetEscrow(r.Fingerprint)
+	s.logger.WarnContext(ctx, "deletion of a sealing key undone: a cluster still has values sealed with it; it is revoked again",
+		"event", "key.delete_undone", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster,
+		"fingerprint", r.Fingerprint, "values", use.Values, "sealed_secrets", use.SealedSecrets, "purged", r.Purged(now))
 }
 
 // adminTokenKeyChangesOff answers a key status change made with the admin

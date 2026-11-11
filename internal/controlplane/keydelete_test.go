@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 
@@ -187,15 +188,14 @@ func TestKeyDelete_FromRevocationToRemoval(t *testing.T) {
 	}
 	kh.cleanupCheckIn("a", counts(scan(), map[string]int{env.Fingerprint: 3}), env)
 
-	// b refuses: a value sealed with it showed up since
+	// b refuses: its key Secret changed as it deleted it
 	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
 	cmds = kh.poll("b")
 	if len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysDelete {
 		t.Fatalf("b commands = %+v", cmds)
 	}
-	refusal := protocol.KeyDeletion{Fingerprint: old.Fingerprint, Outcome: protocol.KeyRefused,
-		Reason: "1 value in 1 SealedSecret is sealed with it", Values: 1, SealedSecrets: 1}
-	res, _ = json.Marshal(protocol.KeysDeleteResult{Keys: []protocol.KeyDeletion{refusal}})
+	conflict := protocol.KeyDeletion{Fingerprint: old.Fingerprint, Outcome: protocol.KeyRefused, Reason: "key secret k changed while it was being deleted"}
+	res, _ = json.Marshal(protocol.KeysDeleteResult{Keys: []protocol.KeyDeletion{conflict}})
 	if code := kh.result("b", cmds[0].ID, protocol.CommandResult{Status: protocol.CommandFailed, Error: "refused to remove 1 of 1 keys", Result: res}); code != http.StatusOK {
 		t.Fatalf("refused result = %d", code)
 	}
@@ -203,11 +203,11 @@ func TestKeyDelete_FromRevocationToRemoval(t *testing.T) {
 		t.Error("key.remove_refused was not logged")
 	}
 	f := kh.fleet()
-	if issues := fleetAgent(t, f, "b").Issues; !slices.Contains(issues, "refused to remove deleted key "+old.Fingerprint+": "+refusal.Reason) {
+	if issues := fleetAgent(t, f, "b").Issues; !slices.Contains(issues, "refused to remove deleted key "+old.Fingerprint+": "+conflict.Reason) {
 		t.Fatalf("b's issues = %q", issues)
 	}
-	if k := fleetKey(t, f, old.Fingerprint); !slices.Equal(k.Holders, []string{"b"}) {
-		t.Fatalf("holders of the deleted key = %v", k.Holders)
+	if k := fleetKey(t, f, old.Fingerprint); !slices.Equal(k.Holders, []string{"b"}) || k.Status != store.KeyDeleted {
+		t.Fatalf("the deleted key = %+v", k)
 	}
 	// a refusal usually lasts: the removal is asked again only later
 	kh.advance(removeRetryAfterFailure - time.Minute)
@@ -217,8 +217,34 @@ func TestKeyDelete_FromRevocationToRemoval(t *testing.T) {
 	}
 	kh.advance(2 * time.Minute)
 	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
-	if cmds := kh.poll("b"); len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysDelete {
+	cmds = kh.poll("b")
+	if len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysDelete {
 		t.Fatalf("b commands after the hold = %+v", cmds)
+	}
+
+	// b refuses again: a value sealed with it showed up since. The deletion
+	// is undone, so its escrowed copies do not expire under that value
+	used := protocol.KeyDeletion{Fingerprint: old.Fingerprint, Outcome: protocol.KeyRefused,
+		Reason: "1 value in 1 SealedSecret uses it", Values: 1, SealedSecrets: 1}
+	res, _ = json.Marshal(protocol.KeysDeleteResult{Keys: []protocol.KeyDeletion{used}})
+	if code := kh.result("b", cmds[0].ID, protocol.CommandResult{Status: protocol.CommandFailed, Error: "refused to remove 1 of 1 keys", Result: res}); code != http.StatusOK {
+		t.Fatalf("refused result = %d", code)
+	}
+	if !strings.Contains(kh.logs.String(), "event=key.delete_undone") {
+		t.Error("key.delete_undone was not logged")
+	}
+	f = kh.fleet()
+	k = fleetKey(t, f, old.Fingerprint)
+	if k.Status != store.KeyRevoked || k.RevokedBy != adminTokenActor || k.DeletedBy != "" || k.PurgeAt != nil || k.EscrowCopies != 1 {
+		t.Fatalf("the key after its deletion was undone = %+v", k)
+	}
+	if issues := fleetAgent(t, f, "b").Issues; !slices.Contains(issues, "refused to remove key "+old.Fingerprint+", whose deletion was undone: "+used.Reason) {
+		t.Fatalf("b's issues = %q", issues)
+	}
+	kh.advance(removeRetryAfterFailure + time.Minute)
+	kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+	if cmds := kh.poll("b"); len(cmds) != 0 {
+		t.Fatalf("b asked to remove a key no longer deleted: %+v", cmds)
 	}
 
 	// reinstated: active again, and restored where it was removed
@@ -482,30 +508,164 @@ func TestCheckIn_KeyUsage(t *testing.T) {
 	}
 }
 
-func TestCheckIn_RejectsInvalidKeyUsage(t *testing.T) {
+// A count that is not valid, such as one naming a namespace that cannot
+// exist, is stored as a failed count: it holds deletions back, and the
+// check-in, which keeps the agent healthy, goes on.
+func TestCheckIn_InvalidKeyUsageCountsAsFailed(t *testing.T) {
 	kh := newKeyHarnessWith(t, cleanupRegistry)
 	k := newTestKey(t, time.Now().Add(-time.Hour))
-	now := time.Now()
-	many := &protocol.KeyUsage{ScannedAt: now, Values: protocol.MaxKeys + 1, SealedSecrets: protocol.MaxKeys + 1, Keys: map[string]protocol.KeyUse{}}
+	many := &protocol.KeyUsage{Values: protocol.MaxKeys + 1, SealedSecrets: protocol.MaxKeys + 1, Keys: map[string]protocol.KeyUse{}}
 	for i := range protocol.MaxKeys + 1 {
 		many.Keys[fmt.Sprintf("SHA256:k%d", i)] = protocol.KeyUse{Values: 1, SealedSecrets: 1}
 	}
-	cases := map[string]*protocol.KeyUsage{
-		"no scan time":       {Values: 1},
-		"negative count":     {ScannedAt: now, Values: -1},
-		"unmatched too high": {ScannedAt: now, Values: 1, Unmatched: 2},
-		"bad namespace":      {ScannedAt: now, Namespaces: []string{"Not_A_Namespace"}},
-		"bad fingerprint":    {ScannedAt: now, Values: 1, SealedSecrets: 1, Keys: map[string]protocol.KeyUse{"md5:x": {Values: 1, SealedSecrets: 1}}},
-		"key count too high": {ScannedAt: now, Values: 1, SealedSecrets: 1, Keys: map[string]protocol.KeyUse{"SHA256:x": {Values: 2, SealedSecrets: 1}}},
-		"long error":         {ScannedAt: now, Error: strings.Repeat("e", protocol.MaxUsageError+1)},
-		"too many keys":      many,
+	cases := []struct {
+		name string
+		u    *protocol.KeyUsage
+		want string
+	}{
+		{"no scan time", &protocol.KeyUsage{Values: 1}, "scanned_at is required"},
+		{"negative count", &protocol.KeyUsage{Values: -1}, "counts are out of range"},
+		{"unmatched too high", &protocol.KeyUsage{Values: 1, Unmatched: 2}, "counts are out of range"},
+		{"bad namespace", &protocol.KeyUsage{Namespaces: []string{"My_Apps"}}, `namespace "My_Apps" is not a DNS-1123 label`},
+		{"bad fingerprint", &protocol.KeyUsage{Values: 1, SealedSecrets: 1, Keys: map[string]protocol.KeyUse{"md5:x": {Values: 1, SealedSecrets: 1}}}, "is not a key fingerprint"},
+		{"key count too high", &protocol.KeyUsage{Values: 1, SealedSecrets: 1, Keys: map[string]protocol.KeyUse{"SHA256:x": {Values: 2, SealedSecrets: 1}}}, "out of range"},
+		{"long error", &protocol.KeyUsage{Error: strings.Repeat("é", protocol.MaxUsageError)}, "error is too long"},
+		{"too many keys", many, "too many keys"},
 	}
-	for name, u := range cases {
-		t.Run(name, func(t *testing.T) {
-			if rec := kh.cleanupCheckInRaw("a", u, k); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "key_usage") {
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name != "no scan time" {
+				tc.u.ScannedAt = kh.clock().Add(time.Duration(i) * time.Second)
+			}
+			if rec := kh.cleanupCheckInRaw("a", tc.u, k); rec.Code != http.StatusOK {
 				t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
 			}
+			u := fleetAgent(t, kh.fleet(), "a").KeyUsage
+			if u == nil || !strings.HasPrefix(u.Error, "the agent's count is not valid: ") || !strings.Contains(u.Error, tc.want) ||
+				len(u.Error) > protocol.MaxUsageError || !utf8.ValidString(u.Error) || u.Values != 0 {
+				t.Fatalf("a's usage = %+v", u)
+			}
 		})
+	}
+	if !strings.Contains(kh.logs.String(), "event=key.usage_invalid") {
+		t.Error("key.usage_invalid was not logged")
+	}
+}
+
+// Errors are cut at a rune boundary, never past the limit.
+func TestTruncateRunes(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"abc", 5, "abc"},
+		{"abcdef", 3, "abc"},
+		{"aé", 2, "a"},
+		{"éé", 3, "é"},
+		{"日本", 4, "日"},
+	} {
+		if got := truncateRunes(tc.in, tc.n); got != tc.want || len(got) > tc.n || !utf8.ValidString(got) {
+			t.Errorf("truncateRunes(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
+	}
+}
+
+// A deletion that a cluster contradicts, by counting values sealed with the
+// key, is undone: the key is revoked again and its copies stop expiring.
+// After the purge, the key comes back as revoked, and once reinstated the
+// cluster that holds it escrows it again.
+func TestKeyDelete_UndoneWhenACountFindsValues(t *testing.T) {
+	for _, purged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("purged=%v", purged), func(t *testing.T) {
+			kh := newKeyHarnessWith(t, cleanupRegistry)
+			old := newTestKey(t, time.Now().Add(-48*time.Hour))
+			env := newTestKey(t, time.Now().Add(-time.Hour))
+			scan := func() time.Time { return kh.clock().Add(-time.Second) }
+			for _, id := range []string{"a", "b"} {
+				kh.cleanupCheckIn(id, counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+			}
+			if code := kh.upload("a", old); code != http.StatusOK {
+				t.Fatalf("upload = %d", code)
+			}
+			kh.setStatus(old.Fingerprint, "revoke")
+			kh.advance(time.Minute)
+			for _, id := range []string{"a", "b"} {
+				kh.cleanupCheckIn(id, counts(scan(), map[string]int{env.Fingerprint: 1}), old, env)
+			}
+			if rec := kh.deleteKey(old.Fingerprint); rec.Code != http.StatusOK {
+				t.Fatalf("delete = %d %s", rec.Code, rec.Body)
+			}
+			if purged {
+				kh.advance(deletedKeyRetention + time.Minute)
+				if k := fleetKey(t, kh.fleet(), old.Fingerprint); !k.Purged || k.EscrowCopies != 0 {
+					t.Fatalf("purged key = %+v", k)
+				}
+			}
+
+			// b, which still holds it, counts a value sealed with it
+			kh.advance(time.Minute)
+			kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1, old.Fingerprint: 1}), old, env)
+			if !strings.Contains(kh.logs.String(), "event=key.delete_undone") {
+				t.Fatal("key.delete_undone was not logged")
+			}
+			k := fleetKey(t, kh.fleet(), old.Fingerprint)
+			if k.Status != store.KeyRevoked || k.Purged || k.PurgeAt != nil || k.DeletedBy != "" {
+				t.Fatalf("the key after its deletion was undone = %+v", k)
+			}
+			if purged != (k.EscrowCopies == 0) {
+				t.Fatalf("escrow copies = %d, purged %v", k.EscrowCopies, purged)
+			}
+
+			// reinstated, b escrows it again if its copies were purged
+			if rec := kh.setStatus(old.Fingerprint, "reinstate"); rec.Code != http.StatusOK {
+				t.Fatalf("reinstate = %d %s", rec.Code, rec.Body)
+			}
+			needed := kh.cleanupCheckIn("b", counts(scan(), map[string]int{env.Fingerprint: 1, old.Fingerprint: 1}), old, env).EscrowNeeded
+			if purged && !slices.Contains(needed, old.Fingerprint) {
+				t.Fatalf("b escrow_needed after the purge = %v", needed)
+			}
+		})
+	}
+}
+
+// A cluster over the key limit still has its deleted keys removed: the
+// limit leaves unusable keys, deleted ones among them, out of its stored
+// state first, so removals are planned from the whole report.
+func TestKeyDelete_RemovedFromAClusterOverTheKeyLimit(t *testing.T) {
+	kh := newKeyHarnessWith(t, cleanupRegistry)
+	ctx := context.Background()
+	ks := manyKeys(t, protocol.MaxKeys+1)
+	gone := ks[len(ks)-1]
+	now := kh.clock()
+	rec := store.KeyRecord{Fingerprint: gone.Fingerprint, Certificate: gone.Certificate, NotBefore: gone.NotBefore, NotAfter: gone.NotAfter}
+	if _, err := kh.store.PutKeyIfAbsent(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Status, rec.StatusBy, rec.StatusAt = store.KeyRevoked, "alice", &now
+	if ok, err := kh.store.SetKeyStatus(ctx, rec); err != nil || !ok {
+		t.Fatalf("revoke: %v %v", ok, err)
+	}
+	purge := now.Add(deletedKeyRetention)
+	rec.Status, rec.PurgeAt = store.KeyDeleted, &purge
+	if err := kh.store.DeleteKey(ctx, rec, now); err != nil {
+		t.Fatal(err)
+	}
+
+	in := checkIn(ks...)
+	in.Controller.ActiveFingerprint = ks[len(ks)-2].Fingerprint
+	in.Capabilities = []string{protocol.CapabilitySeal, protocol.CapabilityKeys, protocol.CapabilityCleanup}
+	in.Commands = []string{protocol.CommandKeysRestore, protocol.CommandKeysDelete}
+	if r := kh.do(http.MethodPost, "/agent/v1/checkin", kh.sessions["a"], in); r.Code != http.StatusOK {
+		t.Fatalf("check-in = %d %s", r.Code, r.Body)
+	}
+	states, _ := kh.store.GetAgentStates(ctx, []string{"a"})
+	if containsKey(states["a"].Keys, gone.Fingerprint) {
+		t.Fatal("the deleted key was kept under the limit; the test needs it left out")
+	}
+	cmds := kh.poll("a")
+	if len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysDelete || !strings.Contains(string(cmds[0].Payload), gone.Fingerprint) {
+		t.Fatalf("a commands = %+v", cmds)
 	}
 }
 
@@ -536,7 +696,7 @@ func TestPlanKeySync_Removal(t *testing.T) {
 	plan := func(self *registry.Agent, state store.AgentState, commands ...store.CommandRecord) []string {
 		t.Helper()
 		states := map[string]store.AgentState{self.ID: state}
-		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, state, false, commands, keys, now).Remove
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, state, nil, false, commands, keys, now).Remove
 	}
 
 	// only deleted keys, not those only revoked

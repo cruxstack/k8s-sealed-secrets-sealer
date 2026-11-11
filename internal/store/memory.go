@@ -36,6 +36,16 @@ type Memory struct {
 	reserved map[string]map[string]int64
 	// requests counts requests by rate limit window
 	requests map[rateWindow]int
+	// now is the clock TTLs expire by; tests set it with SetClock
+	now func() time.Time
+}
+
+// SetClock sets the clock items expire by, as the table's TTL would, for
+// tests that move time on.
+func (m *Memory) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
 }
 
 type rateWindow struct {
@@ -61,6 +71,7 @@ func NewMemory() *Memory {
 
 		escrowExpires: map[string]time.Time{},
 		reinstated:    map[string]ReinstatedKey{},
+		now:           time.Now,
 	}
 }
 
@@ -180,7 +191,7 @@ func (m *Memory) KeyLists(_ context.Context) (KeyLists, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := KeyLists{Revoked: maps.Clone(m.revoked), Reinstated: map[string]ReinstatedKey{}}
-	now := time.Now()
+	now := m.now()
 	for fp, r := range m.reinstated {
 		if now.Before(r.At.Add(ReinstatedRestoreWindow)) {
 			out.Reinstated[fp] = r
@@ -217,7 +228,7 @@ func (m *Memory) KeyUsages(_ context.Context, ids []string) (map[string]KeyUsage
 // m.mu.
 func (m *Memory) escrowGone(fingerprint string) bool {
 	at, ok := m.escrowExpires[fingerprint]
-	if !ok || time.Now().Before(at) {
+	if !ok || m.now().Before(at) {
 		return false
 	}
 	delete(m.escrow, fingerprint)

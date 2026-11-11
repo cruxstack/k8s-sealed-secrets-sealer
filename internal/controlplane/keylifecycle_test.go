@@ -118,6 +118,8 @@ func newKeyHarnessWith(t *testing.T, registryYAML string) *keyHarness {
 		AdminTokenKeyChanges: true,
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
+	// escrowed copies expire by the harness's clock, as by the table's TTL
+	mem.SetClock(sh.clock)
 	for _, id := range []string{"a", "b", "c"} {
 		sh.sessions[id] = agentSession(t, sessions, reg, id)
 	}
@@ -688,7 +690,7 @@ agents:
 		},
 	}
 	self, _ := reg.Agent("a")
-	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], false, nil, keys, now)
+	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
 	// a adds its copy where it has none and the key has room; not of
 	// revoked or future-dated keys
 	if !slices.Equal(plan.EscrowNeeded, []string{theirs.Fingerprint}) {
@@ -711,7 +713,7 @@ agents:
 		many = append(many, ref(fmt.Sprintf("SHA256:first-%02d", i), time.Hour))
 	}
 	states["a"] = st("a", many...)
-	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], false, nil, keys, now)
+	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
 	if len(plan.EscrowNeeded) != maxCopiesPerCheckIn+5 || !slices.Contains(plan.EscrowNeeded, "SHA256:first-04") {
 		t.Errorf("escrow needed = %d keys %v, want %d copies and the 5 first copies", len(plan.EscrowNeeded), plan.EscrowNeeded, maxCopiesPerCheckIn)
 	}
@@ -754,7 +756,7 @@ agents:
 	self, _ := reg.Agent("b")
 	plan := func(commands ...store.CommandRecord) []string {
 		t.Helper()
-		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], false, commands, keys, now).Restore
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], nil, false, commands, keys, now).Restore
 	}
 
 	first := plan()

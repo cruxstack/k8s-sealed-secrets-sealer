@@ -98,10 +98,21 @@ func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.
 	return fleet.Keys{Revoked: snap.revoked, Escrow: escrow, Reinstated: snap.reinstated}, nil
 }
 
-// escrowUploaders returns who escrowed each key. Escrow records are removed
-// only when a deleted key's copies are purged, and such a key is never
-// escrowed, restored or reinstated again, so what is known is cached. A key
-// is read again only while self holds it and may still add its copy.
+// escrowCacheTTL is how long who escrowed a key is cached. Copies are only
+// added, except that a deleted key's are purged; a deletion a cluster then
+// contradicts makes the key revoked again, and once reinstated it must be
+// escrowed afresh, so no instance trusts its cache of it for long.
+const escrowCacheTTL = 10 * time.Minute
+
+// knownCopies is who escrowed a key, as read at a time.
+type knownCopies struct {
+	uploaders []string
+	at        time.Time
+}
+
+// escrowUploaders returns who escrowed each key, cached for escrowCacheTTL.
+// A key is read again sooner only while self holds it and may still add its
+// copy.
 func (s *Server) escrowUploaders(ctx context.Context, fps []string, self *store.AgentState) (map[string][]string, error) {
 	out := map[string][]string{}
 	var read []string
@@ -112,18 +123,19 @@ func (s *Server) escrowUploaders(ctx context.Context, fps []string, self *store.
 			read = append(read, fp)
 		}
 	}
+	now := s.now()
 	s.knownMu.Lock()
 	for _, fp := range fps {
-		if up, ok := s.knownEscrow[fp]; ok {
-			out[fp] = up
+		if k, ok := s.knownEscrow[fp]; ok && now.Sub(k.at) < escrowCacheTTL {
+			out[fp] = k.uploaders
 		} else {
 			readAgain(fp)
 		}
 	}
 	if self != nil {
 		for _, k := range self.Keys {
-			up, ok := s.knownEscrow[k.Fingerprint]
-			if ok && !slices.Contains(up, self.AgentID) && len(up) < maxEscrowCopies {
+			known, ok := s.knownEscrow[k.Fingerprint]
+			if ok && !slices.Contains(known.uploaders, self.AgentID) && len(known.uploaders) < maxEscrowCopies {
 				readAgain(k.Fingerprint)
 			}
 		}
@@ -139,13 +151,24 @@ func (s *Server) escrowUploaders(ctx context.Context, fps []string, self *store.
 	s.knownMu.Lock()
 	defer s.knownMu.Unlock()
 	if len(s.knownEscrow) > 10_000 {
-		s.knownEscrow = map[string][]string{}
+		s.knownEscrow = map[string]knownCopies{}
+	}
+	for _, fp := range read {
+		// a key with no copy is read again each time, as before
+		delete(s.knownEscrow, fp)
 	}
 	for fp, up := range found {
 		out[fp] = up
-		s.knownEscrow[fp] = up
+		s.knownEscrow[fp] = knownCopies{uploaders: up, at: now}
 	}
 	return out, nil
+}
+
+// forgetEscrow drops what is cached of a key's copies.
+func (s *Server) forgetEscrow(fp string) {
+	s.knownMu.Lock()
+	defer s.knownMu.Unlock()
+	delete(s.knownEscrow, fp)
 }
 
 // markEscrowed adds an uploader to a key's cached uploaders. A key not
@@ -154,7 +177,7 @@ func (s *Server) escrowUploaders(ctx context.Context, fps []string, self *store.
 func (s *Server) markEscrowed(fp, agentID string) {
 	s.knownMu.Lock()
 	defer s.knownMu.Unlock()
-	if up, ok := s.knownEscrow[fp]; ok && !slices.Contains(up, agentID) {
-		s.knownEscrow[fp] = append(slices.Clone(up), agentID)
+	if k, ok := s.knownEscrow[fp]; ok && !slices.Contains(k.uploaders, agentID) {
+		s.knownEscrow[fp] = knownCopies{uploaders: append(slices.Clone(k.uploaders), agentID), at: k.at}
 	}
 }

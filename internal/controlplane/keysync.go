@@ -73,15 +73,20 @@ type keySyncPlan struct {
 // Revoked and future-dated keys are neither escrowed nor restored.
 //
 // A deleted key the agent's cluster still holds is removed from it
-// (planRemoval).
+// (planRemoval), from every key the check-in reported (reported; nil for
+// state.Keys): the key limit leaves unusable keys, deleted ones among them,
+// out of state.Keys first.
 //
 // Every decision is about the checking-in agent only, and each agent checks
 // in serially, so concurrent check-ins from different agents cannot queue
 // the same command twice.
-func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
+func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, reported []store.KeyRef, firstCheckIn bool, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
 	plan := planEscrowAndRestore(f, self, state, commands, keys, now)
 	plan = planRenewal(plan, f, self, state, firstCheckIn, commands, now)
-	return planRemoval(plan, self, state, commands, keys, now)
+	if reported == nil {
+		reported = state.Keys
+	}
+	return planRemoval(plan, self, state, reported, commands, keys, now)
 }
 
 // planEscrowAndRestore decides which of the agent's keys it should escrow
@@ -140,16 +145,17 @@ func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.Agent
 }
 
 // planRemoval asks an agent with the cleanup capability to remove the
-// deleted keys its cluster still reports, whether they were never removed
-// or came back (a cluster that was down, or a key Secret made again). Like
-// restores, removals go one command at a time, each ending in a controller
-// restart: none while the last is open, or for settleAfterSuccess after it
-// succeeded, or removeRetryAfterFailure after it failed or was refused.
-func planRemoval(plan keySyncPlan, self *registry.Agent, state store.AgentState, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
+// deleted keys its cluster still reports (reported, before the key limit),
+// whether they were never removed or came back (a cluster that was down,
+// or a key Secret made again). Like restores, removals go one command at a
+// time, each ending in a controller restart: none while the last is open,
+// or for settleAfterSuccess after it succeeded, or removeRetryAfterFailure
+// after it failed or was refused.
+func planRemoval(plan keySyncPlan, self *registry.Agent, state store.AgentState, reported []store.KeyRef, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
 	if !canRun(self, state, protocol.CommandKeysDelete) || removalRecent(commands, now) {
 		return plan
 	}
-	for _, k := range state.Keys {
+	for _, k := range reported {
 		if r, ok := keys.Revoked[k.Fingerprint]; ok && r.Deleted() && len(plan.Remove) < protocol.MaxRestoreKeys {
 			plan.Remove = append(plan.Remove, k.Fingerprint)
 		}
@@ -325,12 +331,15 @@ func (s *Server) noteHeldKeys(ctx context.Context, f *fleet.Fleet, now time.Time
 }
 
 // noteRefusedRemovals adds an issue to each agent whose cluster still holds
-// a deleted key its latest removal refused, naming the key and why. Only
-// the commands of agents holding deleted keys are read.
+// a deleted key its latest removal refused, naming the key and why, or a
+// key whose deletion was undone for it. Only the commands of agents holding
+// revoked or deleted keys are read.
 func (s *Server) noteRefusedRemovals(ctx context.Context, f *fleet.Fleet) {
 	deleted := map[string][]string{}
+	status := map[string]string{}
 	for _, k := range f.Keys {
-		if k.Status == store.KeyDeleted {
+		if k.Status != store.KeyActive {
+			status[k.Fingerprint] = k.Status
 			for _, id := range k.Holders {
 				deleted[id] = append(deleted[id], k.Fingerprint)
 			}
@@ -352,8 +361,12 @@ func (s *Server) noteRefusedRemovals(ctx context.Context, f *fleet.Fleet) {
 			continue
 		}
 		for _, k := range res.Keys {
-			if k.Outcome == protocol.KeyRefused && slices.Contains(held, k.Fingerprint) {
+			switch {
+			case k.Outcome != protocol.KeyRefused || !slices.Contains(held, k.Fingerprint):
+			case status[k.Fingerprint] == store.KeyDeleted:
 				a.Issues = append(a.Issues, fmt.Sprintf("refused to remove deleted key %s: %s", k.Fingerprint, k.Reason))
+			default:
+				a.Issues = append(a.Issues, fmt.Sprintf("refused to remove key %s, whose deletion was undone: %s", k.Fingerprint, k.Reason))
 			}
 		}
 	}
@@ -379,7 +392,7 @@ func latestRemoval(commands []store.CommandRecord) (protocol.KeysDeleteResult, b
 // its commands, and returns the keys it should escrow. snap was read before
 // the check-in was stored and holds its new state; seen says whether the
 // agent had checked in before.
-func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, snap fleetSnapshot, seen bool) ([]string, error) {
+func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, reported []store.KeyRef, snap fleetSnapshot, seen bool) ([]string, error) {
 	keys, err := s.fleetKeys(ctx, snap, &state, false)
 	if err != nil {
 		return nil, err
@@ -393,14 +406,14 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 		return nil, err
 	}
 
-	plan := planKeySync(f, self, state, !seen, commands, keys, now)
+	plan := planKeySync(f, self, state, reported, !seen, commands, keys, now)
 	if len(plan.Restore) > 0 {
 		// a restore that found keys already present holds them off longer
 		// than every check-in reads back; read that far only now
 		if commands, err = s.store.CommandsSince(ctx, self.ID, time.Now().Add(-presentLookback)); err != nil {
 			return nil, err
 		}
-		plan = planKeySync(f, self, state, !seen, commands, keys, now)
+		plan = planKeySync(f, self, state, reported, !seen, commands, keys, now)
 	}
 	if len(plan.Restore) > 0 {
 		if err := s.queue(ctx, self, protocol.CommandKeysRestore, protocol.KeysRestorePayload{Fingerprints: plan.Restore}, now); err != nil {
