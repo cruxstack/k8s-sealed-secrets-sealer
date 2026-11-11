@@ -6,9 +6,15 @@ metadata:
   labels:
     {{- include "agent.labels" . | nindent 4 }}
 spec:
-  # one agent per cluster. The old pod stops before the new one starts: both
-  # would check in and run commands as the same agent, and key sync relies on
-  # one agent's check-ins coming one at a time.
+  # one agent per cluster. On a rollout, such as an upgrade, the old pod
+  # stops before the new one starts: both would check in and run commands
+  # as the same agent, and key sync relies on one agent's check-ins coming
+  # one at a time. Meanwhile the agent does not check in, so it may count
+  # as unhealthy for a while (see "image" in the chart's values). When a pod
+  # is evicted or deleted instead, the ReplicaSet starts the new one at
+  # once, beside the old one for up to its grace period; that is harmless,
+  # since the old pod stops checking in and polling as soon as it is told
+  # to stop.
   replicas: 1
   strategy:
     type: Recreate

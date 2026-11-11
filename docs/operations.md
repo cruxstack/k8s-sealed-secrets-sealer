@@ -104,8 +104,10 @@ Alert, too, on these log events, at warn level or above:
   `repo.permission_mismatch`, `agent.login_throttled`,
   `registry.reload_failed`, `github.request_failed`;
 - agents: `agent.checkin_failed`, `agent.poll_failed`,
-  `controller.read_failed`, `controller.key_unusable`,
+  `agent.clock_skew`, `controller.read_failed`, `controller.key_unusable`,
   `controller.active_key_unlabeled`, `controller.cert_expired`,
+  `controller.restart_failed` (restored keys are not loaded yet),
+  `controller.too_many_keys`, `command.panicked`, `command.report_failed`,
   `key.sync_failed`.
 
 `key.discovered` marks every new sealing key. One is expected after each
@@ -199,6 +201,15 @@ never need the control plane.
   a section of their own.
 - Upgrade the control plane, then the agents, within one minor version.
 - Keep each env's table across upgrades: it holds the env's escrowed keys.
+- Upgrade agents one cluster at a time. An agent's Deployment uses the
+  `Recreate` strategy, so two pods never act as one agent: the old pod
+  finishes its commands (up to 45 seconds) and stops before the new one
+  starts, pulls its image and checks in. Meanwhile the agent does not
+  check in, and once its last check-in is older than its health window (45
+  seconds at the default interval) it counts as unhealthy. If it is the
+  env's only seal-capable agent, seals are refused until it checks in
+  again. Pre-pull the new image onto the cluster's nodes before upgrading
+  to keep the gap short.
 
 ### To several envs on one URL (v0.6.0)
 

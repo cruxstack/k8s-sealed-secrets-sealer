@@ -210,6 +210,23 @@ func TestAgent_LoadsPendingRestoredKeys(t *testing.T) {
 	}
 }
 
+// Restored keys are loaded even while the control plane cannot be
+// reached: the controller needs them to decrypt, which never waits for the
+// control plane.
+func TestAgent_LoadsPendingRestoredKeysWithoutTheControlPlane(t *testing.T) {
+	report := reportWith(t)
+	report.Pending = []string{"SHA256:restored"}
+	loader := &recordingLoader{}
+	a := New(Options{
+		Inventory: &fakeInventory{report: report}, ControlPlane: &fakeControlPlane{errs: []error{errors.New("down")}},
+		Interval: 15 * time.Second, Loader: loader, Logger: slog.New(slog.DiscardHandler),
+	})
+	a.cycle(context.Background())
+	if len(loader.active) != 1 {
+		t.Fatalf("loader calls after a failed check-in = %v", loader.active)
+	}
+}
+
 // A check-in reporting more than protocol.MaxKeys keys is refused, so the
 // agent warns well before.
 func TestAgent_WarnsAsKeysNearTheLimit(t *testing.T) {

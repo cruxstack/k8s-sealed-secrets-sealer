@@ -313,13 +313,17 @@ a creation time, an expiry and a typed payload. The rules:
   reporting, the command expires and the user retries. Key commands are
   idempotent and the control plane re-issues them when it sees the gap again.
   On shutdown the agent starts no new poll, but the poll in flight and the
-  commands it leased still run and are reported, within 45 seconds; the
-  chart's `terminationGracePeriodSeconds` (60) leaves room for that.
+  commands it leased still run and are reported, within 45 seconds. Those
+  still unfinished then are reported as failed within 10 more seconds, so
+  their work can be issued again without waiting for them to expire; the
+  chart's `terminationGracePeriodSeconds` (60) leaves room for both.
 - **Expiry is enforced in code.** DynamoDB TTL deletion is eventual, so the
   control plane and agent both refuse expired commands; TTL only cleans up.
   The agent measures expiry in the control plane's time, from the `Date`
   header of its responses, so a clock that is off does not expire commands.
-  It reports a command that expired before it ran as failed.
+  It neither runs nor reports a command that expired before it ran, and
+  drops the result of one that expired while it ran, since the control
+  plane would refuse those results.
 - **Results are accepted once,** only from the leasing agent and only before
   expiry. The agent retries a result while the control plane cannot be
   reached or answers with a server error, until the command expires.
@@ -336,8 +340,9 @@ a creation time, an expiry and a typed payload. The rules:
   never written is lost until it expires. A poll ends within 25 seconds,
   store calls included, and leases a command only while 3 seconds are left to
   respond. One poll leases at most 16 commands and 512 KiB, well within what
-  agents read (1 MiB) and Lambda returns; the rest wait for the next poll. If
-  a lease fails after others, the poll still sends those.
+  agents read (8 MiB, and 1 MiB up to v0.6.2) and Lambda returns; the rest
+  wait for the next poll. If a lease fails after others, the poll still
+  sends those.
 - **Capabilities come from the agent's Helm values,** never from the control
   plane. Values decide which RBAC is installed and which handlers the agent
   enables. An agent refuses a command for a capability it does not have, and
@@ -729,29 +734,44 @@ required: the controller lists key secrets only at startup
 (`initKeyRegistry`) and does not watch for new ones. It deletes the
 controller's pods that were created before the newest restored key's Secret,
 and their Deployment starts new ones; with one replica the controller is
-unavailable for the few seconds its new pod takes to start. Deleting pods
-needs no write access to the Deployment. Before deleting anything, the agent
-checks that every key Secret would load, since a new pod stops at one that
-does not. The agent refuses the whole command if its controller orders keys
-by `SecretCreationTimestamp`, or if it cannot tell how it orders them.
+unavailable for the few seconds its new pod takes to start. With several,
+it deletes one pod at a time, each once the pod that replaced the last is
+ready. A pod counts as the controller's only when the Deployment owns its
+ReplicaSet, so another workload's pods that the Deployment's selector
+happens to match are never deleted, nor taken as proof that a key loaded.
+Deleting pods needs no write access to the Deployment. A delete is not an
+eviction, so the controller's PodDisruptionBudget does not hold it back.
+Before deleting anything, the agent checks that every key Secret would
+load, since a new pod stops at one that does not. The agent refuses the
+whole command if its controller orders keys by `SecretCreationTimestamp`,
+or if it cannot tell how it orders them.
 
 A restored key counts as held only once the controller has loaded it: when
 every ready controller pod was created after the key's Secret (in a later
 second, as creation times are whole seconds), or when the controller seals
 with it. Until then the agent leaves it out of its check-ins and does not
 seal with it, so it cannot become the env key while this cluster could not
-decrypt with it. If the restart failed or never happened, the agent retries
-it on its check-ins, backing off from 30 seconds to 10 minutes, and a
-repeated restore command retries it too. While the controller restarts, the
-agent seals with the keys it reported last.
+decrypt with it. When the agent cannot tell, because the controller's
+Deployment or pods cannot be read or none of its pods is ready (as while it
+restarts), it skips that check-in rather than leave out keys the controller
+loaded long ago. If the restart failed or never happened, the agent retries
+it at each check-in, whether or not the control plane answers, backing off
+from 30 seconds to 10 minutes, and a repeated restore command retries it
+too. While a restore runs, the check-in loop leaves restarts to it, so the
+controller restarts once for the whole restore. While the controller
+restarts, the agent seals with the keys it reported last.
 
 Key commands expire after 10 minutes. The control plane does not queue a
 restore for a key that an open restore command already covers, nor for 2
 minutes after one succeeded (until the agent's next inventory shows the key)
-or 5 minutes after one failed. Each decision is about the agent that is
-checking in, and an agent checks in serially, so concurrent check-ins from
-different agents cannot queue duplicate commands. Each check-in plans with
-its own new state and every other agent's latest, read afresh.
+or 5 minutes after one failed. A key that a restore found already in the
+cluster while the agent still does not report it, because it is held under
+another label or the controller has not loaded it, is not restored again
+for an hour, and the fleet view says so in the agent's issues. Each
+decision is about the agent that is checking in, and an agent checks in
+serially, so concurrent check-ins from different agents cannot queue
+duplicate commands. Each check-in plans with its own new state and every
+other agent's latest, read afresh.
 
 ```mermaid
 sequenceDiagram
@@ -988,9 +1008,11 @@ revoked by mistake can be reinstated. Taking a key out of the clusters is
 key retirement (section 16).
 
 **Controller namespace.** The controller runs in its own namespace, not
-`kube-system`. RBAC cannot limit `list secrets` by label, so an agent with the
-`keys` capability can read every Secret in the controller namespace; that
-namespace must hold only the controller and its keys.
+`kube-system`. RBAC cannot limit `list secrets` or `delete pods` by label,
+so an agent with the `keys` capability can read every Secret and delete any
+pod in the controller namespace; that namespace must hold only the
+controller and its keys. The agent chart refuses `keys` with the controller
+in `kube-system`.
 
 **Agent RBAC.** The Helm chart installs a Role in the controller namespace,
 bound to the agent's ServiceAccount in the agent's own namespace:
@@ -1001,7 +1023,8 @@ bound to the agent's ServiceAccount in the agent's own namespace:
 |            | (for `/v1/cert.pem`); `get` the controller Deployment (to     |
 |            | read its flags).                                              |
 | `seal`     | Nothing more: sealing uses public certificates in process.    |
-| `keys`     | `list`, `create` Secrets; `list`, `delete` Pods (restart).    |
+| `keys`     | `list`, `create` Secrets; `list`, `delete` Pods and `list`    |
+|            | ReplicaSets (restart).                                        |
 | `renewal`  | `patch` the controller Deployment.                            |
 
 `get` and `patch` are limited to the named Service and Deployment with

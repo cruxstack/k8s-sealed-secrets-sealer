@@ -33,6 +33,8 @@ func TestRestoreState(t *testing.T) {
 		active  string
 		pending bool
 		stale   []string
+		// unsure: no pod is ready, so what is loaded cannot be told
+		unsure bool
 	}{
 		"pod from before the key": {
 			secrets: []corev1.Secret{restored}, pods: []corev1.Pod{pod("old", -time.Minute, true)},
@@ -48,7 +50,12 @@ func TestRestoreState(t *testing.T) {
 		},
 		"new pod not ready yet": {
 			secrets: []corev1.Secret{restored}, pods: []corev1.Pod{pod("new", time.Second, false)},
-			pending: true,
+			pending: true, unsure: true,
+		},
+		// a restart: the old pod is going away, the new one not ready yet
+		"old pod terminating, new pod not ready": {
+			secrets: []corev1.Secret{restored}, pods: []corev1.Pod{terminating, pod("new", time.Second, false)},
+			pending: true, unsure: true,
 		},
 		"an old pod still running beside a new one": {
 			secrets: []corev1.Secret{restored}, pods: []corev1.Pod{pod("new", time.Second, true), pod("old", -time.Minute, true)},
@@ -59,7 +66,7 @@ func TestRestoreState(t *testing.T) {
 		},
 		"no pods": {
 			secrets: []corev1.Secret{restored},
-			pending: true,
+			pending: true, unsure: true,
 		},
 		// the controller seals with it, so it has loaded it
 		"the active key": {
@@ -75,6 +82,9 @@ func TestRestoreState(t *testing.T) {
 			st := restoreState(tc.secrets, tc.pods, tc.active)
 			if got := len(st.pending) > 0; got != tc.pending {
 				t.Errorf("pending = %v, want %v", st.fingerprints(), tc.pending)
+			}
+			if st.unsure != tc.unsure {
+				t.Errorf("unsure = %v, want %v", st.unsure, tc.unsure)
 			}
 			var stale []string
 			for _, p := range st.stale {

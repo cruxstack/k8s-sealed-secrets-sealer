@@ -101,10 +101,25 @@ func TestCommands_RunsHandlersAndReports(t *testing.T) {
 	if r, _ := q.result("unknown"); r.Status != protocol.CommandFailed || r.Error != "unsupported command type" {
 		t.Errorf("unknown = %+v", r)
 	}
-	// an expired command is not run, but reported as failed rather than
-	// silently dropped
-	if r, _ := q.result("expired"); r.Status != protocol.CommandFailed || !strings.Contains(r.Error, "expired") || len(ran) != 1 {
-		t.Errorf("expired = %+v, ran = %v", r, ran)
+	// an expired command is neither run nor reported: the control plane
+	// accepts no result after expiry
+	if r, ok := q.result("expired"); ok || len(ran) != 1 {
+		t.Errorf("expired = %+v (reported %v), ran = %v", r, ok, ran)
+	}
+}
+
+// A command that ran until it expired has no result to report: the control
+// plane would refuse it.
+func TestCommands_DropsResultsOfExpiredCommands(t *testing.T) {
+	f := &flakyResults{queueClient: queueClient{results: map[string]protocol.CommandResult{}}}
+	c := NewCommands(f, nil, nil)
+	c.Handle(protocol.CommandSeal, func(ctx context.Context, _ protocol.Command) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	c.execute(context.Background(), context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: time.Now().Add(20 * time.Millisecond)})
+	if n := f.attempts.Load(); n != 0 {
+		t.Fatalf("reported an expired command's result %d times", n)
 	}
 }
 
@@ -207,6 +222,46 @@ func TestCommands_ShutdownGraceIsBounded(t *testing.T) {
 	}
 }
 
+// Commands still running or not yet run when the grace period ends are
+// reported as failed, so the control plane need not wait for them to
+// expire.
+func TestCommands_ReportsUnfinishedCommandsAtShutdown(t *testing.T) {
+	h := &heldPoll{inFlight: make(chan struct{}, 1), release: make(chan []protocol.Command), results: map[string]protocol.CommandResult{}}
+	c := NewCommands(h, nil, nil)
+	c.grace = 50 * time.Millisecond
+	c.shutdownReport = time.Second
+	ran := 0
+	c.Handle(protocol.CommandSeal, func(ctx context.Context, _ protocol.Command) (any, error) {
+		ran++
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	<-h.inFlight
+	expires := time.Now().Add(time.Minute)
+	h.release <- []protocol.Command{
+		{ID: "slow", Type: protocol.CommandSeal, ExpiresAt: expires},
+		{ID: "next", Type: protocol.CommandSeal, ExpiresAt: expires},
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run outlived its grace period")
+	}
+	if ran != 1 {
+		t.Errorf("ran %d commands after the grace period ended, want only the one in flight", ran)
+	}
+	for _, id := range []string{"slow", "next"} {
+		r, ok := h.results[id]
+		if !ok || r.Status != protocol.CommandFailed || !strings.HasPrefix(r.Error, errShutDown) {
+			t.Errorf("%s = %+v, reported %v", id, r, ok)
+		}
+	}
+}
+
 // flakyResults fails Result with errs, in order, then accepts.
 type flakyResults struct {
 	queueClient
@@ -238,7 +293,7 @@ func TestCommands_RetriesReportingAResult(t *testing.T) {
 			c := NewCommands(f, nil, nil)
 			c.resultRetry = time.Millisecond
 			c.Handle(protocol.CommandSeal, func(context.Context, protocol.Command) (any, error) { return nil, nil })
-			c.execute(context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: time.Now().Add(time.Minute)})
+			c.execute(context.Background(), context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: time.Now().Add(time.Minute)})
 			if got := f.attempts.Load(); got != tc.attempts {
 				t.Errorf("attempts = %d, want %d", got, tc.attempts)
 			}
@@ -265,7 +320,7 @@ func TestCommands_ExpiryUsesTheControlPlanesClock(t *testing.T) {
 		return nil, nil
 	})
 	// by this agent's own clock it expired 8 minutes ago
-	c.execute(context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: cpNow.Add(2 * time.Minute)})
+	c.execute(context.Background(), context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: cpNow.Add(2 * time.Minute)})
 	if r, _ := q.result("c"); !ran || r.Status != protocol.CommandSucceeded {
 		t.Fatalf("ran = %v, result = %+v", ran, r)
 	}
@@ -278,7 +333,7 @@ func TestCommands_RecoversFromAPanic(t *testing.T) {
 	c.Handle(protocol.CommandSeal, func(context.Context, protocol.Command) (any, error) {
 		panic("boom")
 	})
-	c.execute(context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: time.Now().Add(time.Minute)})
+	c.execute(context.Background(), context.Background(), protocol.Command{ID: "c", Type: protocol.CommandSeal, ExpiresAt: time.Now().Add(time.Minute)})
 	if r, _ := q.result("c"); r.Status != protocol.CommandFailed || strings.Contains(r.Error, "boom") {
 		t.Fatalf("result = %+v", r)
 	}

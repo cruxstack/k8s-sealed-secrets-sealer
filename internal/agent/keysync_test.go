@@ -112,7 +112,7 @@ type cluster struct {
 
 func newCluster(t *testing.T, kms *envelope.FakeKMS, escrow *memEscrow, env string, objs ...runtime.Object) *cluster {
 	t.Helper()
-	objs = append(objs, controllerPod("controller-old", time.Now().Add(-time.Hour), true))
+	objs = append(objs, controllerReplicaSet(), controllerPod("controller-old", time.Now().Add(-time.Hour), true))
 	kube := fake.NewClientset(objs...)
 	// the fake API server does not generate names or set creation times
 	var n atomic.Int32
@@ -482,5 +482,216 @@ func TestKeySync_RefusesARestartThatWouldStopTheController(t *testing.T) {
 	}
 	if c.restarted(t) {
 		t.Fatal("the controller was restarted")
+	}
+}
+
+// replicas makes c's controller run a second replica, and its pods be
+// replaced as a ReplicaSet would: a deleted pod's replacement starts not
+// ready. It returns the pod events in order and a func that makes the
+// replacements ready.
+func (c *cluster) replicas(t *testing.T) (events func() []string, ready func()) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := c.kube.CoreV1().Pods(ns).Create(ctx, controllerPod("controller-old-2", time.Now().Add(-time.Hour), true), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var log []string
+	gvr := corev1.SchemeGroupVersion.WithResource("pods")
+	n := 0
+	c.kube.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		name := a.(k8stesting.DeleteAction).GetName()
+		if err := c.kube.Tracker().Delete(gvr, ns, name); err != nil {
+			return true, nil, err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		log = append(log, "delete "+name)
+		return true, nil, c.kube.Tracker().Add(controllerPod(fmt.Sprintf("controller-new-%d", n), time.Now().Add(2*time.Second), false))
+	})
+	events = func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(log)
+	}
+	ready = func() {
+		list, err := c.kube.Tracker().List(gvr, corev1.SchemeGroupVersion.WithKind("Pod"), ns)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, p := range list.(*corev1.PodList).Items {
+			if podReady(p) {
+				continue
+			}
+			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			if err := c.kube.Tracker().Update(gvr, &p, ns); err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			log = append(log, "ready "+p.Name)
+			mu.Unlock()
+		}
+	}
+	return events, ready
+}
+
+// pendingKey adds a key Secret the agent restored a minute ago, after the
+// controller's pods started.
+func (c *cluster) pendingKey(t *testing.T) {
+	t.Helper()
+	k := newPair(t, time.Now().Add(-time.Hour))
+	s := k.secret("restored")
+	s.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Minute))
+	s.Annotations = map[string]string{annotationRestoredFrom: escrowedRestoredFromValue}
+	if _, err := c.kube.CoreV1().Secrets(ns).Create(context.Background(), s, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With several replicas a restore's restart deletes one pod at a time,
+// waiting for each replacement to be ready, so the controller keeps
+// serving.
+func TestKeySync_RestartsReplicasOneAtATime(t *testing.T) {
+	c := newCluster(t, envelope.NewFakeKMS("escrow"), nil, "dev", controllerDeployment())
+	c.pendingKey(t)
+	events, ready := c.replicas(t)
+	c.sync.restartPoll = time.Millisecond
+	// the replacement turns ready a few polls after the first delete
+	polls := 0
+	c.kube.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if len(events()) > 0 {
+			if polls++; polls == 3 {
+				ready()
+			}
+		}
+		return false, nil, nil
+	})
+
+	restarted, err := c.sync.restart(context.Background(), "", "keys restored", true)
+	if err != nil || !restarted {
+		t.Fatalf("restarted = %v, err = %v", restarted, err)
+	}
+	got := events()
+	if len(got) != 3 || !strings.HasPrefix(got[0], "delete controller-old") || got[1] != "ready controller-new-1" ||
+		!strings.HasPrefix(got[2], "delete controller-old") || got[0] == got[2] {
+		t.Fatalf("events = %v, want a delete, the replacement ready, then the other delete", got)
+	}
+}
+
+// The check-in loop's retry deletes one pod and leaves the next to a later
+// attempt, so the loop is not held up while the replacement starts.
+func TestKeySync_LoadRestoredRestartsOneReplicaPerAttempt(t *testing.T) {
+	c := newCluster(t, envelope.NewFakeKMS("escrow"), nil, "dev", controllerDeployment())
+	c.pendingKey(t)
+	events, ready := c.replicas(t)
+	now := time.Now()
+	c.sync.now = func() time.Time { return now }
+
+	c.sync.LoadRestored(context.Background(), "")
+	if got := events(); len(got) != 1 {
+		t.Fatalf("events after the first attempt = %v, want one delete", got)
+	}
+	now = now.Add(restartRetryMax)
+	c.sync.LoadRestored(context.Background(), "")
+	if got := events(); len(got) != 1 {
+		t.Fatalf("events while the replacement starts = %v, want still one delete", got)
+	}
+	ready()
+	now = now.Add(restartRetryMax)
+	c.sync.LoadRestored(context.Background(), "")
+	if got := events(); len(got) != 3 || !strings.HasPrefix(got[2], "delete controller-old") {
+		t.Fatalf("events once the replacement is ready = %v", got)
+	}
+}
+
+// gatedEscrow holds the download of one key until released.
+type gatedEscrow struct {
+	*memEscrow
+	gate             string
+	reached, release chan struct{}
+}
+
+func (g *gatedEscrow) GetEscrow(ctx context.Context, fp string) (protocol.EscrowRecord, error) {
+	if fp == g.gate {
+		close(g.reached)
+		<-g.release
+	}
+	return g.memEscrow.GetEscrow(ctx, fp)
+}
+
+// While a restore runs, the check-in loop leaves restarts to it: a restart
+// between two of its keys would be followed by the restore's own, and the
+// controller would restart twice.
+func TestKeySync_LoadRestoredWaitsForARestore(t *testing.T) {
+	kms := envelope.NewFakeKMS("escrow")
+	k1 := newPair(t, time.Now().Add(-2*time.Hour))
+	k2 := newPair(t, time.Now().Add(-time.Hour))
+	escrow := &gatedEscrow{memEscrow: escrowed(t, kms, k1, k2), gate: k2.fp, reached: make(chan struct{}), release: make(chan struct{})}
+	c := newCluster(t, kms, nil, "dev", controllerDeployment())
+	c.sync.escrow = escrow
+	// the Deployment replaces a deleted pod at once; reactors run under the
+	// fake's lock, so they count on their own
+	gvr := corev1.SchemeGroupVersion.WithResource("pods")
+	var replaced atomic.Int32
+	c.kube.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if err := c.kube.Tracker().Delete(gvr, ns, a.(k8stesting.DeleteAction).GetName()); err != nil {
+			return true, nil, err
+		}
+		return true, nil, c.kube.Tracker().Add(controllerPod(fmt.Sprintf("controller-%d", replaced.Add(1)), time.Now(), true))
+	})
+
+	type result struct {
+		res protocol.KeysRestoreResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := c.sync.Restore(context.Background(), protocol.Command{Payload: restorePayload(k1.fp, k2.fp)})
+		res, _ := out.(protocol.KeysRestoreResult)
+		done <- result{res, err}
+	}()
+	// k1 is restored and not loaded, and the restore waits on k2
+	<-escrow.reached
+	c.sync.LoadRestored(context.Background(), "")
+	if n := podDeletes(c); n != 0 {
+		t.Fatalf("the check-in loop restarted the controller during a restore: %d pod deletes", n)
+	}
+	close(escrow.release)
+	r := <-done
+	if r.err != nil || len(r.res.Restored) != 2 || !r.res.ControllerRestarted {
+		t.Fatalf("err = %v, result = %+v", r.err, r.res)
+	}
+	if n := podDeletes(c); n != 1 {
+		t.Fatalf("pod deletes = %d, want the restore's one", n)
+	}
+}
+
+// A pod that the controller's selector matches but that another workload
+// owns is never deleted.
+func TestKeySync_RestartLeavesOtherWorkloadsPods(t *testing.T) {
+	c := newCluster(t, envelope.NewFakeKMS("escrow"), nil, "dev", controllerDeployment())
+	c.pendingKey(t)
+	other := controllerPod("other", time.Now().Add(-time.Hour), true)
+	other.OwnerReferences = []metav1.OwnerReference{ownerRef("ReplicaSet", "other", "other-replicaset")}
+	stray := controllerPod("stray", time.Now().Add(-time.Hour), true)
+	stray.OwnerReferences = nil
+	for _, p := range []*corev1.Pod{other, stray} {
+		if _, err := c.kube.CoreV1().Pods(ns).Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if restarted, err := c.sync.restart(context.Background(), "", "keys restored", true); err != nil || !restarted {
+		t.Fatalf("restarted = %v, err = %v", restarted, err)
+	}
+	var deleted []string
+	for _, a := range c.kube.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "pods" {
+			deleted = append(deleted, a.(k8stesting.DeleteAction).GetName())
+		}
+	}
+	if !slices.Equal(deleted, []string{"controller-old"}) {
+		t.Fatalf("deleted %v, want only the controller's pod", deleted)
 	}
 }

@@ -29,9 +29,13 @@ const (
 	// ShutdownGrace is how long the runner keeps working once told to stop.
 	// A poll in flight may still lease commands, which are gone from the
 	// queue once leased, so they are run and reported rather than dropped.
-	// It covers a held poll and a few commands; the chart's
-	// terminationGracePeriodSeconds leaves room for it.
+	// It covers a held poll and a few commands.
 	ShutdownGrace = 45 * time.Second
+	// shutdownReport is how long, after the grace period, the runner takes
+	// to report the commands it did not finish as failed, so the control
+	// plane need not wait for them to expire. The chart's
+	// terminationGracePeriodSeconds (60) leaves room for both.
+	shutdownReport = 10 * time.Second
 	// resultRetry is the pause after a failed attempt to report a result; it
 	// doubles up to resultRetryMax.
 	resultRetry    = time.Second
@@ -56,9 +60,11 @@ type Commands struct {
 	handlers map[string]HandlerFunc
 	logger   *slog.Logger
 	now      func() time.Time
-	// grace and resultRetry are the constants, overridden in tests
-	grace       time.Duration
-	resultRetry time.Duration
+	// grace, shutdownReport and resultRetry are the constants, overridden in
+	// tests
+	grace          time.Duration
+	shutdownReport time.Duration
+	resultRetry    time.Duration
 }
 
 // NewCommands returns a command runner. It makes no network calls. now is
@@ -72,7 +78,7 @@ func NewCommands(client CommandClient, logger *slog.Logger, now func() time.Time
 	}
 	return &Commands{
 		client: client, handlers: map[string]HandlerFunc{}, logger: logger, now: now,
-		grace: ShutdownGrace, resultRetry: resultRetry,
+		grace: ShutdownGrace, shutdownReport: shutdownReport, resultRetry: resultRetry,
 	}
 }
 
@@ -94,36 +100,44 @@ func (c *Commands) Types() []string {
 // Run polls for commands until ctx ends. It does nothing when no command
 // type has a handler. When ctx ends it starts no new poll, but the poll in
 // flight and the commands it leased still run and are reported, for up to
-// the shutdown grace period.
+// the shutdown grace period. Those still unfinished then are reported as
+// failed.
 func (c *Commands) Run(ctx context.Context) error {
 	if len(c.handlers) == 0 {
 		<-ctx.Done()
 		return nil
 	}
-	work, cancel := c.workContext(ctx)
+	work, report, cancel := c.workContext(ctx)
 	defer cancel()
 	retry := pollRetry
 	for ctx.Err() == nil {
-		retry = c.poll(ctx, work, retry)
+		retry = c.poll(ctx, work, report, retry)
 	}
 	return nil
 }
 
-// workContext returns the context polls and commands run in: it ends the
-// grace period after stop does.
-func (c *Commands) workContext(stop context.Context) (context.Context, context.CancelFunc) {
-	work, cancel := context.WithCancel(context.WithoutCancel(stop))
-	unregister := context.AfterFunc(stop, func() { time.AfterFunc(c.grace, cancel) })
-	return work, func() {
+// workContext returns the contexts polls and commands run in (work) and
+// results are reported in (report). work ends the grace period after stop
+// does, and report shutdownReport after that, so the commands cut off at
+// the end of the grace period are still reported.
+func (c *Commands) workContext(stop context.Context) (work, report context.Context, cancel context.CancelFunc) {
+	work, cancelWork := context.WithCancel(context.WithoutCancel(stop))
+	report, cancelReport := context.WithCancel(context.WithoutCancel(stop))
+	unregister := context.AfterFunc(stop, func() {
+		time.AfterFunc(c.grace, cancelWork)
+		time.AfterFunc(c.grace+c.shutdownReport, cancelReport)
+	})
+	return work, report, func() {
 		unregister()
-		cancel()
+		cancelWork()
+		cancelReport()
 	}
 }
 
 // poll leases and runs one batch of commands. A failed poll is logged and
 // followed by a pause that grows with each failure in a row; it returns the
 // next pause.
-func (c *Commands) poll(stop, work context.Context, retry time.Duration) time.Duration {
+func (c *Commands) poll(stop, work, report context.Context, retry time.Duration) time.Duration {
 	started := time.Now()
 	cmds, err := c.client.Commands(work, pollWait)
 	if err != nil {
@@ -137,7 +151,7 @@ func (c *Commands) poll(stop, work context.Context, retry time.Duration) time.Du
 		return min(2*retry, pollRetryMax)
 	}
 	for _, cmd := range cmds {
-		c.execute(work, cmd)
+		c.execute(work, report, cmd)
 	}
 	if len(cmds) == 0 {
 		sleep(stop, pollMinInterval-time.Since(started))
@@ -145,21 +159,26 @@ func (c *Commands) poll(stop, work context.Context, retry time.Duration) time.Du
 	return pollRetry
 }
 
-// execute runs one leased command and reports its result. It re-validates
-// what it can: the type is one it handles and the command has not expired.
-func (c *Commands) execute(ctx context.Context, cmd protocol.Command) {
+// execute runs one leased command in ctx and reports its result in
+// report. It re-validates what it can: the type is one it handles and the
+// command has not expired. Once ctx has ended, at the end of the shutdown
+// grace period, it runs nothing and reports the command as failed.
+func (c *Commands) execute(ctx, report context.Context, cmd protocol.Command) {
 	log := c.logger.With("command_id", cmd.ID, "type", cmd.Type)
 	remaining := cmd.ExpiresAt.Sub(c.now())
 	if remaining <= 0 {
+		// not reported: the control plane accepts no result after expiry
 		log.WarnContext(ctx, "command expired before it could run", "event", "command.expired", "expires_at", cmd.ExpiresAt)
-		c.report(ctx, log, cmd, protocol.CommandResult{Status: protocol.CommandFailed, Error: "command expired before the agent could run it"})
 		return
 	}
 	res := protocol.CommandResult{Status: protocol.CommandSucceeded}
 	h, ok := c.handlers[cmd.Type]
-	if !ok {
+	switch {
+	case ctx.Err() != nil:
+		res = protocol.CommandResult{Status: protocol.CommandFailed, Error: errShutDown}
+	case !ok:
 		res = protocol.CommandResult{Status: protocol.CommandFailed, Error: "unsupported command type"}
-	} else {
+	default:
 		runCtx, cancel := context.WithTimeout(ctx, remaining)
 		log.InfoContext(ctx, "running command", "event", "command.started")
 		out, err := c.run(runCtx, log, h, cmd)
@@ -170,17 +189,24 @@ func (c *Commands) execute(ctx context.Context, cmd protocol.Command) {
 			}
 		}
 		if err != nil {
-			res.Status = protocol.CommandFailed
-			res.Error = truncate(err.Error(), maxErrorLen)
+			msg := err.Error()
+			if ctx.Err() != nil {
+				msg = errShutDown + ": " + msg
+			}
+			res.Status, res.Error = protocol.CommandFailed, truncate(msg, maxErrorLen)
 		}
 	}
 	if res.Status == protocol.CommandFailed {
-		log.WarnContext(ctx, "command failed", "event", "command.failed", "error", res.Error)
+		log.WarnContext(report, "command failed", "event", "command.failed", "error", res.Error)
 	} else {
-		log.InfoContext(ctx, "command succeeded", "event", "command.succeeded")
+		log.InfoContext(report, "command succeeded", "event", "command.succeeded")
 	}
-	c.report(ctx, log, cmd, res)
+	c.report(report, log, cmd, res)
 }
+
+// errShutDown is the error of a command the agent did not finish before it
+// stopped, or did not run.
+const errShutDown = "the agent shut down before the command finished"
 
 // run calls a handler. A panic fails the command instead of stopping the
 // agent.
@@ -199,6 +225,11 @@ func (c *Commands) run(ctx context.Context, log *slog.Logger, h HandlerFunc, cmd
 // be reached or is failing, until the command expires: the control plane
 // accepts results only until then.
 func (c *Commands) report(ctx context.Context, log *slog.Logger, cmd protocol.Command, res protocol.CommandResult) {
+	if !c.now().Before(cmd.ExpiresAt) {
+		log.WarnContext(ctx, "command expired before its result could be reported",
+			"event", "command.expired", "expires_at", cmd.ExpiresAt)
+		return
+	}
 	pause := c.resultRetry
 	for {
 		err := c.client.Result(ctx, cmd.ID, res)

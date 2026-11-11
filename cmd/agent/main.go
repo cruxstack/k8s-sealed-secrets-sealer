@@ -134,7 +134,8 @@ func run() error {
 	})
 
 	// on SIGTERM the check-in loop stops at once; the command runner finishes
-	// the command in flight within agent.ShutdownGrace
+	// the commands in flight within agent.ShutdownGrace, and reports those
+	// it could not finish as failed
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

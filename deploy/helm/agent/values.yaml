@@ -1,5 +1,14 @@
 fullnameOverride: ""
 
+# The agent Deployment uses the Recreate strategy: on an upgrade the old pod
+# finishes its work (up to 45 seconds) and stops before the new one starts,
+# pulls its image and checks in. The control plane counts an agent healthy
+# for three check-in intervals, and at least 45 seconds, after its last
+# check-in, so an upgrade whose new pod takes more than about 10 seconds to
+# pull and start leaves the agent unhealthy for a while. An env whose only
+# seal-capable agent is upgrading cannot seal meanwhile. Pre-pull the new
+# image on the node (or the cluster's nodes) before upgrading to keep the gap
+# short, and upgrade one cluster at a time.
 image:
   repository: ghcr.io/cruxstack/k8s-sealed-secrets-sealer-agent
   # defaults to the chart's appVersion
@@ -7,8 +16,9 @@ image:
   pullPolicy: IfNotPresent
 
 # The sealed-secrets controller this agent works with. Run the controller in
-# a namespace of its own: RBAC cannot narrow "list secrets" by label, so the
-# keys capability can read every Secret in that namespace.
+# a namespace of its own: RBAC cannot narrow "list secrets" or "delete pods"
+# by label, so the keys capability can read every Secret and delete any pod
+# in that namespace. The chart refuses keys with kube-system.
 controller:
   namespace: sealed-secrets
   # the controller's Service name (kubeseal's default)
@@ -29,8 +39,10 @@ capabilities:
   # seal values with the env key; needs only the controller's public cert
   seal: true
   # escrow and restore sealing keys; reads and creates key Secrets, and
-  # restarts the controller after a restore by deleting its pods; needs
-  # kms.escrowKeyId
+  # restarts the controller after a restore by deleting its pods, one at a
+  # time when it has several replicas. A delete is not an eviction, so the
+  # controller's PodDisruptionBudget does not hold it back. Needs
+  # kms.escrowKeyId.
   keys: false
   # turn on the controller's key renewal when no cluster in the env has it,
   # by setting --key-renew-period on the controller's Deployment. Kubernetes
@@ -85,12 +97,19 @@ kms:
   # overrides the KMS endpoint, for local emulators only
   endpoint: ""
 
-# how often the agent reads the controller and checks in
+# How often the agent reads the controller and checks in, from 5s to 5m.
+# The control plane counts the agent healthy for three intervals after its
+# last check-in, and at least 45 seconds, and keeps choosing it for seals
+# meanwhile, first for seals in its own region. So with a long interval an
+# agent that stops is still sent seals for a long time: up to 15 minutes at
+# 5m, each seal failing when it expires after 2 minutes. Keep the default
+# unless check-ins cost too much, and run more than one seal-capable agent.
 checkinInterval: 15s
 
 # On shutdown the agent finishes the command it is running and reports its
-# result, within 45 seconds (a held commands poll and a few commands). Keep
-# this above that.
+# result, within 45 seconds (a held commands poll and a few commands), then
+# reports those it could not finish as failed, within 10 more. Keep this
+# above 55.
 terminationGracePeriodSeconds: 60
 
 log:
