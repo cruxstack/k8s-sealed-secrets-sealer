@@ -20,20 +20,41 @@ export function shortFingerprint(fingerprint: string, digits = 12): string {
   return `${algorithm}${digest.slice(0, digits)}…`;
 }
 
-/** Format how long ago a timestamp was, e.g. "12s ago" or "3h ago". */
+/**
+ * How far a timestamp is from now, in the past ("12s ago", "3h ago") or the
+ * future ("in 40m", "in 2d"); "just now" within a few seconds. Show it with
+ * the absolute time (formatDateTime) in the element's title.
+ */
+export function relativeTime(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return "unknown";
+  const diff = Math.round((then.getTime() - now.getTime()) / 1000);
+  const seconds = Math.abs(diff);
+  if (seconds < 5) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const span =
+    seconds < 60
+      ? `${seconds}s`
+      : minutes < 60
+        ? `${minutes}m`
+        : hours < 48
+          ? `${hours}h`
+          : `${Math.floor(hours / 24)}d`;
+  return diff < 0 ? `${span} ago` : `in ${span}`;
+}
+
+/**
+ * How long ago something happened, e.g. "12s ago" or "3h ago". A time a
+ * little ahead of this browser's clock counts as now.
+ */
 export function timeAgo(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return "unknown";
-  const seconds = Math.max(
-    0,
-    Math.round((now.getTime() - then.getTime()) / 1000),
+  return relativeTime(
+    new Date(Math.min(then.getTime(), now.getTime())).toISOString(),
+    now,
   );
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
 }
 
 /** Format a timestamp as a short, locale-aware date and time. */
@@ -44,9 +65,23 @@ export function formatDateTime(iso: string): string {
     year: "numeric",
     month: "short",
     day: "numeric",
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/**
+ * Text from the server as a sentence: a capital first letter and a full
+ * stop. A first word that is an identifier (a path, `metadata.name`) keeps
+ * its case.
+ */
+export function sentence(text: string): string {
+  let out = text.trim();
+  if (out === "") return out;
+  if (/^[a-z][a-z-]*(?=[\s,;:]|$)/.test(out)) {
+    out = out.charAt(0).toUpperCase() + out.slice(1);
+  }
+  return /[.!?…]$/.test(out) ? out : `${out}.`;
 }
 
 /**

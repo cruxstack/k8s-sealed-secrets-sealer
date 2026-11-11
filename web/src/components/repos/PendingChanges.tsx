@@ -16,8 +16,8 @@ import {
   sessionQueryKey,
 } from "@/api/queries/sessions";
 import type { PendingChange, PullRequest, SealSession } from "@/api/types";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { regionList } from "./keys";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,7 +28,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatDateTime, safeHttpUrl, timeAgo } from "@/lib/utils";
+import { RegionTag } from "@/components/ui/region-tag";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { CardHeading } from "@/components/ui/section-heading";
+import { safeHttpUrl } from "@/lib/utils";
+import { regionList } from "./keys";
 
 function plural(n: number, one: string, many: string) {
   return n === 1 ? `1 ${one}` : `${n} ${many}`;
@@ -39,12 +43,25 @@ function keyIn(c: PendingChange): string {
   return c.regions?.length ? `${c.key} in ${regionList(c.regions)}` : c.key;
 }
 
-/** The files a session changes, each with its keys, in order. */
-function filesOf(changes: PendingChange[]): [string, string[]][] {
-  const files = new Map<string, string[]>();
-  for (const c of changes)
-    files.set(c.path, [...(files.get(c.path) ?? []), keyIn(c)]);
+/** The files a session changes, each with its changes, in order. */
+function filesOf(changes: PendingChange[]): [string, PendingChange[]][] {
+  const files = new Map<string, PendingChange[]>();
+  for (const c of changes) files.set(c.path, [...(files.get(c.path) ?? []), c]);
   return [...files];
+}
+
+/** A change's key in monospace, then its regions as tags. */
+function KeyChip({ change }: { change: PendingChange }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <code className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-xs">
+        {change.key}
+      </code>
+      {change.regions?.map((r) => (
+        <RegionTag key={r} region={r} />
+      ))}
+    </span>
+  );
 }
 
 function ChangeItem({
@@ -65,19 +82,17 @@ function ChangeItem({
   return (
     <li className="flex items-start gap-2 py-2 pr-2 pl-4">
       <div className="min-w-0 flex-1 space-y-0.5">
-        <p className="flex min-w-0 items-center gap-1.5">
+        <p className="flex min-w-0 flex-wrap items-center gap-1.5">
           <code className="truncate font-mono text-[13px] font-medium">
             {change.key}
           </code>
           {change.regions?.map((r) => (
-            <Badge
+            <RegionTag
               key={r}
-              variant="outline"
-              className="shrink-0 font-mono"
+              region={r}
+              className="shrink-0"
               title={`Sealed for ${r} only`}
-            >
-              {r}
-            </Badge>
+            />
           ))}
           {change.key_revoked && (
             <Badge
@@ -103,12 +118,13 @@ function ChangeItem({
             {change.regions?.length ? ` in ${regionList(change.regions)}` : ""}
           </span>{" "}
           ·{" "}
-          <time
-            dateTime={change.sealed_at}
-            title={`Sealed by ${agent} with ${change.fingerprint}, ${formatDateTime(change.sealed_at)}`}
-          >
-            {timeAgo(change.sealed_at)}
-          </time>
+          <RelativeTime
+            iso={change.sealed_at}
+            past
+            describe={(at) =>
+              `Sealed by ${agent} with ${change.fingerprint}, ${at}`
+            }
+          />
         </p>
       </div>
       <Button
@@ -139,22 +155,10 @@ interface ChangesProps {
   onSelectFile: (path: string) => void;
 }
 
-function Heading({ count }: { count: number }) {
-  return (
-    <h2
-      id="pending-heading"
-      className="flex items-center gap-2 text-sm font-semibold"
-    >
-      Pending changes
-      <Badge variant={count > 0 ? "default" : "secondary"}>{count}</Badge>
-    </h2>
-  );
-}
-
 /**
  * The user's pending changes to a repository, like a cart beside the files:
  * open a pull request with them, remove one, or discard them all. Without a
- * session it says what will gather here.
+ * change it says what will gather here.
  */
 export function PendingChanges({
   session,
@@ -164,10 +168,12 @@ export function PendingChanges({
   return (
     <section
       aria-labelledby="pending-heading"
-      className="shrink-0 overflow-hidden rounded-xl border bg-card shadow-xs"
+      className="shrink-0 overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
       <div className="border-b border-border px-4 py-3">
-        <Heading count={0} />
+        <CardHeading id="pending-heading" count={0}>
+          Pending changes
+        </CardHeading>
       </div>
       <p className="px-4 py-3 text-sm text-muted-foreground">{NOTHING_YET}</p>
     </section>
@@ -198,8 +204,13 @@ function SessionChanges({
       setConfirming(null);
       queryClient.setQueryData(sessionQueryKey(owner, repo), null);
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast(
+      toast.success(
         `Discarded ${plural(changes.length, "pending change", "pending changes")}`,
+        {
+          description: (
+            <code className="font-mono text-xs">{session.repository}</code>
+          ),
+        },
       );
     },
   });
@@ -217,89 +228,113 @@ function SessionChanges({
     mutationFn: (change: PendingChange) =>
       removeChange(owner, repo, session.id, change.id),
     onSuccess: (_, change) =>
-      toast(`Removed ${keyIn(change)}`, { description: change.path }),
+      toast.success(
+        <span>
+          Removed <code className="font-mono">{change.key}</code>
+          {change.regions?.length ? ` in ${regionList(change.regions)}` : ""}
+        </span>,
+        {
+          description: (
+            <code className="font-mono text-xs [overflow-wrap:anywhere]">
+              {change.path}
+            </code>
+          ),
+        },
+      ),
     onSettled: refresh,
   });
   const openBlocked = sealing
     ? "Wait for the seal in progress to finish."
-    : changes.length === 0
-      ? "Seal a value first."
-      : changes.some((c) => c.key_revoked)
-        ? "Seal again, or remove, the values sealed with a revoked key."
-        : null;
+    : changes.some((c) => c.key_revoked)
+      ? "Seal again, or remove, the values sealed with a revoked key."
+      : null;
 
   return (
     <section
       aria-labelledby="pending-heading"
-      className="shrink-0 overflow-hidden rounded-xl border bg-card shadow-xs"
+      className="shrink-0 overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
       <div className="space-y-0.5 border-b border-border px-4 py-3">
-        <Heading count={changes.length} />
+        <CardHeading id="pending-heading" count={changes.length}>
+          Pending changes
+        </CardHeading>
         <p className="text-xs text-muted-foreground">
           On <code className="font-mono">{session.branch}</code> at{" "}
           <code className="font-mono" title={session.commit}>
             {session.commit.slice(0, 7)}
-          </code>
-          , kept until{" "}
-          <time
-            dateTime={session.expires_at}
-            title={`${formatDateTime(session.expires_at)}; sealing again extends it`}
-          >
-            {new Date(session.expires_at).toLocaleTimeString(undefined, {
-              hour: "numeric",
-              minute: "2-digit",
-            })}
-          </time>
+          </code>{" "}
+          · expires{" "}
+          <RelativeTime
+            iso={session.expires_at}
+            describe={(at) => `${at}; sealing again extends it`}
+          />
         </p>
       </div>
 
       {remove.error && (
-        <p role="alert" className="px-4 py-3 text-sm text-destructive">
-          Could not remove the change: {extractApiError(remove.error)}
-        </p>
+        <div className="px-4 pt-3">
+          <Alert variant="destructive" role="alert">
+            Could not remove the change: {extractApiError(remove.error)}
+          </Alert>
+        </div>
       )}
       {changes.length === 0 ? (
         <p className="px-4 py-3 text-sm text-muted-foreground">{NOTHING_YET}</p>
       ) : (
-        <ul
-          aria-label="Pending changes"
-          className="max-h-72 divide-y divide-border/60 overflow-y-auto"
-        >
-          {changes.map((c) => (
-            <ChangeItem
-              key={c.id}
-              change={c}
-              removing={remove.isPending && remove.variables?.id === c.id}
-              onRemove={() => remove.mutate(c)}
-              onSelectFile={() => onSelectFile(c.path)}
-            />
-          ))}
-        </ul>
-      )}
+        <>
+          <ul
+            aria-label="Pending changes"
+            className="max-h-72 divide-y divide-border overflow-y-auto"
+          >
+            {changes.map((c) => (
+              <ChangeItem
+                key={c.id}
+                change={c}
+                removing={remove.isPending && remove.variables?.id === c.id}
+                onRemove={() => remove.mutate(c)}
+                onSelectFile={() => onSelectFile(c.path)}
+              />
+            ))}
+          </ul>
 
-      <div className="flex items-center gap-2 border-t border-border px-4 py-3">
-        <Button
-          size="sm"
-          className="flex-1"
-          disabled={openBlocked !== null}
-          title={openBlocked ?? undefined}
-          onClick={() => {
-            open.reset();
-            setConfirming("open");
-          }}
-        >
-          <GitPullRequest className="mr-1.5 h-4 w-4" aria-hidden="true" />
-          Open pull request
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-muted-foreground hover:text-destructive"
-          onClick={() => setConfirming("discard")}
-        >
-          Discard
-        </Button>
-      </div>
+          <div className="space-y-2 border-t border-border px-4 py-3">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                className="flex-1"
+                disabled={openBlocked !== null}
+                title={openBlocked ?? undefined}
+                aria-describedby={
+                  openBlocked ? "open-pull-request-blocked" : undefined
+                }
+                onClick={() => {
+                  open.reset();
+                  setConfirming("open");
+                }}
+              >
+                <GitPullRequest className="mr-1.5 h-4 w-4" aria-hidden="true" />
+                Open pull request
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-destructive"
+                onClick={() => setConfirming("discard")}
+              >
+                Discard
+              </Button>
+            </div>
+            {openBlocked && (
+              <p
+                id="open-pull-request-blocked"
+                className="text-xs text-muted-foreground"
+              >
+                {openBlocked}
+              </p>
+            )}
+          </div>
+        </>
+      )}
 
       <Dialog
         open={confirming === "open"}
@@ -324,33 +359,28 @@ function SessionChanges({
           </DialogHeader>
           <ul
             aria-label="Files in the pull request"
-            className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-border bg-muted/40 p-3 text-sm"
+            className="max-h-48 space-y-3 overflow-y-auto rounded-lg border border-border bg-muted/40 p-3 text-sm"
           >
-            {files.map(([path, keys]) => (
-              <li key={path} className="space-y-1">
+            {files.map(([path, mine]) => (
+              <li key={path} className="space-y-1.5">
                 <div
                   className="truncate font-mono text-xs font-medium"
                   title={path}
                 >
                   {path}
                 </div>
-                <div className="flex flex-wrap gap-1">
-                  {keys.map((k) => (
-                    <code
-                      key={k}
-                      className="rounded bg-background px-1.5 py-0.5 font-mono text-xs"
-                    >
-                      {k}
-                    </code>
+                <div className="flex flex-wrap gap-1.5">
+                  {mine.map((c) => (
+                    <KeyChip key={c.id} change={c} />
                   ))}
                 </div>
               </li>
             ))}
           </ul>
           {open.error && (
-            <p role="alert" className="text-sm text-destructive">
+            <Alert variant="destructive" role="alert">
               Could not open the pull request: {extractApiError(open.error)}
-            </p>
+            </Alert>
           )}
           <DialogFooter>
             <DialogClose asChild>
@@ -378,15 +408,16 @@ function SessionChanges({
           <DialogHeader>
             <DialogTitle>Discard pending changes?</DialogTitle>
             <DialogDescription>
-              {changes.length === 0
-                ? `This closes your session for ${session.repository}.`
-                : `This removes ${plural(changes.length, "pending change", "pending changes")} to ${session.repository}. Nothing was committed, so nothing changes on GitHub.`}
+              This removes{" "}
+              {plural(changes.length, "pending change", "pending changes")} to{" "}
+              <code className="font-mono">{session.repository}</code>. Nothing
+              was committed, so nothing changes on GitHub.
             </DialogDescription>
           </DialogHeader>
           {discard.error && (
-            <p role="alert" className="text-sm text-destructive">
+            <Alert variant="destructive" role="alert">
               Could not discard: {extractApiError(discard.error)}
-            </p>
+            </Alert>
           )}
           <DialogFooter>
             <DialogClose asChild>
@@ -420,7 +451,7 @@ export function OpenedDialog({
       <DialogContent className="max-w-md text-center">
         {pr && (
           <>
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success/15">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success-subtle">
               <CheckCircle2
                 className="h-8 w-8 text-success"
                 aria-hidden="true"
@@ -442,16 +473,17 @@ export function OpenedDialog({
                 </span>
               </DialogDescription>
             </DialogHeader>
+            {/* the way forward and the way back, the same size */}
             <div className="flex flex-col gap-2 pt-2">
               {url && (
-                <Button asChild size="lg">
+                <Button asChild className="w-full">
                   <a href={url} target="_blank" rel="noopener noreferrer">
                     View pull request
                     <ExternalLink className="ml-2 h-4 w-4" aria-hidden="true" />
                   </a>
                 </Button>
               )}
-              <Button variant="outline" onClick={onClose}>
+              <Button variant="outline" className="w-full" onClick={onClose}>
                 Keep sealing
               </Button>
             </div>

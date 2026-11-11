@@ -30,6 +30,8 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { Badge } from "@/components/ui/badge";
+import { DialogOverlay } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
 import { useAuth } from "@/lib/auth";
 import { useEnv } from "@/lib/env";
@@ -58,7 +60,7 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
       {children}
       <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
         <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[1px]" />
+          <DialogOverlay />
           <DialogPrimitive.Content
             className="fixed top-[12vh] left-1/2 z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 overflow-hidden rounded-xl border bg-popover shadow-2xl"
             aria-describedby={undefined}
@@ -110,7 +112,8 @@ function Palette({ onDone }: { onDone: () => void }) {
   const navigate = useNavigate();
   const { envs } = useAuth();
   const env = useEnv();
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
+  const [search, setSearch] = useState("");
   const logout = useLogout();
   // repositories are listed for the env the page is in
   const repos = useQuery({
@@ -133,17 +136,20 @@ function Palette({ onDone }: { onDone: () => void }) {
     },
     [onDone],
   );
-  const dark =
-    theme === "dark" ||
-    (theme === "system" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const dark = resolvedTheme === "dark";
 
   return (
     <Command loop>
-      <CommandInput placeholder="Search repositories and pages…" />
+      <CommandInput
+        placeholder="Search repositories and pages…"
+        value={search}
+        onValueChange={setSearch}
+      />
       <CommandList>
         <CommandEmpty>
-          {repos.isPending ? "Loading repositories…" : "Nothing matches."}
+          {repos.isPending
+            ? "Loading repositories…"
+            : `No repository or page matches “${search.trim()}”.`}
         </CommandEmpty>
         {repos.data && repos.data.length > 0 && (
           <CommandGroup heading="Repositories">
@@ -160,11 +166,11 @@ function Palette({ onDone }: { onDone: () => void }) {
                   hint={
                     <>
                       {count ? (
-                        <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
-                          {count} pending
-                        </span>
+                        <Badge variant="info">{count} pending</Badge>
                       ) : null}
-                      {r.access === "read" && <span>read only</span>}
+                      {r.access === "read" && (
+                        <Badge variant="secondary">Read only</Badge>
+                      )}
                     </>
                   }
                   onSelect={() =>
@@ -223,7 +229,7 @@ function Palette({ onDone }: { onDone: () => void }) {
           </CommandGroup>
         )}
         {envs.length > 1 && (
-          <CommandGroup heading="Environments">
+          <CommandGroup heading="Envs">
             {envs
               .filter((e) => e.name !== env?.name)
               .map((e) => (

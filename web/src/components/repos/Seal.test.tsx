@@ -136,9 +136,10 @@ describe("sealing", () => {
     const keys = within(
       screen.getByRole("region", { name: BILLING }),
     ).getByRole("list", { name: "Keys" });
-    expect(
-      within(keys).getByRole("button", { name: /^api-token/ }),
-    ).toHaveTextContent("api-tokenNew, in your pending changes");
+    const row = within(keys).getByRole("button", { name: /^api-token/ });
+    expect(row).toHaveTextContent("api-tokenNew, in your pending changes");
+    // "Seal again" is only for values sealed with a revoked key
+    expect(row).toHaveTextContent(/Replace$/);
     const files = screen.getByRole("list", { name: "Files" });
     expect(
       within(files).getByRole("button", { name: /billing.*1 pending change/ }),
@@ -180,15 +181,17 @@ describe("sealing", () => {
     expect(seal).toBeDisabled();
     fireEvent.change(key, { target: { value: "api-key" } });
     // one document holds it, the other doesn't
-    expect(
-      within(form).getByText(
-        "Replaces api-key where it is set and adds it to the other documents.",
-      ),
-    ).toBeVisible();
+    expect(key).toHaveAccessibleDescription(
+      "Replaces api-key where it is set and adds it to the other documents.",
+    );
     expect(seal).toBeEnabled();
     fireEvent.change(key, { target: { value: "new-key" } });
+    expect(key).toHaveAccessibleDescription(
+      "Adds new-key to spec.encryptedData.",
+    );
+    // keys and fields in the note are monospace
     expect(
-      within(form).getByText("Adds new-key to spec.encryptedData."),
+      within(form).getByText("new-key", { selector: "code" }),
     ).toBeVisible();
     // existing keys are suggested
     const options = Array.from(
@@ -237,6 +240,9 @@ describe("sealing", () => {
     );
     await within(pending).findByText("1", { selector: "span" });
     expect(within(changes).getAllByRole("listitem")).toHaveLength(1);
+    // a toast says what went, the key in monospace
+    const toast = await screen.findByText(/^Removed/);
+    expect(within(toast).getByText("password")).toHaveClass("font-mono");
 
     fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
     const dialog = await screen.findByRole("dialog", {
@@ -443,12 +449,39 @@ describe("sealing", () => {
     ).toHaveTextContent("api-token");
   });
 
-  it("offers no pull request without changes or while a seal is running", async () => {
+  it("shows no pull request footer for a session without changes", async () => {
+    renderAt(
+      PAGE,
+      fakeApi({
+        me: ME,
+        files: { "example-org/apps": listing() },
+        sessions: { "example-org/apps": { ...SESSION } },
+      }),
+    );
+    const pending = await screen.findByRole("region", {
+      name: /pending changes/i,
+    });
+    expect(pending).toHaveTextContent(/Nothing sealed yet/);
+    expect(
+      within(pending).queryByRole("button", { name: "Open pull request" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(pending).queryByRole("button", { name: "Discard" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no pull request while a seal is running, and says why under the button", async () => {
     sealPolling.intervalMs = 60;
     const api = fakeApi({
       me: ME,
       files: { "example-org/apps": listing() },
-      sessions: { "example-org/apps": { ...SESSION } },
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 1,
+          changes: [changeFor({ ...SEAL, key: "password" })],
+        },
+      },
       sealStatuses: ["queued", "sealing", "sealing", "sealing", "sealed"],
     });
     renderAt(PAGE, api);
@@ -458,26 +491,83 @@ describe("sealing", () => {
     const open = within(pending).getByRole("button", {
       name: "Open pull request",
     });
-    expect(open).toBeDisabled();
-    expect(open).toHaveAttribute("title", "Seal a value first.");
+    expect(open).toBeEnabled();
 
     const { key, value, seal } = await openForm();
     fireEvent.change(key, { target: { value: "api-token" } });
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.click(seal);
-    await waitFor(() =>
-      expect(open).toHaveAttribute(
-        "title",
-        "Wait for the seal in progress to finish.",
-      ),
-    );
+    const why = "Wait for the seal in progress to finish.";
+    await waitFor(() => expect(open).toHaveAttribute("title", why));
     expect(open).toBeDisabled();
+    // the reason is on screen, not only in the title
+    expect(within(pending).getByText(why)).toBeVisible();
+    expect(open).toHaveAccessibleDescription(why);
     // nor can a key be picked while it runs
     const keys = screen.getByRole("list", { name: "Keys" });
     expect(
       within(keys).getByRole("button", { name: /^api-key/ }),
     ).toBeDisabled();
     await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
+    expect(within(pending).queryByText(why)).not.toBeInTheDocument();
+  });
+
+  it("clears a seal's status once its change is removed", async () => {
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: { "example-org/apps": { ...SESSION } },
+    });
+    renderAt(PAGE, api);
+    const { form, key, value, seal } = await openForm();
+    fireEvent.change(key, { target: { value: "api-token" } });
+    fireEvent.change(value, { target: { value: "s3cr3t" } });
+    fireEvent.click(seal);
+    await within(form).findByText(/sealed/i, { selector: "span" });
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    await within(pending).findByText("api-token");
+    // the status stays while its change waits
+    expect(
+      within(form).getByText(/sealed/i, { selector: "span" }),
+    ).toBeVisible();
+
+    fireEvent.click(
+      within(pending).getByRole("button", {
+        name: `Remove api-token from ${BILLING}`,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        within(form).queryByText(/sealed/i, { selector: "span" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("clears a seal's status once the changes are discarded", async () => {
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: { "example-org/apps": { ...SESSION } },
+    });
+    renderAt(PAGE, api);
+    const { form, key, value, seal } = await openForm();
+    fireEvent.change(key, { target: { value: "api-token" } });
+    fireEvent.change(value, { target: { value: "s3cr3t" } });
+    fireEvent.click(seal);
+    await within(form).findByText(/sealed/i, { selector: "span" });
+    const pending = screen.getByRole("region", { name: /pending changes/i });
+    await within(pending).findByText("api-token");
+
+    fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Discard pending changes?",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(
+        within(form).queryByText(/sealed/i, { selector: "span" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("asks for a value sealed with a revoked key to be sealed again", async () => {
@@ -503,10 +593,27 @@ describe("sealing", () => {
       name: "Open pull request",
     });
     expect(open).toBeDisabled();
-    expect(open).toHaveAttribute(
-      "title",
-      "Seal again, or remove, the values sealed with a revoked key.",
-    );
+    const why = "Seal again, or remove, the values sealed with a revoked key.";
+    expect(open).toHaveAttribute("title", why);
+    expect(within(pending).getByText(why)).toBeVisible();
+
+    // the key row, its region chips and the file say so too, in amber, not
+    // as a pending value
+    const panel = screen.getByRole("region", { name: BILLING });
+    const keys = within(panel).getByRole("list", { name: "Keys" });
+    const row = within(keys).getByRole("button", { name: /^api-token/ });
+    expect(row).toHaveTextContent("Sealed with a revoked key; seal it again");
+    expect(row).toHaveTextContent(/Seal again$/);
+    expect(
+      within(keys).getByRole("button", {
+        name: "use2: sealed with a revoked key, seal again. Seal api-token for use2 only",
+      }),
+    ).toHaveClass("text-warning");
+    const files = screen.getByRole("list", { name: "Files" });
+    const billing = within(files).getByRole("button", { name: /billing/ });
+    expect(within(billing).getByText("Seal again")).toBeInTheDocument();
+    // and not as a blue pending count
+    expect(within(billing).queryByText("pending")).not.toBeInTheDocument();
   });
 
   it("jumps to a file from the file list or a pending change", async () => {
@@ -538,9 +645,15 @@ describe("sealing", () => {
     const legacy = await screen.findByRole("region", {
       name: "deploy/legacy/sealed-secret.yaml",
     });
-    expect(legacy).toHaveTextContent("cluster-wide scope is not allowed");
+    // the server's problem, as a sentence; a refused scope is a warning
+    expect(legacy).toHaveTextContent("Cluster-wide scope is not allowed.");
+    expect(within(legacy).getByText("Cluster-wide")).toHaveClass(
+      "text-warning",
+    );
     expect(legacy).toHaveTextContent(/can't be sealed into/);
     expect(within(legacy).queryByRole("form")).not.toBeInTheDocument();
+    // nothing can be sealed, so there is no empty key list either
+    expect(legacy).not.toHaveTextContent(/No keys yet/);
 
     // a pending change's file opens that file
     const pending = screen.getByRole("region", { name: /pending changes/i });
@@ -701,9 +814,9 @@ describe("regions", () => {
     expect(
       within(form).getByText(/Sealed for the document in use2/),
     ).toBeVisible();
-    expect(
-      within(form).getByText("Adds db-password to spec.encryptedData in use2."),
-    ).toBeVisible();
+    expect(key).toHaveAccessibleDescription(
+      "Adds db-password to spec.encryptedData in use2.",
+    );
     // the document left out says so
     expect(
       within(panel).getByText("Sealed for 1 of these 2 documents"),

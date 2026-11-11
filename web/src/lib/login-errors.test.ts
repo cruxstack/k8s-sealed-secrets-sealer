@@ -13,11 +13,31 @@ describe("loginErrorMessage", () => {
     expect(loginErrorMessage("not_member")).toMatch(
       /member of the GitHub organization/,
     );
-    expect(loginErrorMessage("not_in_team")).toMatch(/GitHub team allowed/);
-    expect(loginErrorMessage("state_mismatch")).toMatch(/state mismatch/);
+    expect(loginErrorMessage("not_in_team")).toMatch(
+      /in a team that may use Sealer/,
+    );
+    expect(loginErrorMessage("state_mismatch")).toMatch(/couldn't be verified/);
     expect(loginErrorMessage("github_error")).toMatch(
       /GitHub returned an error/,
     );
+  });
+
+  it("says what to do next for every code", () => {
+    for (const code of [
+      "access_denied",
+      "not_member",
+      "not_in_team",
+      "state_mismatch",
+      "github_error",
+      "something_else",
+    ]) {
+      expect(loginErrorMessage(code)).toMatch(/sign in again/i);
+    }
+    // a refusal says who can let the user in
+    expect(loginErrorMessage("not_member")).toMatch(
+      /ask an organization owner/i,
+    );
+    expect(loginErrorMessage("not_in_team")).toMatch(/ask an admin/i);
   });
 
   it("ignores inherited Object.prototype keys", () => {

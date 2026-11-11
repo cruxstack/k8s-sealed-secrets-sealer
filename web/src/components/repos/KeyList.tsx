@@ -6,8 +6,10 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  RotateCcw,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { regionTagClass } from "@/components/ui/region-tag";
+import { CardHeading } from "@/components/ui/section-heading";
 import { cn } from "@/lib/utils";
 import {
   regionList,
@@ -25,7 +27,14 @@ export function keyDetail(k: KeyStatus, docs: number): string {
     const pendingIn = k.regions
       .filter((r) => r.state === "pending")
       .map((r) => r.region);
+    const revokedIn = k.regions
+      .filter((r) => r.state === "revoked")
+      .map((r) => r.region);
     switch (k.state) {
+      case "revoked":
+        return revokedIn.length < needed.length
+          ? `Sealed with a revoked key in ${regionList(revokedIn)}; seal it again`
+          : "Sealed with a revoked key; seal it again";
       case "set":
         return needed.length === k.regions.length
           ? "Set in every region"
@@ -66,6 +75,8 @@ export function keyDetail(k: KeyStatus, docs: number): string {
       return "New, in your pending changes";
     case "replaced":
       return "New value in your pending changes";
+    case "revoked":
+      return "Sealed with a revoked key; seal it again";
   }
 }
 
@@ -93,14 +104,20 @@ const LOOK: Record<
   },
   new: {
     icon: Plus,
-    iconClass: "text-primary",
-    text: "text-primary",
-    action: "Seal again",
+    iconClass: "text-info",
+    text: "text-info",
+    action: "Replace",
   },
   replaced: {
     icon: RefreshCw,
-    iconClass: "text-primary",
-    text: "text-primary",
+    iconClass: "text-info",
+    text: "text-info",
+    action: "Replace",
+  },
+  revoked: {
+    icon: RotateCcw,
+    iconClass: "text-warning",
+    text: "text-warning",
     action: "Seal again",
   },
 };
@@ -116,8 +133,13 @@ const REGION_LOOK: Record<
   },
   pending: {
     icon: Plus,
-    chip: "border-primary/30 bg-primary/10 text-primary dark:bg-primary/20",
+    chip: "border-info/40 bg-info-subtle text-info",
     says: "pending",
+  },
+  revoked: {
+    icon: RotateCcw,
+    chip: "border-warning/60 bg-warning-subtle text-warning",
+    says: "sealed with a revoked key, seal again",
   },
   partial: {
     icon: CircleDashed,
@@ -131,7 +153,7 @@ const REGION_LOOK: Record<
   },
   unneeded: {
     icon: Minus,
-    chip: "border-transparent text-muted-foreground/80",
+    chip: "border-transparent text-muted-foreground",
     says: "not needed: its hints leave the key out",
   },
 };
@@ -158,10 +180,7 @@ function RegionChips({
         const look = REGION_LOOK[r.state];
         const Icon = look.icon;
         const name = r.region || "no region";
-        const className = cn(
-          "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 font-mono text-xs",
-          look.chip,
-        );
+        const className = cn(regionTagClass, "h-6", look.chip);
         const body = (
           <>
             <Icon className="h-3 w-3" aria-hidden="true" />
@@ -233,15 +252,11 @@ export function KeyList({
   const regional = keys.some((k) => k.regions.length > 0);
   return (
     <section aria-labelledby={headingId}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-2">
         <div className="flex items-center gap-2">
-          <h3
-            id={headingId}
-            className="flex items-center gap-2 text-sm font-semibold"
-          >
+          <CardHeading as="h3" id={headingId} count={keys.length}>
             Keys
-            <Badge variant="secondary">{keys.length}</Badge>
-          </h3>
+          </CardHeading>
           {attention > 0 && (
             <span className="text-xs text-warning">{attention} to seal</span>
           )}
@@ -255,11 +270,11 @@ export function KeyList({
         )}
       </div>
       {keys.length === 0 ? (
-        <p className="px-5 pb-4 text-sm text-muted-foreground">
+        <p className="px-4 pb-4 text-sm text-muted-foreground">
           No keys yet.{onPick && " Seal a value to add the first one."}
         </p>
       ) : (
-        <ul aria-label="Keys" className="px-2 pb-2">
+        <ul aria-label="Keys" className="px-1 pb-2">
           {keys.map((k) => {
             const look = LOOK[k.state];
             const Icon = look.icon;
@@ -288,8 +303,7 @@ export function KeyList({
                 key={k.key}
                 className={cn(
                   "flex flex-wrap items-center gap-x-2 rounded-lg",
-                  current === k.key &&
-                    "bg-primary/8 ring-1 ring-primary/30 dark:bg-primary/15",
+                  current === k.key && "bg-selected ring-1 ring-primary",
                 )}
               >
                 {onPick ? (

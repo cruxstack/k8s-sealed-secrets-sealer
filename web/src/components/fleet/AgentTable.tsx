@@ -1,15 +1,26 @@
 import type { FleetAgent } from "@/api/types";
 import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { formatDateTime, shortFingerprint, timeAgo } from "@/lib/utils";
+import { RegionTag } from "@/components/ui/region-tag";
+import { RelativeTime } from "@/components/ui/relative-time";
+import {
+  Dash,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { shortFingerprint, timeAgo } from "@/lib/utils";
 
 /** Health of one agent, as shown in the table. */
 export function agentHealth(agent: FleetAgent): {
   label: string;
-  variant: "success" | "destructive" | "secondary";
+  variant: "success" | "destructive";
 } {
+  // an agent that never checked in cannot seal: a failure, not a warning
   if (!agent.checked_in)
-    return { label: "Never checked in", variant: "secondary" };
+    return { label: "Never checked in", variant: "destructive" };
   if (!agent.healthy) return { label: "Unhealthy", variant: "destructive" };
   return { label: "Healthy", variant: "success" };
 }
@@ -45,14 +56,6 @@ function KeyCount({
   );
 }
 
-function Dash() {
-  return (
-    <span className="text-muted-foreground" aria-label="none">
-      —
-    </span>
-  );
-}
-
 function AgentRow({
   agent,
   envKey,
@@ -67,14 +70,15 @@ function AgentRow({
   const health = agentHealth(agent);
   const missing = agent.missing_keys ?? [];
   const issues = agent.issues ?? [];
-  const capabilities =
-    agent.capabilities ?? agent.registered_capabilities ?? [];
+  const capabilities = [
+    ...(agent.capabilities ?? agent.registered_capabilities ?? []),
+  ].sort();
   const active = agent.controller?.active_fingerprint;
   // the cluster, when its name says more than the agent's
   const cluster = agent.cluster !== agent.id ? agent.cluster : "";
 
   return (
-    <tr className="border-b border-border align-top last:border-0">
+    <TableRow className="align-top">
       <th
         scope="row"
         className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
@@ -89,23 +93,25 @@ function AgentRow({
           </>
         )}
       </th>
-      <td className="px-4 py-3 whitespace-nowrap">{agent.region}</td>
-      <td className="px-4 py-3 whitespace-nowrap">
+      <TableCell className="whitespace-nowrap">
+        {agent.region ? <RegionTag region={agent.region} /> : <Dash />}
+      </TableCell>
+      <TableCell className="whitespace-nowrap">
         <Badge variant={health.variant}>{health.label}</Badge>
         {agent.last_checkin && (
-          <time
+          <RelativeTime
             className="ml-2 text-xs text-muted-foreground"
-            dateTime={agent.last_checkin}
-            title={`Last check-in ${formatDateTime(agent.last_checkin)}`}
-          >
-            {timeAgo(agent.last_checkin, now)}
-          </time>
+            iso={agent.last_checkin}
+            now={now}
+            past
+            describe={(at) => `Last check-in ${at}`}
+          />
         )}
-      </td>
-      <td className="px-4 py-3 pt-3.5 font-mono text-xs">
+      </TableCell>
+      <TableCell className="pt-3.5 font-mono text-xs">
         {agent.agent_version ?? <Dash />}
-      </td>
-      <td className="px-4 py-3">
+      </TableCell>
+      <TableCell>
         {capabilities.length > 0 ? (
           <ul className="flex gap-1" aria-label="Capabilities">
             {capabilities.map((c) => (
@@ -117,8 +123,8 @@ function AgentRow({
         ) : (
           <Dash />
         )}
-      </td>
-      <td className="px-4 py-3 text-right tabular-nums">
+      </TableCell>
+      <TableCell className="text-right tabular-nums">
         {agent.checked_in ? (
           <>
             <KeyCount agent={agent} keyLimit={keyLimit} />
@@ -131,8 +137,8 @@ function AgentRow({
         ) : (
           <Dash />
         )}
-      </td>
-      <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">
+      </TableCell>
+      <TableCell className="text-right whitespace-nowrap tabular-nums">
         {agent.joining && (
           <Badge
             variant="warning"
@@ -160,8 +166,8 @@ function AgentRow({
         ) : (
           <Dash />
         )}
-      </td>
-      <td className="px-4 py-3">
+      </TableCell>
+      <TableCell>
         {active ? (
           <span className="flex items-center gap-1.5 whitespace-nowrap">
             <code className="font-mono text-xs" title={active}>
@@ -180,8 +186,8 @@ function AgentRow({
         ) : (
           <Dash />
         )}
-      </td>
-      <td className="px-4 py-3 text-xs">
+      </TableCell>
+      <TableCell className="text-xs">
         {issues.length > 0 ? (
           <ul className="list-disc space-y-1 pl-4">
             {issues.map((issue) => (
@@ -191,8 +197,8 @@ function AgentRow({
         ) : (
           <Dash />
         )}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -211,52 +217,32 @@ export function AgentTable({
   now?: Date;
 }) {
   return (
-    <div className="overflow-x-auto rounded-xl border bg-card">
-      <table className="w-full text-sm">
-        <caption className="sr-only">Agents in this environment</caption>
-        <thead className="border-b border-border bg-muted/50 text-xs tracking-wide whitespace-nowrap text-muted-foreground uppercase">
-          <tr>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Agent
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Region
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Health
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Version
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Capabilities
-            </th>
-            <th scope="col" className="px-4 py-3 text-right font-semibold">
-              Keys
-            </th>
-            <th scope="col" className="px-4 py-3 text-right font-semibold">
-              Missing
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Active key
-            </th>
-            <th scope="col" className="px-4 py-3 text-left font-semibold">
-              Issues
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {agents.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              envKey={envKey}
-              keyLimit={keyLimit}
-              now={now}
-            />
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table>
+      <caption className="sr-only">Agents in this env</caption>
+      <TableHeader>
+        <tr>
+          <TableHead>Agent</TableHead>
+          <TableHead>Region</TableHead>
+          <TableHead>Health</TableHead>
+          <TableHead>Version</TableHead>
+          <TableHead>Capabilities</TableHead>
+          <TableHead className="text-right">Keys</TableHead>
+          <TableHead className="text-right">Missing</TableHead>
+          <TableHead>Active key</TableHead>
+          <TableHead>Issues</TableHead>
+        </tr>
+      </TableHeader>
+      <tbody>
+        {agents.map((agent) => (
+          <AgentRow
+            key={agent.id}
+            agent={agent}
+            envKey={envKey}
+            keyLimit={keyLimit}
+            now={now}
+          />
+        ))}
+      </tbody>
+    </Table>
   );
 }
