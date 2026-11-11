@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -340,5 +342,140 @@ func TestUsage_Run(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+// A count cut short keeps what it matched, so the next goes on from there
+// instead of decrypting it all again.
+func TestUsage_KeepsProgressWhenACountIsCutShort(t *testing.T) {
+	x := newPair(t, time.Now().Add(-72*time.Hour))
+	c := newUsageCluster(t, appsOnly, []runtime.Object{x.secret("x")},
+		sealedSecret("apps", "s", nil, map[string]string{"a": seal(t, x, "apps", "s", ssv1alpha1.StrictScope)}),
+		sealedSecret("apps", "t", nil, map[string]string{"a": seal(t, x, "apps", "t", ssv1alpha1.StrictScope)}))
+	c.usage.workers = 1
+	// the count's time runs out once it matched one SealedSecret
+	ctx, cancel := context.WithCancel(context.Background())
+	var matched []string
+	c.usage.onMatched = func(id string) {
+		matched = append(matched, id)
+		cancel()
+	}
+	if _, err := c.usage.Count(ctx); err == nil || !strings.Contains(err.Error(), "the next count goes on from there") {
+		t.Fatalf("count cut short: %v", err)
+	}
+	if len(matched) != 1 || len(c.usage.cached) != 1 || c.usage.cached[matched[0]] == nil {
+		t.Fatalf("matched %v, cached %d", matched, len(c.usage.cached))
+	}
+	// the next count decrypts only the other
+	first := matched[0]
+	matched = nil
+	c.usage.onMatched = func(id string) { matched = append(matched, id) }
+	r := c.count(t)
+	if len(matched) != 1 || matched[0] == first || r.Keys[x.fp].Values != 2 {
+		t.Fatalf("second count matched %v (first %s), keys %+v", matched, first, r.Keys)
+	}
+}
+
+// A count whose list fails decrypts nothing and keeps what earlier counts
+// matched: a list call never waits on decryption, so its continue token
+// does not expire meanwhile.
+func TestUsage_AFailedListKeepsTheCache(t *testing.T) {
+	x := newPair(t, time.Now().Add(-72*time.Hour))
+	c := newUsageCluster(t, appsOnly, []runtime.Object{x.secret("x")},
+		sealedSecret("apps", "s", nil, map[string]string{"a": seal(t, x, "apps", "s", ssv1alpha1.StrictScope)}))
+	c.count(t)
+	c.sealedSecrets.PrependReactor("list", "sealedsecrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() == ns {
+			return true, nil, errors.New("the provided continue parameter is too old")
+		}
+		return false, nil, nil
+	})
+	if _, err := c.usage.Count(context.Background()); err == nil {
+		t.Fatal("count succeeded")
+	}
+	if s := c.usage.cached["apps/s"]; s == nil || s.values[0] != x.fp {
+		t.Fatalf("cached after a failed list = %+v", s)
+	}
+}
+
+// A count decrypts at most maxPending values afresh, and reports itself
+// incomplete; the next goes on from there until it is complete.
+func TestUsage_CountsALargeClusterOverSeveralCounts(t *testing.T) {
+	x := newPair(t, time.Now().Add(-72*time.Hour))
+	var sealed []runtime.Object
+	for i := range 5 {
+		name := fmt.Sprintf("s%d", i)
+		sealed = append(sealed, sealedSecret("apps", name, nil, map[string]string{
+			"a": seal(t, x, "apps", name, ssv1alpha1.StrictScope), "b": seal(t, x, "apps", name, ssv1alpha1.StrictScope),
+		}))
+	}
+	c := newUsageCluster(t, appsOnly, []runtime.Object{x.secret("x")}, sealed...)
+	c.usage.maxPending = 4
+	var errs []error
+	for range 3 {
+		_, err := c.usage.Count(context.Background())
+		errs = append(errs, err)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "wait for the next count") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if len(errs) != 3 || errs[2] != nil {
+		t.Fatalf("counts = %v, want two incomplete and then a complete one", errs)
+	}
+	if r := c.usage.Latest(); r.Error != "" || r.SealedSecrets != 5 || r.Keys[x.fp].Values != 10 {
+		t.Fatalf("latest = %+v", r)
+	}
+}
+
+// After a count that failed or overran its interval, Run waits the whole
+// interval.
+func TestUsage_Pause(t *testing.T) {
+	u := NewUsage(UsageOptions{Interval: time.Minute})
+	for _, tc := range []struct {
+		elapsed time.Duration
+		failed  bool
+		want    time.Duration
+	}{
+		{10 * time.Second, false, 50 * time.Second},
+		{10 * time.Second, true, time.Minute},
+		{2 * time.Minute, false, time.Minute},
+	} {
+		if got := u.pause(tc.elapsed, tc.failed); got != tc.want {
+			t.Errorf("pause(%s, %v) = %s, want %s", tc.elapsed, tc.failed, got, tc.want)
+		}
+	}
+}
+
+// Only the head of a value is decoded: its length and RSA part.
+func TestRSAPart(t *testing.T) {
+	x := newPair(t, time.Now().Add(-time.Hour))
+	ct, err := base64.StdEncoding.DecodeString(seal(t, x, "apps", "s", ssv1alpha1.StrictScope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := int(ct[0])<<8 | int(ct[1])
+	if got := rsaPart(base64.StdEncoding.EncodeToString(ct)); !bytes.Equal(got, ct[2:2+n]) {
+		t.Fatalf("rsaPart = %d bytes, want %d", len(got), n)
+	}
+	for _, bad := range []string{"", "AA", "!!!!", base64.StdEncoding.EncodeToString(ct[:n/2])} {
+		if got := rsaPart(bad); got != nil {
+			t.Errorf("rsaPart(%.12q...) = %d bytes", bad, len(got))
+		}
+	}
+}
+
+// Errors are cut at a rune boundary, never past the limit.
+func TestTruncate(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{{"abc", 5, "abc"}, {"abcdef", 3, "abc"}, {"aé", 2, "a"}, {"日本", 4, "日"}} {
+		if got := truncate(tc.in, tc.n); got != tc.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
 	}
 }

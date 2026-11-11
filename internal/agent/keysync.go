@@ -64,13 +64,16 @@ type KeySync struct {
 	logger      *slog.Logger
 	now         func() time.Time
 
+	// droppedMu guards dropped: the controller's pods, by UID, that were
+	// running when this agent deleted key Secrets, which hold the deleted
+	// keys until they restart. It has its own lock so the check-in loop
+	// can ask about it while a restart rolls.
+	droppedMu sync.Mutex
+	dropped   map[types.UID]bool
+
 	// restartMu serializes controller restarts, from restores, removals
 	// and the check-in loop, and guards the fields below
-	restartMu sync.Mutex
-	// dropped are the controller's pods, by UID, that were running when
-	// this agent deleted key Secrets: they hold the deleted keys until they
-	// restart
-	dropped        map[types.UID]bool
+	restartMu      sync.Mutex
 	nextRestart    time.Time
 	restartBackoff time.Duration
 	// lastCreate is when this agent last created a key Secret, by the

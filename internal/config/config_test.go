@@ -143,7 +143,7 @@ func TestLoadAgent_Defaults(t *testing.T) {
 	if cfg.ControllerName != "sealed-secrets-controller" || cfg.ControllerDeployment != cfg.ControllerName {
 		t.Errorf("controller = %q / %q", cfg.ControllerName, cfg.ControllerDeployment)
 	}
-	if cfg.CheckInInterval != 15*time.Second || cfg.KeyUsageInterval != 5*time.Minute || cfg.HTTPAddr != ":8081" || cfg.TokenFile != DefaultTokenFile {
+	if cfg.CheckInInterval != 15*time.Second || cfg.KeyUsageInterval != 5*time.Minute || cfg.MemoryLimit != 0 || cfg.HTTPAddr != ":8081" || cfg.TokenFile != DefaultTokenFile {
 		t.Errorf("cfg = %+v", cfg)
 	}
 	if len(cfg.Capabilities) != 1 || !cfg.HasCapability("seal") {
@@ -202,6 +202,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_CAPABILITIES":       "seal,root,cleanup",
 		"APP_LOG_LEVEL":          "loud",
 		"APP_LOG_FORMAT":         "xml",
+		"APP_MEMORY_LIMIT":       "128Mi",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
@@ -215,6 +216,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 		"APP_KEY_USAGE_INTERVAL must be between",
 		`unknown capability "root"`,
 		"APP_CAPABILITIES: cleanup needs keys",
+		"APP_MEMORY_LIMIT must be a non-negative whole number",
 		"APP_LOG_LEVEL must be",
 		"APP_LOG_FORMAT must be",
 	} {
@@ -224,14 +226,22 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	}
 }
 
+// A count's interval stays under the hour a count is used for.
+func TestLoadAgent_KeyUsageIntervalBound(t *testing.T) {
+	vars := agentEnv(map[string]string{"APP_KEY_USAGE_INTERVAL": "31m"})
+	if _, err := loadAgent(env(vars)); err == nil || !strings.Contains(err.Error(), "APP_KEY_USAGE_INTERVAL must be between") {
+		t.Fatalf("31m: %v", err)
+	}
+}
+
 func TestLoadAgent_Capabilities(t *testing.T) {
 	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_CAPABILITIES": " seal, keys,keys ,renewal,cleanup", "APP_KMS_ESCROW_KEY_ID": "alias/escrow",
-		"APP_KEY_USAGE_INTERVAL": "30m"})))
+		"APP_KEY_USAGE_INTERVAL": "30m", "APP_MEMORY_LIMIT": "134217728"})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal,cleanup" || cfg.KeyUsageInterval != 30*time.Minute {
-		t.Errorf("Capabilities = %q, key usage interval %s", got, cfg.KeyUsageInterval)
+	if got := strings.Join(cfg.Capabilities, ","); got != "seal,keys,renewal,cleanup" || cfg.KeyUsageInterval != 30*time.Minute || cfg.MemoryLimit != 128<<20 {
+		t.Errorf("Capabilities = %q, key usage interval %s, memory limit %d", got, cfg.KeyUsageInterval, cfg.MemoryLimit)
 	}
 }
 

@@ -2,16 +2,20 @@ package agent
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 
+	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/keyutil"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/keys"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
@@ -84,10 +88,16 @@ func (c *Cleanup) Delete(ctx context.Context, cmd protocol.Command) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	held := map[string][]corev1.Secret{}
+	// the controller names a key by its private key; a Secret whose
+	// certificate names another key is held under both, so neither is
+	// removed on the other's word
+	held := map[string][]heldSecret{}
 	for _, s := range secrets {
-		if fp, ok := secretFingerprint(&s); ok {
-			held[fp] = append(held[fp], s)
+		h := heldSecret{Secret: s, key: privateKeyFingerprint(&s), cert: certFingerprint(&s)}
+		for _, fp := range []string{h.key, h.cert} {
+			if fp != "" && !slices.ContainsFunc(held[fp], func(o heldSecret) bool { return o.UID == s.UID && o.Name == s.Name }) {
+				held[fp] = append(held[fp], h)
+			}
 		}
 	}
 
@@ -108,10 +118,8 @@ func (c *Cleanup) Delete(ctx context.Context, cmd protocol.Command) (any, error)
 			res.Keys = append(res.Keys, protocol.KeyDeletion{Fingerprint: fp, Outcome: protocol.KeyAbsent})
 			continue
 		}
-		if !counted[fp] {
-			// its Secret did not load, so the values sealed with it could
-			// not be counted
-			refuse(fp, "its key Secret does not load, so the values sealed with it cannot be counted", protocol.KeyUse{})
+		if reason := unsure(found, fp, counted); reason != "" {
+			refuse(fp, reason, protocol.KeyUse{})
 			continue
 		}
 		names, err := c.deleteSecrets(ctx, found)
@@ -146,10 +154,64 @@ func (c *Cleanup) Delete(ctx context.Context, cmd protocol.Command) (any, error)
 	return res, errors.Join(errs...)
 }
 
+// heldSecret is a key Secret, with the fingerprints of its private key and
+// of its certificate, each "" when it does not parse.
+type heldSecret struct {
+	corev1.Secret
+	key, cert string
+}
+
+// unsure says why the values sealed with key fp, which secrets hold, cannot
+// be told: a Secret that does not load, whose values the count could not
+// match, or whose certificate is another key than its private key, which
+// the controller goes by. It returns "" when they can.
+func unsure(secrets []heldSecret, fp string, counted map[string]bool) string {
+	for _, s := range secrets {
+		switch {
+		case s.key == "":
+			return fmt.Sprintf("key Secret %s does not load, so the values sealed with it cannot be counted", s.Name)
+		case s.cert != "" && s.cert != s.key:
+			return fmt.Sprintf("key Secret %s holds the certificate of one key and the private key of another", s.Name)
+		}
+	}
+	if !counted[fp] {
+		return "its key Secret does not load, so the values sealed with it cannot be counted"
+	}
+	return ""
+}
+
+// privateKeyFingerprint names the key a Secret holds as the controller does,
+// by its private key; "" when that does not parse as RSA.
+func privateKeyFingerprint(s *corev1.Secret) string {
+	key, err := keyutil.ParsePrivateKeyPEM(s.Data[corev1.TLSPrivateKeyKey])
+	if err != nil {
+		return ""
+	}
+	priv, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return ""
+	}
+	fp, err := sscrypto.PublicKeyFingerprint(&priv.PublicKey)
+	if err != nil {
+		return ""
+	}
+	return fp
+}
+
+// certFingerprint names the key of a Secret's certificate; "" when it does
+// not parse.
+func certFingerprint(s *corev1.Secret) string {
+	parsed, _, err := keys.ParseCert(s.Data[corev1.TLSCertKey])
+	if err != nil {
+		return ""
+	}
+	return parsed.Fingerprint
+}
+
 // deleteSecrets deletes key Secrets, each only while it is as it was read
 // (its UID and resourceVersion), and returns the names of those it deleted.
 // One already gone counts as deleted.
-func (c *Cleanup) deleteSecrets(ctx context.Context, secrets []corev1.Secret) ([]string, error) {
+func (c *Cleanup) deleteSecrets(ctx context.Context, secrets []heldSecret) ([]string, error) {
 	var names []string
 	for _, s := range secrets {
 		uid, version := s.UID, s.ResourceVersion

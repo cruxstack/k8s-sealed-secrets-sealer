@@ -169,6 +169,10 @@ func TestReadWatchScope(t *testing.T) {
 		"additional namespaces alone narrow it": {
 			args: []string{"--additional-namespaces= b, a,,b"}, namespaces: []string{"a", "b", ns},
 		},
+		// the controller cannot find a namespace by a name none can have
+		"names no namespace can have are left out": {
+			args: []string{"--additional-namespaces=My_Apps, apps"}, namespaces: []string{"apps", ns},
+		},
 		"additional namespaces of blanks narrow it to its own": {
 			args: []string{"--additional-namespaces= "}, namespaces: []string{ns},
 		},

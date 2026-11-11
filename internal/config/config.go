@@ -182,6 +182,9 @@ type Agent struct {
 	// KeyUsageInterval is how often, at most, the agent counts the values
 	// its controller's SealedSecrets hold by key (cleanup capability).
 	KeyUsageInterval time.Duration
+	// MemoryLimit is the container's memory limit in bytes, 0 when it has
+	// none; the agent keeps its heap within 90% of it.
+	MemoryLimit int64
 	// EnvName is the env this agent belongs to. The agent refuses a control
 	// plane serving another env, and binds escrowed keys to it.
 	EnvName string
@@ -313,7 +316,9 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 		AllowInsecureControlPlane: r.boolean("APP_ALLOW_INSECURE_CONTROL_PLANE", false),
 		TokenFile:                 r.str("APP_IDENTITY_TOKEN_FILE", DefaultTokenFile),
 		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, protocol.MinCheckInInterval, protocol.MaxCheckInInterval),
-		KeyUsageInterval:          r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, 30*time.Second, time.Hour),
+		// under the hour a count is used for, with room for a late one
+		KeyUsageInterval: r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, 30*time.Second, 30*time.Minute),
+		MemoryLimit:      r.integer("APP_MEMORY_LIMIT", 0),
 	}
 	cfg.ControllerDeployment = r.dnsSubdomain("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)
 	cfg.ControlPlaneURL = r.required(r.url("APP_CONTROL_PLANE_URL", cfg.AllowInsecureControlPlane), "APP_CONTROL_PLANE_URL")

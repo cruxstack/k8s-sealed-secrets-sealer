@@ -168,7 +168,7 @@ func TestCleanup_Refuses(t *testing.T) {
 		},
 		"its Secret does not load, so it cannot be counted": {
 			secrets: []runtime.Object{unloadable},
-			reason:  "its key Secret does not load",
+			reason:  "key Secret old does not load",
 		},
 		"its Secret changed while it was deleted": {
 			secrets: []runtime.Object{old.secret("old")},
@@ -256,5 +256,74 @@ func TestCleanup_RetriesAFailedRestart(t *testing.T) {
 	c.sync.LoadRestored(context.Background(), "")
 	if !c.restarted(t) || c.sync.DeletedLoaded() {
 		t.Fatalf("after the retry: restarted %v, deleted keys still loaded %v", c.restarted(t), c.sync.DeletedLoaded())
+	}
+}
+
+// A Secret with one key's certificate and another key's private key holds,
+// for the controller, the key of its private key. Neither key is removed
+// on its word: the count could have taken values sealed with one for the
+// other's.
+func TestCleanup_RefusesASecretWhoseCertificateIsAnotherKey(t *testing.T) {
+	x := newPair(t, time.Now().Add(-72*time.Hour))
+	y := newPair(t, time.Now().Add(-48*time.Hour))
+	active := newPair(t, time.Now().Add(-time.Hour))
+	shadow := x.secret("a-shadow")
+	shadow.Data[corev1.TLSPrivateKeyKey] = y.key
+	shadow.Labels[keyLabel] = "compromised"
+	c := newCleanupCluster(t, active.cert,
+		[]runtime.Object{shadow, x.secret("b-real"), active.secret("z-active")},
+		sealedSecret("apps", "s", nil, map[string]string{"a": seal(t, x, "apps", "s", ssv1alpha1.StrictScope)}))
+
+	res, err := c.delete(t, x.fp, y.fp)
+	if err == nil {
+		t.Fatal("removal succeeded")
+	}
+	if k := outcome(res, x.fp); k.Outcome != protocol.KeyRefused || k.Values != 1 {
+		t.Errorf("x = %+v; a value is sealed with it", k)
+	}
+	if k := outcome(res, y.fp); k.Outcome != protocol.KeyRefused || !strings.Contains(k.Reason, "a-shadow holds the certificate of one key and the private key of another") {
+		t.Errorf("y = %+v", k)
+	}
+	if got := c.secretNames(t); !slices.Equal(got, []string{"a-shadow", "b-real", "z-active"}) {
+		t.Fatalf("secrets left = %v", got)
+	}
+}
+
+// A removal waits for a count already running only as long as its command
+// may: the agent's command loop is not held up past it.
+func TestCleanup_GivesUpWaitingForARunningCount(t *testing.T) {
+	x := newPair(t, time.Now().Add(-72*time.Hour))
+	active := newPair(t, time.Now().Add(-time.Hour))
+	c := newCleanupCluster(t, active.cert, []runtime.Object{x.secret("x"), active.secret("active")})
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	c.sealedSecrets.PrependReactor("list", "sealedsecrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		select {
+		case entered <- struct{}{}:
+			<-release // the background count is slow
+		default:
+		}
+		return false, nil, nil
+	})
+	counted := make(chan struct{})
+	go func() {
+		defer close(counted)
+		_, _ = c.cleanup.usage.Count(context.Background())
+	}()
+	<-entered
+	defer func() { close(release); <-counted }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	out, err := c.cleanup.Delete(ctx, protocol.Command{Payload: deletePayload(x.fp)})
+	if took := time.Since(start); took > 2*time.Second || err == nil {
+		t.Fatalf("Delete returned after %v: %v", took, err)
+	}
+	if res := out.(protocol.KeysDeleteResult); outcome(res, x.fp).Outcome != protocol.KeyRefused {
+		t.Fatalf("result = %+v", res)
+	}
+	if got := c.secretNames(t); !slices.Contains(got, "x") {
+		t.Fatalf("secrets left = %v", got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // The controller's settings are read from its Deployment the way the
@@ -188,7 +189,8 @@ type watchScope struct {
 // the controller decides (sealed-secrets v0.41, pkg/controller/main.go):
 // every namespace, unless --all-namespaces is false or
 // --additional-namespaces is set at all; then its own namespace and each
-// additional one, trimmed, empty ones left out. Its own namespace is its
+// additional one, trimmed, empty ones and names no namespace can have left
+// out. Its own namespace is its
 // POD_NAMESPACE variable when set, else its pod's. It fails when a setting
 // it needs is set where the agent cannot read it.
 func readWatchScope(d *appsv1.Deployment) (watchScope, error) {
@@ -221,7 +223,10 @@ func readWatchScope(d *appsv1.Deployment) (watchScope, error) {
 	}
 	scope.namespaces = []string{own}
 	for _, ns := range strings.Split(additional.value, ",") {
-		if ns = strings.TrimSpace(ns); ns != "" && !slices.Contains(scope.namespaces, ns) {
+		// a name no namespace can have is one the controller cannot find,
+		// and skips
+		ns = strings.TrimSpace(ns)
+		if ns != "" && len(validation.IsDNS1123Label(ns)) == 0 && !slices.Contains(scope.namespaces, ns) {
 			scope.namespaces = append(scope.namespaces, ns)
 		}
 	}

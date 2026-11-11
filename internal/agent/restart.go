@@ -204,8 +204,8 @@ func (k *KeySync) LoadRestored(ctx context.Context, active string) {
 // this agent deleted key Secrets may still be: they hold the deleted keys
 // until they restart.
 func (k *KeySync) DeletedLoaded() bool {
-	k.restartMu.Lock()
-	defer k.restartMu.Unlock()
+	k.droppedMu.Lock()
+	defer k.droppedMu.Unlock()
 	return len(k.dropped) > 0
 }
 
@@ -222,13 +222,13 @@ func (k *KeySync) unloadDeleted(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	k.restartMu.Lock()
+	k.droppedMu.Lock()
 	for _, p := range pods {
 		if podRunning(p) {
 			k.dropped[p.UID] = true
 		}
 	}
-	k.restartMu.Unlock()
+	k.droppedMu.Unlock()
 	return k.restart(ctx, "", "keys deleted", true)
 }
 
@@ -248,11 +248,16 @@ func (k *KeySync) endRestore() {
 // were running when this agent deleted keys. It reports whether it deleted
 // any. A restore's or removal's restart (force) runs at once and goes
 // through every replica, waiting for each replacement. The check-in loop's
-// does nothing while a restore runs or the last attempt was too recent,
-// and deletes at most one pod while a replacement starts, so the loop is
-// not held up.
+// does nothing while a restore runs, another restart rolls or the last
+// attempt was too recent, and deletes at most one pod while a replacement
+// starts, so the loop is not held up.
 func (k *KeySync) restart(ctx context.Context, active, reason string, force bool) (bool, error) {
-	k.restartMu.Lock()
+	if force {
+		k.restartMu.Lock()
+	} else if !k.restartMu.TryLock() {
+		// a restore's or removal's restart is rolling; it covers this
+		return false, nil
+	}
 	defer k.restartMu.Unlock()
 	if !force && (k.restoring.Load() > 0 || k.now().Before(k.nextRestart)) {
 		return false, nil
@@ -278,7 +283,7 @@ func (k *KeySync) restartStale(ctx context.Context, active, reason string, wait 
 	if err != nil {
 		return false, err
 	}
-	if !slices.ContainsFunc(secrets, restoredByAgent) && len(k.dropped) == 0 {
+	if !slices.ContainsFunc(secrets, restoredByAgent) && !k.DeletedLoaded() {
 		return false, nil
 	}
 	d, err := k.kube.AppsV1().Deployments(k.namespace).Get(ctx, k.deployment, metav1.GetOptions{})
@@ -350,8 +355,10 @@ func (k *KeySync) restartStale(ctx context.Context, active, reason string, wait 
 }
 
 // withDropped adds to stale the running pods that hold deleted keys, and
-// forgets those no longer running. The caller holds restartMu.
+// forgets those no longer running.
 func (k *KeySync) withDropped(stale, pods []corev1.Pod) []corev1.Pod {
+	k.droppedMu.Lock()
+	defer k.droppedMu.Unlock()
 	running := map[types.UID]bool{}
 	for _, p := range pods {
 		if !podRunning(p) {

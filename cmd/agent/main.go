@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,6 +42,10 @@ func run() error {
 		"controller", cfg.ControllerNamespace+"/"+cfg.ControllerName,
 	)
 	slog.SetDefault(logger)
+	if cfg.MemoryLimit > 0 {
+		// collect harder near the container's limit than be killed at it
+		debug.SetMemoryLimit(cfg.MemoryLimit / 10 * 9)
+	}
 
 	restCfg, err := agent.RESTConfig(cfg.KubeContext)
 	if err != nil {
