@@ -107,7 +107,7 @@ function KeyUsageCell({ agent, now }: { agent: FleetAgent; now: Date }) {
       <p className="whitespace-nowrap tabular-nums">
         {plural(usage.values, "value")}
       </p>
-      <p className="text-xs text-muted-foreground tabular-nums">
+      <p className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
         in {plural(usage.sealed_secrets, "SealedSecret")}
       </p>
       {usage.unmatched > 0 && (
