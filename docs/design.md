@@ -844,8 +844,9 @@ restarts, the agent seals with the keys it reported last.
 
 Key commands expire after 10 minutes. The control plane does not queue a
 restore for a key that an open restore command already covers, nor for 2
-minutes after one succeeded (until the agent's next inventory shows the key)
-or 5 minutes after one failed. A key that a restore found already in the
+minutes after one succeeded (until the agent's next inventory shows the key;
+`APP_KEY_COMMAND_SETTLE`, from 10 seconds to 10 minutes) or 5 minutes after
+one failed. A key that a restore found already in the
 cluster while the agent still does not report it, because it is held under
 another label or the controller has not loaded it, is not restored again
 for an hour, and the fleet view says so in the agent's issues. Each
@@ -1701,8 +1702,9 @@ a local image registry, driven by Tilt through atmos (`atmos dev up`).
 
 The simulated clusters are `dev-use1-blue`, `dev-use1-green` and
 `dev-use2-blue`: one env, two regions, two clusters in one region. Their
-agents have every capability, and count key references every 30 seconds;
-the control plane ticks every 5 seconds.
+agents have every capability, and count key references every 5 seconds;
+the control plane ticks every second, and holds off a key command's work
+for 15 seconds after it succeeds.
 Agents use k8s-oidc identity; all three share the k3d cluster's issuer and
 are told apart by their service account subject. Each simulated cluster
 gets the same Helm chart and RBAC layout as a real one. The same control
@@ -1997,7 +1999,7 @@ progress for an hour fails, so its schedule can run again; a pull request
 that cannot be opened is tried three times.
 
 **Ticks.** In a container, `cmd/server` ticks every `APP_TICK_INTERVAL` (a
-minute by default, 5 seconds in the local stack). On Lambda, an EventBridge
+minute by default, a second in the local stack). On Lambda, an EventBridge
 Scheduler schedule invokes the function every minute (`rate(1 minute)`)
 with the payload `{"sealer": "tick"}`, and the function ticks within the
 time the invocation has, less 10 seconds; any other event is an HTTP

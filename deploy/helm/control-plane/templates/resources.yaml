@@ -164,6 +164,8 @@ spec:
               value: {{ .Values.keyRenewPeriod | quote }}
             - name: APP_TICK_INTERVAL
               value: {{ .Values.tickInterval | quote }}
+            - name: APP_KEY_COMMAND_SETTLE
+              value: {{ .Values.keyCommandSettle | quote }}
             {{- with .Values.aws.stsHosts }}
             - name: APP_AWS_STS_HOSTS
               value: {{ join "," . | quote }}

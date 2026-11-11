@@ -1,0 +1,79 @@
+name: Setup
+description: >-
+  Install Atmos, and restore the tools and the Go, lint and npm caches that
+  the latest run of the same job on main saved. The job saves them again,
+  with the outputs, only on main: pull requests read main's caches and
+  write none.
+
+inputs:
+  atmos-version:
+    description: The Atmos version to install
+    required: true
+  cache:
+    description: >-
+      The job's cache. Each job builds different things (race tests, lint
+      and cross-compiles, the e2e stack), so each keeps its own.
+    required: true
+
+outputs:
+  cache-hit:
+    description: Whether this commit's caches were restored (a re-run), so there is nothing to save
+    value: ${{ steps.restore.outputs.cache-hit }}
+  cache-key:
+    description: The key to save the caches under
+    value: ${{ steps.paths.outputs.key }}
+  cache-paths:
+    description: The paths to save
+    value: ${{ steps.paths.outputs.paths }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Atmos
+      uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+      with:
+        atmos-version: ${{ inputs.atmos-version }}
+        install-wrapper: false
+        checksum-validation: enforce
+
+    - name: Point Caches
+      id: paths
+      shell: bash
+      env:
+        CACHE_NAME: ${{ inputs.cache }}
+      run: |
+        # the default locations, set so they are surely the paths cached
+        {
+          echo "GOCACHE=${HOME}/.cache/go-build"
+          echo "GOMODCACHE=${HOME}/go/pkg/mod"
+          echo "GOLANGCI_LINT_CACHE=${HOME}/.cache/golangci-lint"
+          echo "npm_config_cache=${HOME}/.npm"
+        } >>"$GITHUB_ENV"
+        # the newest of main's caches for this job; each commit on main
+        # saves its own, and older ones age out
+        {
+          echo "key=${CACHE_NAME}-${RUNNER_OS}-${RUNNER_ARCH}-${GITHUB_SHA}"
+          echo "prefix=${CACHE_NAME}-${RUNNER_OS}-${RUNNER_ARCH}-"
+          # Atmos's tools and Node, but not .tools/build (the stack's
+          # binaries) or .tools/dev (its generated keys): neither outlives
+          # a run
+          cat <<'EOF'
+        paths<<PATHS
+        ~/.cache/go-build
+        ~/go/pkg/mod
+        ~/.cache/golangci-lint
+        ~/.npm
+        .tools/*
+        !.tools/build
+        !.tools/dev
+        PATHS
+        EOF
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Restore Caches
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.paths.outputs.paths }}
+        key: ${{ steps.paths.outputs.key }}
+        restore-keys: ${{ steps.paths.outputs.prefix }}

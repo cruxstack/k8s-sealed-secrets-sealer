@@ -11,8 +11,10 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web ./
 RUN npm run build
 
-# The builder runs on the build machine's platform and cross-compiles for
-# the target platform, so multi-platform builds need no emulation.
+# The builders run on the build machine's platform and cross-compile for
+# the target platform, so multi-platform builds need no emulation. Each image
+# compiles only its own binary; the build cache mount lets a second image
+# built on the same machine reuse the packages they share.
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
 
 WORKDIR /src
@@ -22,29 +24,36 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-# the control plane embeds the UI build
-COPY --from=web /src/internal/webui/dist/app ./internal/webui/dist/app
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=dev
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
-RUN go build -trimpath \
+
+FROM builder AS build-control-plane
+# the control plane embeds the UI build
+COPY --from=web /src/internal/webui/dist/app ./internal/webui/dist/app
+ARG VERSION=dev
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath \
         -ldflags="-s -w -X github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version.Version=${VERSION}" \
-        -o /out/server ./cmd/server \
-    && go build -trimpath \
+        -o /out/server ./cmd/server
+
+FROM builder AS build-agent
+ARG VERSION=dev
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath \
         -ldflags="-s -w -X github.com/cruxstack/k8s-sealed-secrets-sealer/internal/version.Version=${VERSION}" \
         -o /out/agent ./cmd/agent
 
 # static, CA certificates, no shell; runs as uid 65532
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS control-plane
-COPY --from=builder /out/server /server
+COPY --from=build-control-plane /out/server /server
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/server"]
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS agent
-COPY --from=builder /out/agent /agent
+COPY --from=build-agent /out/agent /agent
 USER 65532:65532
 EXPOSE 8081
 ENTRYPOINT ["/agent"]

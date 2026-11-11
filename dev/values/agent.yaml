@@ -38,7 +38,7 @@ extraEnv:
 # faster than the 15s default, so the local stack settles quickly
 checkinInterval: 5s
 # faster than the 5m default, so keys can be deleted soon after revoking
-keyUsageInterval: 30s
+keyUsageInterval: 5s
 
 log:
   level: debug

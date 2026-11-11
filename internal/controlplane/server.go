@@ -85,14 +85,23 @@ type Options struct {
 	// Each open reseal pull request is checked about every 15 ticks. Zero
 	// means DefaultTickInterval.
 	TickInterval time.Duration
+	// KeyCommandSettle is how long key sync holds off work a key command
+	// just did (a restore, a removal, turning renewal on), until the
+	// agent's inventory shows it. Zero means DefaultKeyCommandSettle; it is
+	// at most MaxKeyCommandSettle.
+	KeyCommandSettle time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
 
 // Defaults for Options.
 const (
-	DefaultKeyRenewPeriod = 720 * time.Hour
-	DefaultPollInterval   = 500 * time.Millisecond
+	DefaultKeyRenewPeriod   = 720 * time.Hour
+	DefaultPollInterval     = 500 * time.Millisecond
+	DefaultKeyCommandSettle = 2 * time.Minute
+	// MaxKeyCommandSettle bounds KeyCommandSettle: key sync reads back
+	// commands far enough to cover it.
+	MaxKeyCommandSettle = 10 * time.Minute
 )
 
 // RegistryReloadInterval is how often a server with Options.ReloadRegistry
@@ -121,9 +130,10 @@ type Server struct {
 	// adminTokenKeyChanges lets the admin token change keys
 	adminTokenKeyChanges bool
 
-	keyRenewPeriod time.Duration
-	pollInterval   time.Duration
-	tickInterval   time.Duration
+	keyRenewPeriod   time.Duration
+	pollInterval     time.Duration
+	tickInterval     time.Duration
+	keyCommandSettle time.Duration
 
 	// agents is the registry in force and the login verifiers built for it,
 	// replaced together when the registry is read again
@@ -173,6 +183,10 @@ func New(opts Options) *Server {
 	if tickInterval <= 0 {
 		tickInterval = DefaultTickInterval
 	}
+	keyCommandSettle := min(opts.KeyCommandSettle, MaxKeyCommandSettle)
+	if keyCommandSettle <= 0 {
+		keyCommandSettle = DefaultKeyCommandSettle
+	}
 	s := &Server{
 		logger:     logger,
 		version:    opts.Version,
@@ -189,13 +203,14 @@ func New(opts Options) *Server {
 
 		adminTokenKeyChanges: opts.AdminTokenKeyChanges,
 
-		keyRenewPeriod: keyRenewPeriod,
-		pollInterval:   pollInterval,
-		tickInterval:   tickInterval,
-		reloadRegistry: opts.ReloadRegistry,
-		knownKeys:      map[string]bool{},
-		knownEscrow:    map[string]knownCopies{},
-		histories:      map[string]restoreHistory{},
+		keyRenewPeriod:   keyRenewPeriod,
+		pollInterval:     pollInterval,
+		tickInterval:     tickInterval,
+		keyCommandSettle: keyCommandSettle,
+		reloadRegistry:   opts.ReloadRegistry,
+		knownKeys:        map[string]bool{},
+		knownEscrow:      map[string]knownCopies{},
+		histories:        map[string]restoreHistory{},
 	}
 	s.agents.Store(&agentAccess{reg: opts.Registry, logins: opts.Logins})
 	s.nextReload.Store(now().Add(RegistryReloadInterval).UnixNano())

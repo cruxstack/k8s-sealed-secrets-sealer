@@ -122,7 +122,7 @@ kms:
 checkinInterval: 15s
 
 # How often, at most, the agent counts the values sealed with each key, from
-# 30s to 30m (cleanup capability). A count decrypts only the RSA part of each
+# 5s to 30m (cleanup capability). A count decrypts only the RSA part of each
 # value that changed since the last, a few milliseconds each with 4096-bit
 # keys; the control plane uses counts up to an hour old.
 keyUsageInterval: 5m

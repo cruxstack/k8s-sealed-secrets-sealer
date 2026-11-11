@@ -315,7 +315,7 @@ func TestKeyDelete_ReinstatedKeyHeldByNoneIsRestored(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	kh.advance(settleAfterSuccess)
+	kh.advance(DefaultKeyCommandSettle)
 
 	if rec := kh.setStatus(old.Fingerprint, "reinstate"); rec.Code != http.StatusOK {
 		t.Fatalf("reinstate = %d", rec.Code)
@@ -696,7 +696,7 @@ func TestPlanKeySync_Removal(t *testing.T) {
 	plan := func(self *registry.Agent, state store.AgentState, commands ...store.CommandRecord) []string {
 		t.Helper()
 		states := map[string]store.AgentState{self.ID: state}
-		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, state, nil, false, commands, keys, now).Remove
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, state, nil, false, commands, keys, now, DefaultKeyCommandSettle).Remove
 	}
 
 	// only deleted keys, not those only revoked
@@ -732,7 +732,7 @@ func TestPlanKeySync_Removal(t *testing.T) {
 	}{
 		"open":                    {cmd, false},
 		"succeeded just now":      {finished(store.CommandSucceeded, time.Minute), false},
-		"succeeded and settled":   {finished(store.CommandSucceeded, settleAfterSuccess+time.Second), true},
+		"succeeded and settled":   {finished(store.CommandSucceeded, DefaultKeyCommandSettle+time.Second), true},
 		"refused just now":        {finished(store.CommandFailed, removeRetryAfterFailure-time.Second), false},
 		"refused a while ago":     {finished(store.CommandFailed, removeRetryAfterFailure+time.Second), true},
 		"expired without results": {expired, true},

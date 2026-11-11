@@ -81,6 +81,17 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_TICK_INTERVAL": "1h"}))); err == nil || !strings.Contains(err.Error(), "APP_TICK_INTERVAL") {
 		t.Errorf("tick interval of an hour = %v", err)
 	}
+	if cfg.KeyCommandSettle != 2*time.Minute {
+		t.Errorf("KeyCommandSettle = %s, want 2m", cfg.KeyCommandSettle)
+	}
+	if cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_KEY_COMMAND_SETTLE": "15s"}))); err != nil || cfg.KeyCommandSettle != 15*time.Second {
+		t.Errorf("key command settle = %v, %v", cfg, err)
+	}
+	for _, settle := range []string{"5s", "11m"} {
+		if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_KEY_COMMAND_SETTLE": settle}))); err == nil || !strings.Contains(err.Error(), "APP_KEY_COMMAND_SETTLE") {
+			t.Errorf("key command settle of %s = %v", settle, err)
+		}
+	}
 	if cfg.KMSTransitKeyID != "alias/sealer-transit" || cfg.KMSRegion != "" || cfg.KMSEndpoint != "" {
 		t.Errorf("KMS = %q %q %q", cfg.KMSTransitKeyID, cfg.KMSRegion, cfg.KMSEndpoint)
 	}
@@ -207,7 +218,7 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	_, err := loadAgent(env(map[string]string{
 		"APP_CONTROLLER_NAME":    "Not_A_Label",
 		"APP_CHECKIN_INTERVAL":   "1s",
-		"APP_KEY_USAGE_INTERVAL": "10s",
+		"APP_KEY_USAGE_INTERVAL": "1s",
 		"APP_CAPABILITIES":       "seal,root,cleanup,reseal",
 		"APP_LOG_LEVEL":          "loud",
 		"APP_LOG_FORMAT":         "xml",
@@ -236,11 +247,18 @@ func TestLoadAgent_ReportsEveryProblem(t *testing.T) {
 	}
 }
 
-// A count's interval stays under the hour a count is used for.
+// A count's interval stays under the hour a count is used for, and is no
+// shorter than the fastest check-in interval.
 func TestLoadAgent_KeyUsageIntervalBound(t *testing.T) {
-	vars := agentEnv(map[string]string{"APP_KEY_USAGE_INTERVAL": "31m"})
-	if _, err := loadAgent(env(vars)); err == nil || !strings.Contains(err.Error(), "APP_KEY_USAGE_INTERVAL must be between") {
-		t.Fatalf("31m: %v", err)
+	for _, interval := range []string{"4s", "31m"} {
+		vars := agentEnv(map[string]string{"APP_KEY_USAGE_INTERVAL": interval})
+		if _, err := loadAgent(env(vars)); err == nil || !strings.Contains(err.Error(), "APP_KEY_USAGE_INTERVAL must be between") {
+			t.Errorf("%s: %v", interval, err)
+		}
+	}
+	cfg, err := loadAgent(env(agentEnv(map[string]string{"APP_KEY_USAGE_INTERVAL": "5s"})))
+	if err != nil || cfg.KeyUsageInterval != 5*time.Second {
+		t.Errorf("5s: %v, %v", cfg, err)
 	}
 }
 
