@@ -60,6 +60,9 @@ type changeView struct {
 	SealedAt    time.Time    `json:"sealed_at"`
 	SealedBy    agentView    `json:"sealed_by"`
 	Fingerprint string       `json:"fingerprint"`
+	// KeyRevoked is set when the key it was sealed with has since been
+	// revoked: it must be sealed again, or removed, before a pull request.
+	KeyRevoked bool `json:"key_revoked,omitempty"`
 }
 
 type targetView struct {
@@ -80,8 +83,8 @@ type agentView struct {
 
 // viewSession views a session with its changes as they apply: changes a
 // newer one covers are left out, and those it partly covers lose the
-// documents it took over.
-func viewSession(s store.Session, changes []store.Change, agent func(string) agentView) sessionView {
+// documents it took over. Changes sealed with a revoked key are marked.
+func viewSession(s store.Session, changes []store.Change, revoked map[string]store.RevokedKey, agent func(string) agentView) sessionView {
 	if changes != nil {
 		changes = store.Effective(changes)
 	}
@@ -106,6 +109,7 @@ func viewSession(s store.Session, changes []store.Change, agent func(string) age
 	changes = slices.Clone(changes)
 	slices.SortFunc(changes, compareChanges)
 	for _, c := range changes {
+		_, keyRevoked := revoked[c.Fingerprint]
 		v.Changes = append(v.Changes, changeView{
 			ID:          c.ID,
 			Path:        c.Path,
@@ -115,6 +119,7 @@ func viewSession(s store.Session, changes []store.Change, agent func(string) age
 			SealedAt:    c.SealedAt,
 			SealedBy:    agent(c.AgentID),
 			Fingerprint: c.Fingerprint,
+			KeyRevoked:  keyRevoked,
 		})
 	}
 	return v
@@ -164,7 +169,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, r, "failed to read pending changes", err)
 			return
 		}
-		v := viewSession(sess, nil, s.agentView)
+		v := viewSession(sess, nil, nil, s.agentView)
 		v.PendingChanges = len(store.Effective(changes))
 		out = append(out, v)
 	}
@@ -200,7 +205,14 @@ func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, status int
 		s.internalError(w, r, "failed to read pending changes", err)
 		return
 	}
-	httpserver.WriteJSON(w, status, map[string]any{"session": viewSession(sess, changes, s.agentView)})
+	var revoked map[string]store.RevokedKey
+	if len(changes) > 0 {
+		if revoked, err = s.store.RevokedKeys(r.Context()); err != nil {
+			s.internalError(w, r, "failed to read revoked keys", err)
+			return
+		}
+	}
+	httpserver.WriteJSON(w, status, map[string]any{"session": viewSession(sess, changes, revoked, s.agentView)})
 }
 
 // createSession opens a session for a repository at the head of its default

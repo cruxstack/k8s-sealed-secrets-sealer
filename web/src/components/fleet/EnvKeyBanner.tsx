@@ -58,6 +58,17 @@ export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
               </time>
             </dd>
           </dl>
+        ) : fleet.no_usable_key ? (
+          <div role="alert" className="flex flex-col gap-1 md:items-end">
+            <Badge variant="warning" className="text-xs">
+              New key needed
+            </Badge>
+            <p className="max-w-md text-sm text-muted-foreground md:text-right">
+              Every key the clusters share is revoked or not valid yet, so
+              sealing is unavailable. Let a controller renew its key, or
+              reinstate a key revoked by mistake.
+            </p>
+          </div>
         ) : (
           <div role="alert" className="flex flex-col gap-1 md:items-end">
             <Badge variant="warning" className="text-xs">

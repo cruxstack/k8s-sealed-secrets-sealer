@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -81,8 +82,8 @@ func TestCompute_OutOfSyncWhenNoKeyIsShared(t *testing.T) {
 		"a": state("a", time.Second, key("SHA256:a", 1)),
 		"b": state("b", time.Second, key("SHA256:b", 1)),
 	}, Keys{}, now)
-	if f.KeysInSync || f.EnvKey != nil {
-		t.Fatalf("expected no env key, got %+v", f.EnvKey)
+	if f.KeysInSync || f.EnvKey != nil || f.NoUsableKey {
+		t.Fatalf("expected no env key, got %+v (no usable key %v)", f.EnvKey, f.NoUsableKey)
 	}
 	if got := agent(t, f, "a").MissingKeys; len(got) != 1 || got[0] != "SHA256:b" {
 		t.Errorf("a missing = %v", got)
@@ -127,7 +128,7 @@ func TestCompute_NeverCheckedInAndWrongKeyOrderAreExcluded(t *testing.T) {
 
 func TestCompute_NoCheckIns(t *testing.T) {
 	f := Compute("dev", testRegistry(t, "a"), nil, Keys{}, now)
-	if f.KeysInSync || f.EnvKey != nil || len(f.Agents) != 1 {
+	if f.KeysInSync || f.EnvKey != nil || f.NoUsableKey || len(f.Agents) != 1 {
 		t.Fatalf("fleet = %+v", f)
 	}
 }
@@ -230,14 +231,18 @@ func TestCompute_RevokedKeyIsNeitherEnvKeyNorHeldNorMissing(t *testing.T) {
 		t.Errorf("keys are not newest first: %+v", f.Keys)
 	}
 
-	// revoking every shared key leaves no env key
+	// revoking every shared key leaves no env key, and no cluster missing
+	// one: sealing needs a new key, and says so
 	keys.Revoked[old.Fingerprint] = store.RevokedKey{Fingerprint: old.Fingerprint}
 	f = Compute("dev", reg, map[string]store.AgentState{
 		"a": state("a", time.Second, old, revoked),
 		"b": state("b", time.Second, old),
 	}, keys, now)
-	if f.EnvKey != nil || f.KeysInSync {
-		t.Errorf("env key = %+v, want none", f.EnvKey)
+	if f.EnvKey != nil || f.KeysInSync || !f.NoUsableKey {
+		t.Errorf("env key = %+v, no usable key %v; want none, and a new key needed", f.EnvKey, f.NoUsableKey)
+	}
+	if _, err := ChooseSealer(f, nil, nil); !errors.Is(err, ErrNoUsableKey) {
+		t.Errorf("ChooseSealer: %v, want ErrNoUsableKey", err)
 	}
 }
 
@@ -254,6 +259,11 @@ func TestCompute_FutureDatedKeyIsNotUsedUntilItsTime(t *testing.T) {
 	f := Compute("dev", reg, states, Keys{}, now)
 	if f.EnvKey == nil || f.EnvKey.Fingerprint != skewed.Fingerprint {
 		t.Fatalf("env key = %+v, want the skewed key", f.EnvKey)
+	}
+	// a future-dated key alone is no env key: a new key is needed
+	only := map[string]store.AgentState{"a": state("a", time.Second, planted), "b": state("b", time.Second, planted)}
+	if f := Compute("dev", reg, only, Keys{}, now); f.EnvKey != nil || !f.NoUsableKey {
+		t.Errorf("with only a future-dated key: env key %+v, no usable key %v", f.EnvKey, f.NoUsableKey)
 	}
 	if k := listed(t, f, planted.Fingerprint); !k.FutureDated || k.EnvKey {
 		t.Errorf("planted key = %+v", k)
@@ -328,6 +338,26 @@ func TestCompute_JoiningClusterIsLeftOutOfTheEnvKey(t *testing.T) {
 		f := Compute("dev", reg, s, escrowed, now)
 		if n := agent(t, f, "new"); n.Joining || !strings.Contains(issues(n), "needs the keys capability") {
 			t.Errorf("new = joining %v, issues %v", n.Joining, n.Issues)
+		}
+	})
+	t.Run("key order unknown", func(t *testing.T) {
+		// the agent refuses to restore when it cannot tell its controller's
+		// key order, so the cluster is not given the grace either
+		s := maps.Clone(states)
+		unknown := s["new"]
+		unknown.Controller.KeyOrderPriority = ""
+		s["new"] = unknown
+		f := Compute("dev", reg, s, escrowed, now)
+		n := agent(t, f, "new")
+		if n.Joining || n.CanRestore() || !n.InScope {
+			t.Errorf("new = joining %v, can restore %v, in scope %v", n.Joining, n.CanRestore(), n.InScope)
+		}
+		if !strings.Contains(issues(n), "key order unknown") || !strings.Contains(issues(n), "its key order is unknown") {
+			t.Errorf("new issues = %v", n.Issues)
+		}
+		// an agent that cannot restore anyway is not told about it
+		if b := agent(t, f, "b"); strings.Contains(issues(b), "key order") {
+			t.Errorf("b issues = %v", b.Issues)
 		}
 	})
 	t.Run("after the window", func(t *testing.T) {

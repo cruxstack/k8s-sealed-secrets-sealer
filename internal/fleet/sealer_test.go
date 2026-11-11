@@ -89,4 +89,8 @@ func TestChooseSealer(t *testing.T) {
 	if !errors.As(err, &outOfSync) || len(outOfSync.Clusters) != 2 || outOfSync.Clusters[0] != "cluster-a" {
 		t.Fatalf("out of sync: %v", err)
 	}
+	// no env key, and none missing: every shared key is unusable
+	if _, err := ChooseSealer(Fleet{NoUsableKey: true, Agents: []Agent{sealer("a", "use1", time.Second, env)}}, nil, nil); !errors.Is(err, ErrNoUsableKey) {
+		t.Fatalf("no usable key: %v", err)
+	}
 }

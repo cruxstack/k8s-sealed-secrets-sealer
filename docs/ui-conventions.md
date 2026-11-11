@@ -40,9 +40,12 @@ Under its agents, the fleet lists the env's keys, newest first: how many
 clusters hold each, its escrowed copies, and its status as a badge (env key,
 active, revoked, future-dated). Revoking a key is a ghost button on its row
 that opens a dialog saying what revoking does and does not do, with a
-destructive confirm; a revoked key's row is dimmed and offers Reinstate. A
-notice under the env key warns when a cluster's keys reach half or 80% of
-the key limit, or go past it.
+destructive confirm; a revoked key's row is dimmed and offers Reinstate,
+which confirms in a dialog too, since the key goes back into every cluster
+and may become the env key. A notice under the env key warns when a
+cluster's keys reach half or 80% of the key limit, or go past it. With no
+env key, the banner says why: keys out of sync, or a new key needed when
+every key the clusters share is revoked or not valid yet.
 
 Someone who may use several envs gets a switcher in place of the badge: the
 same dot and name, opening a menu of their envs (the current one checked,
@@ -81,6 +84,10 @@ shows: the form's heading and note name the regions, the documents left out
 are dimmed, and the pending change carries its regions as badges. The
 regions chosen stay for the next value, since values that differ by region
 usually come several at a time.
+
+A pending change sealed with a key an admin has since revoked carries an
+amber "Seal again" badge, and the pull request button stays disabled, with
+the reason in its title, until the value is sealed again or removed.
 
 Show hints where the decision is made. A file's description sits under its
 path in the list and in its header, its docs are a link in its header, and

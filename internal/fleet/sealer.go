@@ -13,6 +13,11 @@ import (
 // ErrNoSealer means no agent can seal right now.
 var ErrNoSealer = errors.New("no agent is available to seal: none is healthy, able to seal and holding the env key")
 
+// ErrNoUsableKey means the clusters share keys but each is revoked or dated
+// in the future, so nothing can be sealed until a new key reaches every
+// cluster.
+var ErrNoUsableKey = errors.New("no usable sealing key: every key the clusters share is revoked or dated in the future; a new key is needed")
+
 // KeysOutOfSyncError means no key is held by every in-scope cluster, so
 // nothing can be sealed until key sync closes the gap.
 type KeysOutOfSyncError struct {
@@ -34,6 +39,9 @@ func (e *KeysOutOfSyncError) Error() string {
 // recent check-in; ties go to the lowest ID, so the choice is stable.
 func ChooseSealer(f Fleet, regions []string, inFlight map[string]int) (Agent, error) {
 	if f.EnvKey == nil {
+		if f.NoUsableKey {
+			return Agent{}, ErrNoUsableKey
+		}
 		var missing []string
 		for _, a := range f.Agents {
 			if a.InScope && len(a.MissingKeys) > 0 {

@@ -257,6 +257,13 @@ type KeysRestoreResult struct {
 type KeyFailure struct {
 	Fingerprint string `json:"fingerprint"`
 	Error       string `json:"error"`
+	// UploadedBy names the escrowed copy the agent tried, by its uploader,
+	// when it got one. BadCopy is set when the copy was at fault: it did not
+	// open, or its private key is not the certificate's. The control plane
+	// then hands the agent another copy. Agents before these fields leave
+	// them out.
+	UploadedBy string `json:"uploaded_by,omitempty"`
+	BadCopy    bool   `json:"bad_copy,omitempty"`
 }
 
 // RenewalEnablePayload asks an agent to turn on its controller's key

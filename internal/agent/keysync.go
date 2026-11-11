@@ -290,7 +290,13 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 		if err != nil {
 			k.logger.ErrorContext(ctx, "failed to restore sealing key",
 				"event", "key.sync_failed", "env", k.env, "fingerprint", fp, "error", err)
-			res.Failed = append(res.Failed, protocol.KeyFailure{Fingerprint: fp, Error: err.Error()})
+			f := protocol.KeyFailure{Fingerprint: fp, Error: err.Error()}
+			// naming the copy lets the control plane hand out another
+			var ce *copyError
+			if errors.As(err, &ce) {
+				f.UploadedBy, f.BadCopy = ce.uploadedBy, ce.bad
+			}
+			res.Failed = append(res.Failed, f)
 			continue
 		}
 		k.logger.WarnContext(ctx, "sealing key restored from escrow",
@@ -312,6 +318,17 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 	return res, nil
 }
 
+// copyError is a restore that failed with an escrowed copy in hand: from
+// the copy itself (bad), or after it checked out.
+type copyError struct {
+	uploadedBy string
+	bad        bool
+	err        error
+}
+
+func (e *copyError) Error() string { return e.err.Error() }
+func (e *copyError) Unwrap() error { return e.err }
+
 // restoreOne downloads, decrypts and checks one escrowed key, and creates its
 // key Secret. It returns the Secret's name.
 func (k *KeySync) restoreOne(ctx context.Context, fp, prefix string) (string, error) {
@@ -319,17 +336,18 @@ func (k *KeySync) restoreOne(ctx context.Context, fp, prefix string) (string, er
 	if err != nil {
 		return "", err
 	}
+	badCopy := func(err error) error { return &copyError{uploadedBy: rec.UploadedBy, bad: true, err: err} }
 	plaintext, err := envelope.Open(ctx, k.kms, k.escrowKeyID, rec.Envelope, escrowContext(k.env, fp))
 	if err != nil {
-		return "", err
+		return "", badCopy(err)
 	}
 	defer clear(plaintext)
 	var ek escrowedKey
 	if err := json.Unmarshal(plaintext, &ek); err != nil {
-		return "", errors.New("failed to decode escrowed key")
+		return "", badCopy(errors.New("failed to decode escrowed key"))
 	}
 	if err := checkKeyPair([]byte(ek.Certificate), []byte(ek.PrivateKey), fp); err != nil {
-		return "", fmt.Errorf("escrowed key is unusable: %w", err)
+		return "", badCopy(fmt.Errorf("escrowed key is unusable: %w", err))
 	}
 
 	s := &corev1.Secret{
@@ -354,7 +372,8 @@ func (k *KeySync) restoreOne(ctx context.Context, fp, prefix string) (string, er
 	k.lastCreate = time.Now()
 	k.restartMu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("failed to create key secret in %s: %w", k.namespace, err)
+		err = fmt.Errorf("failed to create key secret in %s: %w", k.namespace, err)
+		return "", &copyError{uploadedBy: rec.UploadedBy, err: err}
 	}
 	return created.Name, nil
 }

@@ -96,10 +96,13 @@ func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, fi
 			me = &f.Agents[i]
 		}
 	}
-	if me != nil && me.InScope && state.KeysComplete {
-		busy := busyFingerprints(commands, now)
+	// the agent restores only when it knows its controller orders keys by
+	// NotBefore; and it runs one restore at a time, each ending in a
+	// controller restart, so a long one goes out a command at a time
+	if me != nil && me.InScope && me.CanRestore() && !restoreRecent(commands, now) {
+		held := heldPresent(commands, now)
 		for _, fp := range me.MissingKeys {
-			if len(keys.Escrow[fp]) > 0 && !busy[fp] {
+			if len(keys.Escrow[fp]) > 0 && !held[fp] {
 				plan.Restore = append(plan.Restore, fp)
 			}
 		}
@@ -193,29 +196,25 @@ func recent(c store.CommandRecord, now time.Time) bool {
 	return now.Sub(*c.FinishedAt) < hold
 }
 
-// busyFingerprints are keys a recent restore command covers, and keys a
-// restore found already present within presentHold.
-func busyFingerprints(commands []store.CommandRecord, now time.Time) map[string]bool {
-	busy := map[string]bool{}
+// heldPresent are keys a restore found already present within presentHold:
+// restoring them again would only find them again.
+func heldPresent(commands []store.CommandRecord, now time.Time) map[string]bool {
+	held := map[string]bool{}
 	for _, c := range commands {
-		if c.Type != protocol.CommandKeysRestore {
-			continue
-		}
 		for _, fp := range foundPresent(c, now) {
-			busy[fp] = true
-		}
-		if !recent(c, now) {
-			continue
-		}
-		var p protocol.KeysRestorePayload
-		if err := json.Unmarshal([]byte(c.Payload), &p); err != nil {
-			continue
-		}
-		for _, fp := range p.Fingerprints {
-			busy[fp] = true
+			held[fp] = true
 		}
 	}
-	return busy
+	return held
+}
+
+// restoreRecent reports whether a restore command is still open, or
+// finished too recently for another: until the agent's inventory shows
+// what it restored, or until a failed one is due a retry.
+func restoreRecent(commands []store.CommandRecord, now time.Time) bool {
+	return slices.ContainsFunc(commands, func(c store.CommandRecord) bool {
+		return c.Type == protocol.CommandKeysRestore && recent(c, now)
+	})
 }
 
 // foundPresent returns the keys a restore command found already in its

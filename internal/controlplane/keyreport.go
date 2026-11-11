@@ -18,7 +18,7 @@ import (
 func applyKeyReport(state *store.AgentState, records []store.KeyRecord, prev store.AgentState, seen bool, revoked map[string]store.RevokedKey, now time.Time) []store.KeyRecord {
 	reported := state.Keys
 	state.KeysReported = len(reported)
-	state.Keys, state.DroppedUpTo = limitKeys(reported, revoked, protocol.MaxKeys)
+	state.Keys, state.DroppedUpTo = limitKeys(reported, revoked, protocol.MaxKeys, now)
 	state.JoinedAt = joinedAt(prev, seen, *state, now)
 	if len(state.Keys) == len(reported) {
 		return records
@@ -30,21 +30,23 @@ func applyKeyReport(state *store.AgentState, records []store.KeyRecord, prev sto
 	return slices.DeleteFunc(records, func(r store.KeyRecord) bool { return !kept[r.Fingerprint] })
 }
 
-// limitKeys keeps the newest max keys of a report, by NotBefore, revoked
-// keys last, so a growing key set degrades instead of failing the check-in.
-// It returns them oldest first, as agents report them, with the newest
-// NotBefore among the active keys left out (nil when none were): a key no
-// newer than that may be held although it is not listed.
-func limitKeys(keys []store.KeyRef, revoked map[string]store.RevokedKey, limit int) ([]store.KeyRef, *time.Time) {
+// limitKeys keeps the newest max keys of a report, by NotBefore, so a
+// growing key set degrades instead of failing the check-in. Keys that are
+// not usable (revoked, or dated in the future) go last: keys planted with a
+// far-off date would otherwise be the newest, and crowd out every key in
+// use. It returns the kept keys oldest first, as agents report them, with
+// the newest NotBefore among the usable keys left out (nil when none
+// were): a key no newer than that may be held although it is not listed.
+func limitKeys(keys []store.KeyRef, revoked map[string]store.RevokedKey, limit int, now time.Time) ([]store.KeyRef, *time.Time) {
 	if len(keys) <= limit {
 		return keys, nil
 	}
-	isRevoked := func(k store.KeyRef) bool { _, ok := revoked[k.Fingerprint]; return ok }
+	usable := func(k store.KeyRef) bool { return fleet.Usable(k, revoked, now) }
 	sorted := slices.Clone(keys)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		a, b := sorted[i], sorted[j]
-		if ra, rb := isRevoked(a), isRevoked(b); ra != rb {
-			return rb
+		if ua, ub := usable(a), usable(b); ua != ub {
+			return ua
 		}
 		if !a.NotBefore.Equal(b.NotBefore) {
 			return a.NotBefore.After(b.NotBefore)
@@ -53,7 +55,7 @@ func limitKeys(keys []store.KeyRef, revoked map[string]store.RevokedKey, limit i
 	})
 	var upTo *time.Time
 	for _, k := range sorted[limit:] {
-		if !isRevoked(k) && (upTo == nil || k.NotBefore.After(*upTo)) {
+		if usable(k) && (upTo == nil || k.NotBefore.After(*upTo)) {
 			nb := k.NotBefore
 			upTo = &nb
 		}

@@ -127,6 +127,11 @@ type Server struct {
 	knownMu     sync.Mutex
 	knownKeys   map[string]bool
 	knownEscrow map[string][]string
+
+	// histories caches each agent's restore failures for the escrow
+	// downloads of one restore
+	historyMu sync.Mutex
+	histories map[string]restoreHistory
 }
 
 // New returns a Server. It makes no network calls.
@@ -166,6 +171,7 @@ func New(opts Options) *Server {
 		reloadRegistry: opts.ReloadRegistry,
 		knownKeys:      map[string]bool{},
 		knownEscrow:    map[string][]string{},
+		histories:      map[string]restoreHistory{},
 	}
 	s.agents.Store(&agentAccess{reg: opts.Registry, logins: opts.Logins})
 	s.nextReload.Store(now().Add(RegistryReloadInterval).UnixNano())
