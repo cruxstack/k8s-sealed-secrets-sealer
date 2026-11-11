@@ -89,8 +89,9 @@ kms:
 checkinInterval: 15s
 
 # On shutdown the agent finishes the command it is running and reports its
-# result, within 45 seconds (a held commands poll and a few commands). Keep
-# this above that.
+# result, within 45 seconds (a held commands poll and a few commands), then
+# reports those it could not finish as failed, within 10 more. Keep this
+# above 55.
 terminationGracePeriodSeconds: 60
 
 log:

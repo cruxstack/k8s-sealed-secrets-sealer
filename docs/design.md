@@ -312,13 +312,17 @@ a creation time, an expiry and a typed payload. The rules:
   reporting, the command expires and the user retries. Key commands are
   idempotent and the control plane re-issues them when it sees the gap again.
   On shutdown the agent starts no new poll, but the poll in flight and the
-  commands it leased still run and are reported, within 45 seconds; the
-  chart's `terminationGracePeriodSeconds` (60) leaves room for that.
+  commands it leased still run and are reported, within 45 seconds. Those
+  still unfinished then are reported as failed within 10 more seconds, so
+  their work can be issued again without waiting for them to expire; the
+  chart's `terminationGracePeriodSeconds` (60) leaves room for both.
 - **Expiry is enforced in code.** DynamoDB TTL deletion is eventual, so the
   control plane and agent both refuse expired commands; TTL only cleans up.
   The agent measures expiry in the control plane's time, from the `Date`
   header of its responses, so a clock that is off does not expire commands.
-  It reports a command that expired before it ran as failed.
+  It neither runs nor reports a command that expired before it ran, and
+  drops the result of one that expired while it ran, since the control
+  plane would refuse those results.
 - **Results are accepted once,** only from the leasing agent and only before
   expiry. The agent retries a result while the control plane cannot be
   reached or answers with a server error, until the command expires.
@@ -335,8 +339,9 @@ a creation time, an expiry and a typed payload. The rules:
   never written is lost until it expires. A poll ends within 25 seconds,
   store calls included, and leases a command only while 3 seconds are left to
   respond. One poll leases at most 16 commands and 512 KiB, well within what
-  agents read (1 MiB) and Lambda returns; the rest wait for the next poll. If
-  a lease fails after others, the poll still sends those.
+  agents read (8 MiB, and 1 MiB up to v0.6.2) and Lambda returns; the rest
+  wait for the next poll. If a lease fails after others, the poll still
+  sends those.
 - **Capabilities come from the agent's Helm values,** never from the control
   plane. Values decide which RBAC is installed and which handlers the agent
   enables. An agent refuses a command for a capability it does not have, and

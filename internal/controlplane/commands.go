@@ -29,9 +29,9 @@ const (
 	// lost.
 	leaseMargin = 3 * time.Second
 	// maxPollCommands and maxPollBytes bound the commands one poll leases.
-	// Agents read at most 1 MiB of a response, and the Lambda adapter sends
-	// at most 4 MiB (cmd/lambda); the largest command, a seal of the
-	// largest value, is about 100 KiB.
+	// Agents read at most 8 MiB of a response (1 MiB up to v0.6.2), and the
+	// Lambda adapter sends at most 4 MiB (cmd/lambda); the largest command,
+	// a seal of the largest value, is about 100 KiB.
 	maxPollCommands = 16
 	maxPollBytes    = 512 << 10
 	// commandLookback is how far back a read of open commands looks: the
