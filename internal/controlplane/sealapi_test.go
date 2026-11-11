@@ -555,7 +555,7 @@ func TestViewSession_SortsChangesByFileKeyAndRegions(t *testing.T) {
 		{ID: "4", Path: "a.yaml", Key: "z", CommandID: "01D", Targets: both},
 		{ID: "5", Path: "a.yaml", Key: "b", CommandID: "01E", Regions: []string{"use1"}, Targets: use1},
 	}
-	v := viewSession(store.Session{}, changes, func(id string) agentView { return agentView{ID: id} })
+	v := viewSession(store.Session{}, changes, nil, func(id string) agentView { return agentView{ID: id} })
 	var got []string
 	for _, c := range v.Changes {
 		got = append(got, fmt.Sprintf("%s:%s%v:%d", c.Path, c.Key, c.Regions, len(c.Targets)))

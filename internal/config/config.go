@@ -81,6 +81,10 @@ type ControlPlane struct {
 	// AdminToken enables the admin API when set. With APP_ENVS, an env may
 	// have its own instead of the shared one.
 	AdminToken string
+	// AdminTokenKeyChanges lets the admin token revoke and reinstate keys;
+	// without it, the token only reads the fleet. With APP_ENVS, each env
+	// sets it for itself.
+	AdminTokenKeyChanges bool
 
 	DynamoDBTable string
 	// DynamoDBEndpoint overrides the DynamoDB endpoint, for local emulators.
@@ -218,8 +222,14 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 		DynamoDBCreateTable: r.boolean("APP_DYNAMODB_CREATE_TABLE", false),
 	}
 	cfg.AgentAudience = r.str("APP_AGENT_AUDIENCE", cfg.PublicURL)
+	// a shared token, often given to monitoring, changes keys only where an
+	// env allows it
+	cfg.AdminTokenKeyChanges = r.boolean("APP_ADMIN_TOKEN_KEY_CHANGES", false)
 	if (cfg.RegistryFile == "") == (len(cfg.Registry) == 0) {
 		r.fail("set exactly one of APP_REGISTRY_FILE and APP_REGISTRY (the registry inline)")
+	}
+	if cfg.AdminTokenKeyChanges && cfg.AdminToken == "" {
+		r.fail("APP_ADMIN_TOKEN_KEY_CHANGES (adminTokenKeyChanges) needs an admin token")
 	}
 
 	cfg.AllowInsecureGitHub = r.boolean("APP_ALLOW_INSECURE_GITHUB", false)
@@ -441,7 +451,9 @@ func (r *reader) secret(key string, minBytes int, required bool) string {
 	return v
 }
 
-func (r *reader) boolean(key string, fallback bool) bool {
+// boolean reads true or false. Every flag so far defaults to false, which
+// unparam notices; the fallback stays for one that will not.
+func (r *reader) boolean(key string, fallback bool) bool { //nolint:unparam // see above
 	v := r.str(key, "")
 	if v == "" {
 		return fallback

@@ -32,10 +32,16 @@ import (
 )
 
 // faultyStore fails reads of every agent's state while failStateReads is
-// set.
+// set, and counts reads of an agent's commands.
 type faultyStore struct {
 	store.Store
 	failStateReads atomic.Bool
+	commandReads   atomic.Int32
+}
+
+func (f *faultyStore) CommandsSince(ctx context.Context, agentID string, since time.Time) ([]store.CommandRecord, error) {
+	f.commandReads.Add(1)
+	return f.Store.CommandsSince(ctx, agentID, since)
 }
 
 func (f *faultyStore) GetAgentStates(ctx context.Context, ids []string) (map[string]store.AgentState, error) {
@@ -92,6 +98,8 @@ agents:
 		Users:        users.Env("dev"),
 		PollInterval: 10 * time.Millisecond,
 		Now:          sh.clock,
+
+		AdminTokenKeyChanges: true,
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
 	for _, id := range []string{"a", "b", "c"} {
@@ -235,6 +243,52 @@ func TestKeyStatus_RevokeAndReinstate(t *testing.T) {
 	}
 }
 
+// The admin token reads the fleet, and changes keys only where the env
+// allows it: it is often shared, and given to monitoring.
+func TestKeyStatus_AdminTokenChangesKeysOnlyWhenAllowed(t *testing.T) {
+	h := newHarness(t, adminToken)
+	k := protoKey(t, time.Now().Add(-time.Hour))
+	if rec := h.do(http.MethodPost, "/agent/v1/checkin", h.login(), checkIn(k)); rec.Code != http.StatusOK {
+		t.Fatalf("check-in = %d %s", rec.Code, rec.Body)
+	}
+	for _, action := range []string{"revoke", "reinstate"} {
+		path := "/api/v1/admin/keys/" + protocol.FingerprintPath(k.Fingerprint) + "/" + action
+		if rec := h.do(http.MethodPost, path, "wrong", nil); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s with a wrong token = %d", action, rec.Code)
+		}
+		if rec := h.do(http.MethodPost, path, adminToken, nil); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "adminTokenKeyChanges") {
+			t.Fatalf("%s with the admin token = %d %s", action, rec.Code, rec.Body)
+		}
+	}
+	if rec, _, _ := h.store.GetKey(context.Background(), k.Fingerprint); rec.Status == store.KeyRevoked {
+		t.Fatal("the admin token revoked a key")
+	}
+	if rec := h.do(http.MethodGet, "/api/v1/admin/fleet", adminToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("fleet = %d", rec.Code)
+	}
+}
+
+// A fingerprint in a path may be in the URL-safe alphabet, or in the
+// standard one, as the UI's copy button copies it, with its slashes
+// escaped.
+func TestKeyStatus_FingerprintInEitherAlphabet(t *testing.T) {
+	kh := newKeyHarness(t)
+	fp := "SHA256:ab/cd+ef/gh="
+	if _, err := kh.store.PutKeyIfAbsent(context.Background(), store.KeyRecord{Fingerprint: fp}); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/api/v1/admin/keys/SHA256:ab%2Fcd+ef%2Fgh=/revoke":       store.KeyRevoked,
+		"/api/v1/admin/keys/SHA256:ab_cd-ef_gh=/reinstate":        store.KeyActive,
+		"/api/v1/admin/keys/SHA256%3Aab%2Fcd%2Bef%2Fgh%3D/revoke": store.KeyRevoked,
+	} {
+		rec := kh.do(http.MethodPost, path, adminToken, nil)
+		if v := decode[keyStatusView](t, rec); rec.Code != http.StatusOK || v.Fingerprint != fp || v.Status != want {
+			t.Fatalf("%s = %d %+v", path, rec.Code, v)
+		}
+	}
+}
+
 func TestKeyStatus_RevokedKeyIsNeverRestored(t *testing.T) {
 	kh := newKeyHarness(t)
 	ka := newTestKey(t, time.Now().Add(-2*time.Hour))
@@ -323,7 +377,7 @@ func TestEscrow_CopiesAndRestoreRotation(t *testing.T) {
 			strings.Count(logs, "event=key.escrowed"), strings.Count(logs, "event=key.escrow_copied"))
 	}
 
-	// a restore gets the first copy; after it fails, the next
+	// a restore gets the first copy; after the copy fails, another
 	got := func() string {
 		t.Helper()
 		rec := kh.download("a", kb.Fingerprint)
@@ -332,31 +386,66 @@ func TestEscrow_CopiesAndRestoreRotation(t *testing.T) {
 		}
 		return decode[protocol.EscrowRecord](t, rec).UploadedBy
 	}
-	failRestore := func() {
+	// failRestore runs a restore of kb on a that fails as f says, through
+	// the agent API, and waits for its retry
+	failRestore := func(f protocol.KeyFailure) {
 		t.Helper()
 		now := kh.clock()
-		res, _ := json.Marshal(protocol.KeysRestoreResult{Failed: []protocol.KeyFailure{{Fingerprint: kb.Fingerprint, Error: "escrowed private key does not match its certificate"}}})
+		body, _ := json.Marshal(protocol.KeysRestorePayload{Fingerprints: []string{kb.Fingerprint}})
+		id := ulid.Make().String()
 		err := kh.store.PutCommand(context.Background(), store.CommandRecord{
-			AgentID: "a", ID: ulid.Make().String(), Type: protocol.CommandKeysRestore, Status: store.CommandFailed,
-			CreatedAt: now, ExpiresAt: now.Add(keyCommandTTL), FinishedAt: &now, Result: string(res),
+			AgentID: "a", ID: id, Type: protocol.CommandKeysRestore, Status: store.CommandQueued,
+			CreatedAt: now, ExpiresAt: now.Add(keyCommandTTL), Payload: string(body),
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
+		if cmds := kh.poll("a"); len(cmds) != 1 || cmds[0].ID != id {
+			t.Fatalf("a commands = %+v", cmds)
+		}
+		f.Fingerprint = kb.Fingerprint
+		res, _ := json.Marshal(protocol.KeysRestoreResult{Failed: []protocol.KeyFailure{f}})
+		if code := kh.result("a", id, protocol.CommandResult{Status: protocol.CommandFailed, Error: "failed to restore 1 of 1 keys", Result: res}); code != http.StatusOK {
+			t.Fatalf("restore result = %d", code)
+		}
+		kh.advance(retryAfterFailure)
 	}
 	if by := got(); by != "a" {
 		t.Fatalf("first download from %s, want a's (the primary)", by)
 	}
-	failRestore()
-	if by := got(); by != "b" {
-		t.Fatalf("download after a failure from %s, want b's", by)
+	// the downloads of one restore read the agent's commands once
+	reads := kh.faulty.commandReads.Load()
+	got()
+	if n := kh.faulty.commandReads.Load() - reads; n != 0 {
+		t.Fatalf("a second download read the agent's commands %d times", n)
 	}
-	failRestore()
+	// a failure that was not the copy's keeps it
+	failRestore(protocol.KeyFailure{Error: "failed to create key secret in sealed-secrets: forbidden", UploadedBy: "a"})
 	if by := got(); by != "a" {
-		t.Fatalf("download after two failures from %s, want a's again", by)
+		t.Fatalf("download after a failure not the copy's from %s, want a's", by)
 	}
-	if !strings.Contains(kh.logs.String(), "uploaded_by=b") {
+	// a failure from an older agent, which names no copy, moves on to the
+	// next copy
+	failRestore(protocol.KeyFailure{Error: "escrowed private key does not match its certificate"})
+	if by := got(); by != "b" {
+		t.Fatalf("download after an older agent's failure from %s, want b's", by)
+	}
+	// a copy found bad is skipped, exactly that copy
+	failRestore(protocol.KeyFailure{Error: "escrowed private key does not match its certificate", UploadedBy: "b", BadCopy: true})
+	if by := got(); by != "a" {
+		t.Fatalf("download after b's copy failed from %s, want a's", by)
+	}
+	// with every copy found bad, it goes round them all
+	failRestore(protocol.KeyFailure{Error: "failed to unwrap data key", UploadedBy: "a", BadCopy: true})
+	if by := got(); by != "b" {
+		t.Fatalf("download after every copy failed from %s, want b's", by)
+	}
+	logs = kh.logs.String()
+	if !strings.Contains(logs, "uploaded_by=b") {
 		t.Error("key.escrow_read does not name the copy's uploader")
+	}
+	if !strings.Contains(logs, "bad_copy=true") {
+		t.Error("key.sync_failed does not say the copy was at fault")
 	}
 }
 
@@ -613,5 +702,77 @@ agents:
 	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], false, nil, keys, now)
 	if len(plan.EscrowNeeded) != maxCopiesPerCheckIn+5 || !slices.Contains(plan.EscrowNeeded, "SHA256:first-04") {
 		t.Errorf("escrow needed = %d keys %v, want %d copies and the 5 first copies", len(plan.EscrowNeeded), plan.EscrowNeeded, maxCopiesPerCheckIn)
+	}
+}
+
+// A cluster missing more keys than one restore carries gets them a command
+// at a time: each restore ends in a controller restart, so the next waits
+// until the last has settled. An agent that cannot tell its controller's
+// key order gets none, since it would refuse them.
+func TestPlanKeySync_OneRestoreAtATime(t *testing.T) {
+	reg, err := registry.Parse([]byte(`
+issuers: [{name: local, url: "https://k8s.example.com", jwksFile: k.json}]
+agents:
+  - {id: a, cluster: a, region: use1, capabilities: [seal, keys], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
+  - {id: b, cluster: b, region: use1, capabilities: [seal, keys], identity: {k8s: {issuer: local, subject: "system:serviceaccount:b:agent"}}}
+`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	st := func(id string, ks ...store.KeyRef) store.AgentState {
+		return store.AgentState{
+			AgentID: id, LastCheckIn: now, KeysComplete: true,
+			Capabilities: []string{protocol.CapabilitySeal, protocol.CapabilityKeys},
+			Commands:     []string{protocol.CommandKeysRestore},
+			Controller:   protocol.Controller{KeyRenewPeriod: "720h0m0s", KeyOrderPriority: "CertNotBefore"},
+			Keys:         ks,
+		}
+	}
+	keys := fleet.Keys{Escrow: map[string][]string{}}
+	var held []store.KeyRef
+	for i := range protocol.MaxRestoreKeys + 50 {
+		nb := now.Add(-time.Duration(1000-i) * time.Hour)
+		k := store.KeyRef{Fingerprint: fmt.Sprintf("SHA256:k%03d", i), NotBefore: nb, NotAfter: nb.AddDate(1, 0, 0)}
+		held = append(held, k)
+		keys.Escrow[k.Fingerprint] = []string{"a"}
+	}
+	fresh := store.KeyRef{Fingerprint: "SHA256:fresh", NotBefore: now, NotAfter: now.AddDate(1, 0, 0)}
+	states := map[string]store.AgentState{"a": st("a", held...), "b": st("b", fresh)}
+	self, _ := reg.Agent("b")
+	plan := func(commands ...store.CommandRecord) []string {
+		t.Helper()
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], false, commands, keys, now).Restore
+	}
+
+	first := plan()
+	if len(first) != protocol.MaxRestoreKeys {
+		t.Fatalf("first restore = %d keys, want %d", len(first), protocol.MaxRestoreKeys)
+	}
+	body, _ := json.Marshal(protocol.KeysRestorePayload{Fingerprints: first})
+	cmd := store.CommandRecord{
+		AgentID: "b", ID: ulid.Make().String(), Type: protocol.CommandKeysRestore, Status: store.CommandQueued,
+		CreatedAt: now, ExpiresAt: now.Add(keyCommandTTL), Payload: string(body),
+	}
+	// while it is open or settling, not even the keys it left out are sent
+	if got := plan(cmd); len(got) != 0 {
+		t.Fatalf("restore while one is open = %d keys", len(got))
+	}
+	finished := now.Add(-time.Minute)
+	cmd.Status, cmd.FinishedAt = store.CommandSucceeded, &finished
+	if got := plan(cmd); len(got) != 0 {
+		t.Fatalf("restore while one settles = %d keys", len(got))
+	}
+	// once it has settled, the next goes out
+	finished = now.Add(-settleAfterSuccess - time.Second)
+	if got := plan(cmd); len(got) == 0 {
+		t.Fatal("no restore once the last settled")
+	}
+
+	unknown := states["b"]
+	unknown.Controller.KeyOrderPriority = ""
+	states["b"] = unknown
+	if got := plan(); len(got) != 0 {
+		t.Fatalf("restore with the key order unknown = %d keys", len(got))
 	}
 }

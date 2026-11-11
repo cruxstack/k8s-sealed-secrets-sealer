@@ -158,6 +158,7 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 	// the logger names the env
 	logger.InfoContext(ctx, "serving env",
 		"agents", len(reg.Agents), "registry_reload", reload != nil, "admin_api", cfg.AdminToken != "",
+		"admin_token_key_changes", cfg.AdminTokenKeyChanges,
 		"github_teams", cfg.GitHubAllowedTeams, "github_admin_teams", cfg.GitHubAdminTeams)
 	return controlplane.New(controlplane.Options{
 		Logger:         logger,
@@ -177,6 +178,8 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 		HSTS:         strings.HasPrefix(cfg.PublicURL, "https://"),
 
 		KeyRenewPeriod: cfg.KeyRenewPeriod,
+
+		AdminTokenKeyChanges: cfg.AdminTokenKeyChanges,
 	}), nil
 }
 

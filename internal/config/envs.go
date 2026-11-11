@@ -17,6 +17,7 @@ import (
 // an env's entry may override some of those.
 var envScoped = []string{
 	"APP_ENV_NAME", "APP_REGISTRY", "APP_REGISTRY_FILE", "APP_DYNAMODB_TABLE", "APP_KMS_TRANSIT_KEY_ID",
+	"APP_ADMIN_TOKEN_KEY_CHANGES",
 }
 
 // reservedEnvNames are the web UI's and the host's own top-level paths,
@@ -40,6 +41,9 @@ type envEntry struct {
 	// AdminToken is the env's own admin token, or the ARN of an SSM
 	// parameter holding it, instead of the shared APP_ADMIN_TOKEN.
 	AdminToken string `yaml:"adminToken"`
+	// AdminTokenKeyChanges lets the env's admin token, its own or the
+	// shared one, revoke and reinstate keys.
+	AdminTokenKeyChanges bool `yaml:"adminTokenKeyChanges"`
 
 	AllowedTeams       []string `yaml:"allowedTeams"`
 	AdminTeams         []string `yaml:"adminTeams"`
@@ -253,6 +257,9 @@ func (e envEntry) settings(resolve func(string) (string, error)) (map[string]str
 		set("APP_ADMIN_TOKEN", read)
 	} else {
 		set("APP_ADMIN_TOKEN", e.AdminToken)
+	}
+	if e.AdminTokenKeyChanges {
+		s["APP_ADMIN_TOKEN_KEY_CHANGES"] = "true"
 	}
 
 	set("APP_REGISTRY_FILE", e.RegistryFile)

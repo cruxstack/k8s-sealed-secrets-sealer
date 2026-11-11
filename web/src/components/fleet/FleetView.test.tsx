@@ -356,13 +356,24 @@ describe("FleetView", () => {
     );
   });
 
-  it("reinstates a revoked key, with its fingerprint in the URL-safe alphabet", async () => {
+  it("reinstates a revoked key after a dialog, with its fingerprint in the URL-safe alphabet", async () => {
     const api = renderFleet(keyedFleet());
     await screen.findByRole("heading", { name: "Keys" });
     fireEvent.click(
       within(keyRow(KEY_C.fingerprint)).getByRole("button", {
         name: /reinstate key/i,
       }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Reinstate this key?",
+    });
+    // what reinstating does: restores it, and may make it the env key
+    expect(dialog).toHaveTextContent(/restored to every cluster/i);
+    expect(dialog).toHaveTextContent(/may become the env key/i);
+    // nothing is sent until it is confirmed
+    expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reinstate key" }),
     );
     await waitFor(() =>
       expect(api.calls.filter((c) => c.method === "POST")).toEqual([
@@ -372,6 +383,23 @@ describe("FleetView", () => {
         }),
       ]),
     );
+  });
+
+  it("says when every shared key is revoked and a new key is needed", async () => {
+    renderFleet(
+      keyedFleet({
+        env_key: null,
+        keys_in_sync: false,
+        no_usable_key: true,
+      }),
+    );
+    const banner = await screen.findByRole("region", {
+      name: /environment key/i,
+    });
+    const alert = within(banner).getByRole("alert");
+    expect(alert).toHaveTextContent("New key needed");
+    expect(alert).toHaveTextContent(/revoked or not valid yet/);
+    expect(alert).not.toHaveTextContent(/keys out of sync/i);
   });
 
   it("marks joining clusters", async () => {

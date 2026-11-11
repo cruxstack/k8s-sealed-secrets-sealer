@@ -245,6 +245,11 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 			"event", "keys.out_of_sync", "env", s.env, "clusters", outOfSync.Clusters, "user", user.Login)
 		writeError(w, http.StatusConflict, outOfSync.Error())
 		return
+	case errors.Is(err, fleet.ErrNoUsableKey):
+		s.logger.WarnContext(ctx, "seal refused: every key the clusters share is revoked or dated in the future; a new key is needed",
+			"event", "keys.out_of_sync", "env", s.env, "reason", "no_usable_key", "user", user.Login)
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	case errors.Is(err, fleet.ErrNoSealer):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -457,6 +462,21 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 			}
 		}
 	}
+	// a key revoked while the seal waited or ran seals nothing more: its
+	// value never becomes a pending change
+	revoked := false
+	if status == protocol.CommandSucceeded {
+		key, _, err := s.store.GetKey(ctx, res.Fingerprint)
+		if err != nil {
+			// the command stays leased and expires; the user seals again
+			s.internalError(w, r, "failed to read key", err)
+			return
+		}
+		if key.Status == store.KeyRevoked {
+			revoked = true
+			status, errMsg = protocol.CommandFailed, "the key was revoked; seal the value again"
+		}
+	}
 
 	summary := ""
 	if status == protocol.CommandSucceeded {
@@ -509,7 +529,8 @@ func (s *Server) finishSeal(w http.ResponseWriter, r *http.Request, agent *regis
 	} else {
 		log.WarnContext(ctx, "seal failed", append([]any{"event", "seal.failed", "error", errMsg}, fields...)...)
 	}
-	if in.Status == protocol.CommandSucceeded && status != protocol.CommandSucceeded {
+	// the agent did its part when only the key's revocation failed it
+	if in.Status == protocol.CommandSucceeded && status != protocol.CommandSucceeded && !revoked {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}

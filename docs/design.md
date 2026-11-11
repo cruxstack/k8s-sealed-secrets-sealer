@@ -610,18 +610,22 @@ certificates only). From those reports the control plane computes:
   flags it, and `key.future_dated` is logged. Without this bound, anyone who
   can create a Secret in one controller namespace could plant a key dated
   2099 that would become the env key everywhere and outrank every renewal.
+  When every key the clusters share is left out, there is no env key and
+  nothing to restore: sealing waits for a new key, and the fleet view and
+  status say so.
 - **Joining clusters:** a cluster that just joined the env, or was rebuilt
   (its whole key set changed), reports only its controller's fresh key.
   For up to 30 minutes after it joined, it is left out of the env key while
   restore gives it the env's keys, if its agent has the `keys` capability
-  and the newest key the other clusters share is escrowed. Its own key is
-  not the env key meanwhile, and it does not seal, since it lacks the env
-  key. The 30 minutes cover a restore (a check-in, a command and a
-  controller restart, about a minute), a key command that expires unleased
-  (10 minutes) and two retries after failures, 5 minutes apart. After
-  that, or when it cannot restore, it counts again, and the fleet view says
-  it holds back the env key. The first clusters of an env have no one to
-  catch up with, so they are never joining.
+  and can tell that its controller orders keys by `NotBefore` (it refuses
+  to restore otherwise), and the newest key the other clusters share is
+  escrowed. Its own key is not the env key meanwhile, and it does not seal,
+  since it lacks the env key. The 30 minutes cover a restore (a check-in, a
+  command and a controller restart, about a minute), a key command that
+  expires unleased (10 minutes) and two retries after failures, 5 minutes
+  apart. After that, or when it cannot restore, it counts again, and the
+  fleet view says it holds back the env key. The first clusters of an env
+  have no one to catch up with, so they are never joining.
 
 To choose the agent for a seal:
 
@@ -636,7 +640,9 @@ To choose the agent for a seal:
    recent check-in.
 4. If no key is held by every in-scope cluster, refuse with "keys out of sync"
    and name the clusters missing keys. Sync (section 8) normally closes the gap
-   within a few check-ins.
+   within a few check-ins. If no cluster is missing a key, every key they
+   share is revoked or future-dated: refuse with "no usable sealing key", as
+   a new key is needed.
 
 ```mermaid
 flowchart TD
@@ -707,10 +713,19 @@ URLs they use the URL-safe alphabet (`+` as `-`, `/` as `_`).
 
 **Restore.** When an in-scope cluster's agent checks in missing an escrowed
 key, the control plane queues `keys.restore.v1` for that agent with the
-missing fingerprints, newest first, 100 at most per command. A download
-returns one copy: the first, or the next one each time that agent's
-restores of the key have failed, so a copy that does not open is skipped
-on the next try. A revoked key is not returned. The agent, for each one not
+missing fingerprints, newest first, 100 at most per command. It queues one
+at a time: none while the agent's last is open, or finished less than 2
+minutes ago (5 after a failure), since each ends in a controller restart.
+It sends none to an agent that cannot tell its controller's key order,
+which would refuse it; the fleet view says so. A download returns one
+copy: the first that agent's restores have not found bad. A failed restore
+names the copy it tried and whether the copy was at fault (it did not
+open, or its private key is not the certificate's); a Secret the agent
+could not create says nothing about the copy. A failure that names no
+copy, from an older agent, moves the agent on to the next copy, as before.
+Only the agent's own results of the last hour count, read once per
+restore, so no agent can steer another away from a good copy. A revoked
+key is not returned. The agent, for each one not
 already present (a key Secret with that fingerprint under any value of the
 key label counts, so a key relabeled, for example as `compromised`, is
 never brought back):
@@ -912,11 +927,13 @@ times should not be the one. Renewal in one cluster is better because:
 
 **Key limit.** Sync spreads every key to every cluster, so with renewal on
 everywhere an env gains about 12 keys a year per cluster. The control plane
-keeps track of 250 keys per cluster, the newest by `NotBefore`, revoked keys
-last. A check-in with more is accepted: the oldest are left out of the
-agent's stored state and of key sync, and the fleet view says so. A key
-older than every key left out of a cluster's report is not counted as
-missing there, since the cluster may hold it, so it is never restored again.
+keeps track of 250 keys per cluster, the newest by `NotBefore`, keys that
+are not usable (revoked, or dated in the future) last, so keys planted with
+a far-off date cannot crowd out the keys in use. A check-in with more is
+accepted: the oldest are left out of the agent's stored state and of key
+sync, and the fleet view says so. A key no newer than the newest usable key
+left out of a cluster's report is not counted as missing there, since the
+cluster may hold it, so it is never restored again.
 A cluster that joins later does not get keys every cluster leaves out.
 `keys.near_limit` is logged when a cluster's keys reach 50% and 80% of the
 limit, and `keys.truncated` once some are left out; the fleet view warns at
@@ -935,7 +952,7 @@ Check-ins read every agent's state, so the item's size multiplies with the
 number of agents, which is the reason not to go higher. A check-in body over
 2 MiB, about 1,100 keys, is still refused. A restore command names at most
 100 keys, because agents built when the limit was 100 refuse more; the rest
-follow in later commands.
+follow in later commands, one at a time.
 
 ## 10. Security model
 
@@ -989,17 +1006,27 @@ keep being used afterwards, which is why every escrow upload names its source
 and why incident response includes revoking keys.
 
 **Revoking a key.** An env admin revokes a key from the fleet page, or a
-script does with the admin token:
+script does with the admin token, in an env that allows it
+(`adminTokenKeyChanges`; the token often goes to monitoring, so by default
+it only reads the fleet):
 
 ```sh
 curl -X POST -H "Authorization: Bearer $APP_ADMIN_TOKEN" \
   https://sealer.example.com/api/v1/envs/dev/admin/keys/SHA256:abc.../revoke
 ```
 
-The fingerprint is in the URL-safe alphabet, and `.../reinstate` undoes it.
-A revoked key is never the env key, never restored to a cluster, never counted
-as missing and never counts as held. `key.revoked` and `key.reinstated` name
-the admin. Revoking changes only what the control plane does: clusters keep
+The fingerprint is in the URL-safe alphabet (or the standard one, with `/`
+written `%2F`), and `.../reinstate` undoes it. Both confirm in a dialog on
+the fleet page. A revoked key is never the env key, never restored to a
+cluster, never counted as missing and never counts as held. A seal still
+running with it fails ("the key was revoked; seal the value again"), and
+a pull request is refused while its session holds values sealed with it,
+which the session view marks, until they are sealed again or removed. Pull
+requests opened before are not changed. `key.revoked` and `key.reinstated`
+name the admin. An admin's grant is checked at sign-in and lasts the
+session (8 hours by default), so someone removed from the admin team can
+change keys until their session ends; shorten `userSessionTTL` if that
+matters. Revoking changes only what the control plane does: clusters keep
 the key and still decrypt with it, and so can anyone who has a copy. Values
 sealed with a key that may be compromised must be rotated (sealed again with
 new values), because git history keeps the old ciphertext; resealing the
@@ -1091,7 +1118,10 @@ shows creating one.
   transaction.
 - **Revoked key:** fingerprint, `NotBefore`, `NotAfter`, who revoked it and
   when, written with the key's status in one transaction, so every
-  check-in reads all revoked keys with one query.
+  check-in reads all revoked keys with one query. Revocations live only in
+  the table: a restore to an earlier point, or a new table, loses those
+  made since, and they must be made again
+  ([docs/operations.md](operations.md#restoring-the-table)).
 - **Session:** owner (GitHub user ID and login), repository (lowercased in
   the key, so there is one per user and repository), base branch and commit,
   idle expiry and maximum age. Using a session (sealing, removing a change)
@@ -1158,12 +1188,13 @@ fingerprint), never values or ciphertexts:
 |              | `command.leased`, `command.finished`; `command.started`,     |
 |              | `command.succeeded`, `command.failed`, `command.expired`     |
 |              | from the agent                                               |
-| Keys         | `key.discovered`, `key.escrowed`, `key.escrow_read`,         |
-|              | `key.escrow_rejected`, `key.restore_queued`, `key.restored`, |
-|              | `key.sync_failed`, `renewal.enable_queued`,                  |
-|              | `renewal.enabled`, `renewal.enable_failed`;                  |
-|              | `key.escrow_uploaded` and `controller.restarted` from the    |
-|              | agent                                                        |
+| Keys         | `key.discovered`, `key.escrowed`, `key.escrow_copied`,       |
+|              | `key.escrow_read`, `key.escrow_rejected`,                    |
+|              | `key.escrow_refused`, `key.restore_queued`, `key.restored`,  |
+|              | `key.sync_failed`, `key.revoked`, `key.reinstated`,          |
+|              | `renewal.enable_queued`, `renewal.enabled`,                  |
+|              | `renewal.enable_failed`; `key.escrow_uploaded` and           |
+|              | `controller.restarted` from the agent                        |
 
 Collect the agents' logs from every cluster as well as the control
 plane's, and keep them for at least a year, or as long as your compliance
@@ -1234,9 +1265,10 @@ one. The pull requests are a second, lasting record: each commit's
   keys and issues). Everyone who may use the env can read `GET .../status`,
   which says whether sealing works and how many of its clusters are ready,
   but names none of them. The UI shows the status as a dot on the env
-  badge, and the fleet only to admins. Automation reads the same fleet
-  through the admin API, with a token rather than a sign-in
-  ([docs/operations.md](operations.md#admin-api)).
+  badge, and the fleet only to admins. Admins also revoke and reinstate
+  keys there. Automation reads the same fleet through the admin API, with
+  a token rather than a sign-in, and changes keys with it only where the
+  env allows it ([docs/operations.md](operations.md#admin-api)).
 - **One sign-in for every env.** A deployment serving several envs signs
   people in once. At sign-in the control plane works out, for each env,
   whether its teams admit the person and whether they administer it; the
@@ -1490,7 +1522,8 @@ agent identity (an IAM role, or an issuer and service account) registered
 in two of them, at start and when a registry changes: one login would
 otherwise be accepted by both. It also refuses two envs naming the same
 transit key, since only separate keys let key policies keep envs apart.
-The admin token is shared unless an env sets its own (`adminToken`).
+The admin token is shared unless an env sets its own (`adminToken`), and
+changes keys only in envs that set `adminTokenKeyChanges`.
 
 The trade-off is isolation. A deployment per env keeps envs apart down to
 the IAM role: whoever can change the dev deployment cannot touch prod. A

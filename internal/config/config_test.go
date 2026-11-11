@@ -59,8 +59,15 @@ func TestLoadControlPlane_Defaults(t *testing.T) {
 	if cfg.PublicURL != "https://sealer.dev.example.com" || cfg.AgentAudience != cfg.PublicURL {
 		t.Errorf("PublicURL = %q, AgentAudience = %q", cfg.PublicURL, cfg.AgentAudience)
 	}
-	if cfg.AdminToken != "" || cfg.DynamoDBCreateTable {
+	if cfg.AdminToken != "" || cfg.AdminTokenKeyChanges || cfg.DynamoDBCreateTable {
 		t.Errorf("admin and create-table must be off by default: %+v", cfg)
+	}
+	token := strings.Repeat("t", MinAdminTokenBytes)
+	if cfg, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_ADMIN_TOKEN": token, "APP_ADMIN_TOKEN_KEY_CHANGES": "true"}))); err != nil || !cfg.AdminTokenKeyChanges {
+		t.Errorf("admin token key changes = %v, %v", cfg, err)
+	}
+	if _, err := loadControlPlane(env(controlPlaneEnv(map[string]string{"APP_ADMIN_TOKEN_KEY_CHANGES": "true"}))); err == nil || !strings.Contains(err.Error(), "needs an admin token") {
+		t.Errorf("key changes without an admin token = %v", err)
 	}
 	if cfg.KeyRenewPeriod != 720*time.Hour {
 		t.Errorf("KeyRenewPeriod = %s, want 720h", cfg.KeyRenewPeriod)

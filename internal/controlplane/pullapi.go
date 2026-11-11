@@ -107,6 +107,18 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 	// the text names each change's documents as they end up
 	effective := store.Effective(changes)
 	slices.SortFunc(effective, compareChanges)
+	// values sealed with a key revoked since are not committed: the key may
+	// be exposed
+	revoked, err := s.store.RevokedKeys(ctx)
+	if err != nil {
+		s.internalError(w, r, "failed to read revoked keys", err)
+		return
+	}
+	if stale := sealedWithRevokedKeys(effective, revoked); len(stale) > 0 {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"sealed with a key that has since been revoked: %s; seal these values again or remove them", strings.Join(stale, ", ")))
+		return
+	}
 	text := s.pullRequestText(sess, user, effective)
 	// values are written in the order they were sealed, so where changes of
 	// a key overlap, the newest wins
@@ -161,6 +173,23 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request) {
 		Files:   text.files,
 		Changes: len(effective),
 	}})
+}
+
+// sealedWithRevokedKeys names the changes sealed with a revoked key, as
+// "key (regions) in path".
+func sealedWithRevokedKeys(changes []store.Change, revoked map[string]store.RevokedKey) []string {
+	var out []string
+	for _, c := range changes {
+		if _, ok := revoked[c.Fingerprint]; !ok {
+			continue
+		}
+		name := c.Key
+		if len(c.Regions) > 0 {
+			name += " (" + plain(strings.Join(c.Regions, ", ")) + ")"
+		}
+		out = append(out, name+" in "+plain(c.Path))
+	}
+	return out
 }
 
 // sealsRunning reports whether any seal of the session is queued or being

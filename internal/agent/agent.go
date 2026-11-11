@@ -19,7 +19,7 @@ import (
 const cycleTimeout = 30 * time.Second
 
 // keysWarnAt is how many keys make the agent warn that its key set nears the
-// most a check-in may report (protocol.MaxKeys).
+// most the control plane keeps track of (protocol.MaxKeys).
 const keysWarnAt = protocol.MaxKeys * 4 / 5
 
 // Collector reads the controller.
@@ -185,8 +185,8 @@ func (a *Agent) checkIn(ctx context.Context, report Report) {
 }
 
 // noteKeyCount warns when the key set reaches keysWarnAt keys, and again
-// whenever the count changes from there: a check-in reporting more than
-// protocol.MaxKeys is refused.
+// whenever the count changes from there: past protocol.MaxKeys, the control
+// plane keeps the newest and leaves the oldest out of key sync.
 func (a *Agent) noteKeyCount(ctx context.Context, n int) {
 	a.mu.Lock()
 	changed := a.keyCount != n
@@ -195,10 +195,10 @@ func (a *Agent) noteKeyCount(ctx context.Context, n int) {
 	switch {
 	case !changed || n < keysWarnAt:
 	case n > protocol.MaxKeys:
-		a.logger.ErrorContext(ctx, "controller holds more sealing keys than a check-in may report; the control plane refuses them",
+		a.logger.ErrorContext(ctx, "controller holds more sealing keys than the control plane keeps; the oldest are left out of key sync",
 			"event", "controller.too_many_keys", "keys", n, "limit", protocol.MaxKeys)
 	default:
-		a.logger.WarnContext(ctx, "controller holds nearly as many sealing keys as a check-in may report",
+		a.logger.WarnContext(ctx, "controller holds nearly as many sealing keys as the control plane keeps",
 			"event", "controller.many_keys", "keys", n, "limit", protocol.MaxKeys)
 	}
 }

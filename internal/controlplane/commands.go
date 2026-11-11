@@ -239,8 +239,11 @@ func (s *Server) logCommandResult(ctx context.Context, agent *registry.Agent, cm
 				append([]any{"event", "key.restored", "fingerprint", fp, "controller_restarted", res.ControllerRestarted}, base...)...)
 		}
 		for _, f := range res.Failed {
-			s.logger.ErrorContext(ctx, "failed to restore sealing key",
-				append([]any{"event", "key.sync_failed", "fingerprint", f.Fingerprint, "error", f.Error}, base...)...)
+			fields := []any{"event", "key.sync_failed", "fingerprint", f.Fingerprint, "error", f.Error}
+			if f.UploadedBy != "" {
+				fields = append(fields, "uploaded_by", f.UploadedBy, "bad_copy", f.BadCopy)
+			}
+			s.logger.ErrorContext(ctx, "failed to restore sealing key", append(fields, base...)...)
 		}
 		if in.Status == protocol.CommandFailed && len(res.Failed) == 0 {
 			s.logger.ErrorContext(ctx, "failed to restore sealing keys",

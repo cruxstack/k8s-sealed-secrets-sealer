@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/fleet"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 )
 
 func TestLimitKeys(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(24 * time.Hour)
 	refs := func(n int) []store.KeyRef {
 		out := make([]store.KeyRef, n)
 		for i := range n {
@@ -26,25 +28,42 @@ func TestLimitKeys(t *testing.T) {
 		return out
 	}
 
-	if kept, upTo := limitKeys(refs(3), nil, 3); len(kept) != 3 || upTo != nil {
+	if kept, upTo := limitKeys(refs(3), nil, 3, now); len(kept) != 3 || upTo != nil {
 		t.Errorf("at the limit: kept %v, up to %v", fps(kept), upTo)
 	}
 	// reported newest first: the newest are kept, oldest first
 	reported := refs(5)
 	slices.Reverse(reported)
-	kept, upTo := limitKeys(reported, nil, 3)
+	kept, upTo := limitKeys(reported, nil, 3, now)
 	if !slices.Equal(fps(kept), []string{"SHA256:02", "SHA256:03", "SHA256:04"}) || upTo == nil || !upTo.Equal(base.Add(time.Hour)) {
 		t.Errorf("over the limit: kept %v, up to %v", fps(kept), upTo)
 	}
 	// revoked keys are left out first, and do not move the cutoff
 	revoked := map[string]store.RevokedKey{"SHA256:04": {}, "SHA256:00": {}}
-	kept, upTo = limitKeys(refs(5), revoked, 3)
+	kept, upTo = limitKeys(refs(5), revoked, 3, now)
 	if !slices.Equal(fps(kept), []string{"SHA256:01", "SHA256:02", "SHA256:03"}) || upTo != nil {
 		t.Errorf("with revoked keys: kept %v, up to %v", fps(kept), upTo)
 	}
+	// keys dated in the future are left out first too: planted ones, dated
+	// decades ahead, would otherwise be the newest and crowd out every key
+	// in use, and the env would lose its env key
+	planted := refs(5)
+	for i := range 3 {
+		nb := now.AddDate(70, 0, i)
+		planted = append(planted, store.KeyRef{Fingerprint: fmt.Sprintf("SHA256:planted-%d", i), NotBefore: nb, NotAfter: nb.AddDate(1, 0, 0)})
+	}
+	kept, upTo = limitKeys(planted, nil, 4, now)
+	if !slices.Equal(fps(kept), []string{"SHA256:01", "SHA256:02", "SHA256:03", "SHA256:04"}) || upTo == nil || !upTo.Equal(base) {
+		t.Errorf("with future-dated keys: kept %v, up to %v", fps(kept), upTo)
+	}
+	// a key just inside the clock skew allowed is usable, and kept
+	skewed := append(refs(2), store.KeyRef{Fingerprint: "SHA256:skewed", NotBefore: now.Add(fleet.FutureSkew - time.Minute)})
+	if kept, _ := limitKeys(skewed, nil, 2, now); !slices.Equal(fps(kept), []string{"SHA256:01", "SHA256:skewed"}) {
+		t.Errorf("with a key inside the skew: kept %v", fps(kept))
+	}
 	// keys made in the same second keep the greater fingerprint
 	tied := []store.KeyRef{{Fingerprint: "SHA256:a", NotBefore: base}, {Fingerprint: "SHA256:c", NotBefore: base}, {Fingerprint: "SHA256:b", NotBefore: base}}
-	if kept, _ := limitKeys(tied, nil, 2); !slices.Equal(fps(kept), []string{"SHA256:c", "SHA256:b"}) {
+	if kept, _ := limitKeys(tied, nil, 2, now); !slices.Equal(fps(kept), []string{"SHA256:c", "SHA256:b"}) {
 		t.Errorf("tied: kept %v", fps(kept))
 	}
 }

@@ -74,6 +74,10 @@ type Fleet struct {
 	EnvKey *store.KeyRef `json:"env_key"`
 	// KeysInSync is true when an env key exists.
 	KeysInSync bool `json:"keys_in_sync"`
+	// NoUsableKey is set when there is no env key although no cluster is
+	// missing a key: every key the clusters share is revoked or dated in
+	// the future, so sealing needs a new key.
+	NoUsableKey bool `json:"no_usable_key"`
 	// KeyLimit is how many keys of a cluster are kept track of
 	// (protocol.MaxKeys).
 	KeyLimit int `json:"key_limit"`
@@ -135,12 +139,20 @@ type Agent struct {
 	JoinedAt *time.Time `json:"joined_at,omitempty"`
 	Issues   []string   `json:"issues,omitempty"`
 
-	// canRestore is set when the agent may be sent keys.restore.v1 and
-	// reports its whole key set; droppedUpTo is the newest NotBefore of
-	// the active keys left out of its report.
-	canRestore  bool
-	droppedUpTo *time.Time
+	// canRestore is set when the agent may be sent keys.restore.v1,
+	// reports its whole key set and knows its controller orders keys by
+	// NotBefore, as the agent requires to restore; orderUnknown when that
+	// order alone keeps it from restoring. droppedUpTo is the newest
+	// NotBefore of the usable keys left out of its report.
+	canRestore   bool
+	orderUnknown bool
+	droppedUpTo  *time.Time
 }
+
+// CanRestore reports whether the agent can restore keys into its cluster:
+// it may be sent keys.restore.v1, reports its whole key set, and knows its
+// controller orders keys by NotBefore.
+func (a Agent) CanRestore() bool { return a.canRestore }
 
 // Compute builds the env's fleet view at now.
 //
@@ -182,10 +194,14 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 		a.KeysDropped = a.KeysReported - len(s.Keys)
 		a.JoinedAt = s.JoinedAt
 		a.droppedUpTo = s.DroppedUpTo
-		a.canRestore = ra.HasCapability(protocol.CapabilityKeys) &&
+		keysOK := ra.HasCapability(protocol.CapabilityKeys) &&
 			slices.Contains(s.Capabilities, protocol.CapabilityKeys) &&
 			slices.Contains(s.Commands, protocol.CommandKeysRestore) &&
 			s.KeysComplete
+		// the agent refuses to restore unless it can tell the controller
+		// orders keys by NotBefore; it reports "" when it cannot
+		a.canRestore = keysOK && ctrl.KeyOrderPriority == orderCertNotBefore
+		a.orderUnknown = keysOK && ctrl.KeyOrderPriority == ""
 
 		if !a.Healthy {
 			a.Issues = append(a.Issues, "has not checked in recently")
@@ -198,6 +214,9 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 		} else {
 			a.InScope = true
 		}
+		if a.orderUnknown {
+			a.Issues = append(a.Issues, "key order unknown (set where the agent cannot read it, or its controller's Deployment could not be read); key restores into it are refused")
+		}
 		a.Issues = append(a.Issues, keyIssues(a, now)...)
 		f.Agents = append(f.Agents, a)
 	}
@@ -206,6 +225,7 @@ func Compute(env string, reg *registry.Registry, states map[string]store.AgentSt
 	f.EnvKey = envKey(f.Agents, func(a *Agent) bool { return a.Joining }, usable)
 	f.KeysInSync = f.EnvKey != nil
 	markMissing(f.Agents, usable)
+	f.NoUsableKey = f.EnvKey == nil && noUsableKey(f.Agents)
 	explainHoldups(f.Agents, f.EnvKey, usable, now)
 	f.Keys = keyList(f.Agents, f.EnvKey, keys, now)
 	return f
@@ -253,6 +273,23 @@ func envKey(agents []Agent, skip func(*Agent) bool, usable func(store.KeyRef) bo
 func newer(a, b *store.KeyRef) bool {
 	return b == nil || a.NotBefore.After(b.NotBefore) ||
 		(a.NotBefore.Equal(b.NotBefore) && a.Fingerprint > b.Fingerprint)
+}
+
+// noUsableKey reports whether in-scope clusters report keys and none is
+// missing one: with no env key, every key they share is then revoked or
+// dated in the future.
+func noUsableKey(agents []Agent) bool {
+	reported := false
+	for _, a := range agents {
+		if !a.InScope {
+			continue
+		}
+		if len(a.MissingKeys) > 0 {
+			return false
+		}
+		reported = reported || len(a.Keys) > 0
+	}
+	return reported
 }
 
 // joinCandidate reports whether an agent may be left out of the env key
@@ -334,7 +371,11 @@ func explainHoldups(agents []Agent, current *store.KeyRef, usable func(store.Key
 			a.Issues = append(a.Issues, fmt.Sprintf(
 				"joined %s ago and still lacks the key every other cluster holds, so it holds back the env key; check its key restores", ago(since)))
 		case !a.canRestore:
-			a.Issues = append(a.Issues, "joined "+ago(since)+" ago and cannot restore the env's keys (it needs the keys capability), so it holds back the env key")
+			why := "it needs the keys capability"
+			if a.orderUnknown {
+				why = "its key order is unknown"
+			}
+			a.Issues = append(a.Issues, "joined "+ago(since)+" ago and cannot restore the env's keys ("+why+"), so it holds back the env key")
 		default:
 			a.Issues = append(a.Issues, "joined "+ago(since)+" ago; the key every other cluster holds has no escrowed copy yet, so it holds back the env key")
 		}

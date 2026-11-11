@@ -480,6 +480,35 @@ describe("sealing", () => {
     await waitFor(() => expect(open).toBeEnabled(), { timeout: 3000 });
   });
 
+  it("asks for a value sealed with a revoked key to be sealed again", async () => {
+    const revoked = { ...changeFor(SEAL), key_revoked: true };
+    const api = fakeApi({
+      me: ME,
+      files: { "example-org/apps": listing() },
+      sessions: {
+        "example-org/apps": {
+          ...SESSION,
+          pending_changes: 1,
+          changes: [revoked],
+        },
+      },
+    });
+    renderAt(PAGE, api);
+    const pending = await screen.findByRole("region", {
+      name: /pending changes/i,
+    });
+    const badge = within(pending).getByText("Seal again");
+    expect(badge).toHaveAttribute("title", expect.stringMatching(/revoked/));
+    const open = within(pending).getByRole("button", {
+      name: "Open pull request",
+    });
+    expect(open).toBeDisabled();
+    expect(open).toHaveAttribute(
+      "title",
+      "Seal again, or remove, the values sealed with a revoked key.",
+    );
+  });
+
   it("jumps to a file from the file list or a pending change", async () => {
     renderAt(
       PAGE,

@@ -292,6 +292,55 @@ func TestKeySync_RestoreRefuses(t *testing.T) {
 	}
 }
 
+// A failed restore names the escrowed copy it tried, and says whether the
+// copy was at fault, so the control plane hands out another one only then.
+func TestKeySync_RestoreNamesTheCopyThatFailed(t *testing.T) {
+	ctx := context.Background()
+	kms := envelope.NewFakeKMS("escrow")
+	k1 := newPair(t, time.Now().Add(-time.Hour))
+	k2 := newPair(t, time.Now().Add(-time.Hour))
+	seal := func(ek escrowedKey) protocol.Envelope {
+		t.Helper()
+		b, _ := json.Marshal(ek)
+		e, err := envelope.Seal(ctx, kms, "escrow", b, escrowContext("dev", k1.fp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	restore := func(env protocol.Envelope, failCreate bool) protocol.KeyFailure {
+		t.Helper()
+		escrow := &memEscrow{records: map[string]protocol.EscrowRecord{k1.fp: {Fingerprint: k1.fp, Envelope: env, UploadedBy: "use1-blue"}}}
+		c := newCluster(t, kms, escrow, "dev", controllerDeployment())
+		if failCreate {
+			c.kube.PrependReactor("create", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(corev1.Resource("secrets"), "", errors.New("denied"))
+			})
+		}
+		out, err := c.sync.Restore(ctx, protocol.Command{Payload: restorePayload(k1.fp)})
+		res, _ := out.(protocol.KeysRestoreResult)
+		if err == nil || len(res.Failed) != 1 {
+			t.Fatalf("restore = %+v, %v", res, err)
+		}
+		return res.Failed[0]
+	}
+
+	// a copy holding another key's private half is the copy's fault
+	if f := restore(seal(escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k2.key)}), false); f.UploadedBy != "use1-blue" || !f.BadCopy {
+		t.Errorf("mismatched copy: failure = %+v", f)
+	}
+	// so is one that does not open
+	other := seal(escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k1.key)})
+	other.Context = escrowContext("prod", k1.fp)
+	if f := restore(other, false); f.UploadedBy != "use1-blue" || !f.BadCopy {
+		t.Errorf("copy that does not open: failure = %+v", f)
+	}
+	// a Secret the agent may not create says nothing about the copy
+	if f := restore(seal(escrowedKey{Certificate: string(k1.cert), PrivateKey: string(k1.key)}), true); f.UploadedBy != "use1-blue" || f.BadCopy {
+		t.Errorf("secret not created: failure = %+v", f)
+	}
+}
+
 // A restored old key would become the controller's newest unless it orders
 // keys by NotBefore, so restore refuses unless it can tell that it does.
 func TestKeySync_RestoreNeedsKnownKeyOrder(t *testing.T) {

@@ -79,6 +79,15 @@ function ChangeItem({
               {r}
             </Badge>
           ))}
+          {change.key_revoked && (
+            <Badge
+              variant="warning"
+              className="shrink-0"
+              title="Sealed with a key an admin has since revoked. Seal the value again, or remove it, before opening a pull request."
+            >
+              Seal again
+            </Badge>
+          )}
         </p>
         <button
           type="button"
@@ -215,7 +224,9 @@ function SessionChanges({
     ? "Wait for the seal in progress to finish."
     : changes.length === 0
       ? "Seal a value first."
-      : null;
+      : changes.some((c) => c.key_revoked)
+        ? "Seal again, or remove, the values sealed with a revoked key."
+        : null;
 
   return (
     <section

@@ -70,6 +70,13 @@ func (s *Server) setKeyStatus(status string) http.HandlerFunc {
 	}
 }
 
+// adminTokenKeyChangesOff answers a key status change made with the admin
+// token in an env that does not allow it.
+func adminTokenKeyChangesOff(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusForbidden,
+		"the admin token may not change keys in this env (see adminTokenKeyChanges); an admin can, from the fleet page")
+}
+
 func statusOf(k store.KeyRecord) keyStatusView {
 	status := k.Status
 	if status == "" {

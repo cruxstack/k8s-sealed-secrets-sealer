@@ -12,20 +12,42 @@ a GitHub sign-in. It exists only when `APP_ADMIN_TOKEN` is set (in the
 control plane chart, through `existingSecret`) or an env sets its own
 `adminToken`, and a token must be at least 32 bytes. `APP_ADMIN_TOKEN`
 reaches every env that doesn't set its own; an env's `adminToken` reaches
-only that env. Besides reading the fleet, a token can revoke and reinstate
-keys; nothing else in the admin API changes anything.
+only that env.
 
-| Route                                                        | Answers                                              |
-| ------------------------------------------------------------ | ---------------------------------------------------- |
-| `GET /api/v1/envs/{env}/admin/fleet`                         | The env's fleet                                      |
-| `GET /api/v1/admin/fleet`                                    | The same, when the control plane serves a single env |
-| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key")              |
-| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key                             |
-| `GET /healthz`, `GET /readyz`                                | `200` while the process runs; no token               |
+A token only reads the fleet, unless the env lets it change keys:
+`APP_ADMIN_TOKEN_KEY_CHANGES=true` with a single env (the chart's
+`adminTokenKeyChanges`), or `adminTokenKeyChanges: true` on the env in
+`APP_ENVS` (the chart's `envs`). Then it revokes and reinstates keys too;
+elsewhere those routes answer `403`. Give an env that allows it its own
+`adminToken`, so a token handed to monitoring cannot change its keys.
+Signed-in admins change keys from the fleet page either way. Nothing else
+in the admin API changes anything.
+
+| Route                                                        | Answers                                     |
+| ------------------------------------------------------------ | ------------------------------------------- |
+| `GET /api/v1/envs/{env}/admin/fleet`                         | The env's fleet                             |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key"),    |
+|                                                              | where the env allows it                     |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key, where the env     |
+|                                                              | allows it                                   |
+| `GET /api/v1/admin/fleet`,                                   | The same, when the control plane serves a   |
+| `POST /api/v1/admin/keys/{fingerprint}/revoke`,              | single env                                  |
+| `POST /api/v1/admin/keys/{fingerprint}/reinstate`            |                                             |
+| `GET /healthz`, `GET /readyz`                                | `200` while the process runs; no token      |
 
 ```sh
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
   https://sealer.example.com/api/v1/envs/prod/admin/fleet
+```
+
+A fingerprint in a path is `SHA256:` and its base64 in the URL-safe
+alphabet, `+` as `-` and `/` as `_`. The standard form, which the fleet
+page's copy button copies, works too with each `/` written `%2F`; a bare
+`/` splits the path, and the route answers `404`:
+
+```sh
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "https://sealer.example.com/api/v1/envs/prod/admin/keys/$(printf %s "$FP" | tr '+/' '-_')/revoke"
 ```
 
 It answers `401` without the right token, and `404` when the admin API is
@@ -45,6 +67,20 @@ The fleet, with one agent:
     "not_after": "2036-09-29T00:00:00Z"
   },
   "keys_in_sync": true,
+  "no_usable_key": false,
+  "key_limit": 250,
+  "keys": [
+    {
+      "fingerprint": "SHA256:...",
+      "not_before": "2026-10-01T00:00:00Z",
+      "not_after": "2036-09-29T00:00:00Z",
+      "holders": ["prod-use1-blue"],
+      "escrow_copies": 1,
+      "env_key": true,
+      "status": "active",
+      "future_dated": false
+    }
+  ],
   "agents": [
     {
       "id": "prod-use1-blue",
@@ -66,26 +102,46 @@ The fleet, with one agent:
         "active_fingerprint": "SHA256:..."
       },
       "keys": [{ "fingerprint": "SHA256:...", "not_before": "...", "not_after": "..." }],
-      "keys_complete": true
+      "keys_complete": true,
+      "keys_reported": 1,
+      "keys_dropped": 0,
+      "joining": false,
+      "joined_at": "2026-10-01T09:30:00Z"
     }
   ]
 }
 ```
 
-| Field           | Meaning                                                      |
-| --------------- | ------------------------------------------------------------ |
-| `env_key`       | The key every in-scope cluster holds, which seals use; null  |
-|                 | when there is none, and sealing is paused.                   |
-| `healthy`       | The agent checked in recently.                               |
-| `in_scope`      | The cluster counts for the env key: it has checked in, and   |
-|                 | its controller orders keys by `CertNotBefore`.               |
-| `capabilities`  | What the agent reported and its registry entry allows.       |
-| `keys_complete` | The agent reported its controller's whole key set; false     |
-|                 | without the `keys` capability.                               |
-| `missing_keys`  | Keys other in-scope clusters hold and this one lacks. Left   |
-|                 | out when there are none.                                     |
-| `issues`        | Why the agent needs attention, in words. Left out when there |
-|                 | are none.                                                    |
+| Field                  | Meaning                                                    |
+| ---------------------- | ---------------------------------------------------------- |
+| `env_key`              | The key every in-scope cluster holds, which seals use;     |
+|                        | null when there is none, and sealing is paused.            |
+| `no_usable_key`        | No env key although no cluster is missing a key: every key |
+|                        | the clusters share is revoked or dated in the future, so a |
+|                        | new key is needed.                                         |
+| `key_limit`            | How many keys of a cluster are kept track of.              |
+| `keys`                 | The keys clusters report and the revoked keys, newest      |
+|                        | first: who holds each, its escrowed copies, whether it is  |
+|                        | the env key, its `status` (`active` or `revoked`, with     |
+|                        | `revoked_by` and `revoked_at`) and whether it is dated in  |
+|                        | the future.                                                |
+| `healthy`              | The agent checked in recently.                             |
+| `in_scope`             | The cluster counts in key comparison: it has checked in,   |
+|                        | and its controller orders keys by `CertNotBefore`, or the  |
+|                        | agent cannot tell. A joining cluster is in scope, but left |
+|                        | out of the env key.                                        |
+| `capabilities`         | What the agent reported and its registry entry allows.     |
+| `keys_complete`        | The agent reported its controller's whole key set; false   |
+|                        | without the `keys` capability.                             |
+| `keys_reported`,       | How many keys the agent reported, and how many of them,    |
+| `keys_dropped`         | the oldest, were left out over `key_limit`.                |
+| `missing_keys`         | Keys other in-scope clusters hold and this one lacks. Left |
+|                        | out when there are none.                                   |
+| `joining`, `joined_at` | The cluster joined the env, or was rebuilt, within 30      |
+|                        | minutes, and is left out of the env key while restore      |
+|                        | gives it the env's keys; and when it joined.               |
+| `issues`               | Why the agent needs attention, in words. Left out when     |
+|                        | there are none.                                            |
 
 ### What to watch
 
@@ -93,14 +149,19 @@ Problems with no request behind them, such as an agent that stops checking
 in, show only in the fleet, so poll it rather than wait for a log event.
 Alert when, for more than a few minutes:
 
-- `env_key` is null: nothing can be sealed in the env;
-- an agent is not `healthy`, or has `missing_keys` or `issues`.
+- `env_key` is null: nothing can be sealed in the env (with
+  `no_usable_key`, until a new key reaches every cluster);
+- an agent is not `healthy`, or has `missing_keys` or `issues`, and is not
+  `joining`: a joining cluster lacks the env's keys, and says so in
+  `issues`, until restore catches it up. If it is still missing keys when
+  its 30 minutes end, it is no longer joining, and alerts.
 
 Alert, too, on these log events, at warn level or above:
 
 - control plane: `key.sync_failed`, `key.escrow_rejected`,
-  `renewal.enable_failed`, `agent.login_rejected`,
-  `agent.checkin_rejected`, `seal.invalid_result`,
+  `key.escrow_refused`, `key.future_dated`, `keys.near_limit`,
+  `keys.truncated`, `keys.out_of_sync`, `renewal.enable_failed`,
+  `agent.login_rejected`, `agent.checkin_rejected`, `seal.invalid_result`,
   `repo.permission_mismatch`, `agent.login_throttled`,
   `registry.reload_failed`, `github.request_failed`;
 - agents: `agent.checkin_failed`, `agent.poll_failed`,
@@ -211,6 +272,18 @@ never need the control plane.
   again. Pre-pull the new image onto the cluster's nodes before upgrading
   to keep the gap short.
 
+### From v0.7.0 or v0.7.1
+
+- The admin token no longer revokes or reinstates keys unless the env
+  allows it: `APP_ADMIN_TOKEN_KEY_CHANGES=true`, or `adminTokenKeyChanges`
+  in the chart or on an env in `envs`/`APP_ENVS`. Until then those routes
+  answer `403`. Reading the fleet is unchanged, and signed-in admins change
+  keys as before.
+- Agents now say which escrowed copy a failed restore tried and whether
+  the copy was at fault, so only a bad copy is skipped. Agents of v0.7.1
+  and before don't, and their failures move them on to the next copy, as
+  before.
+
 ### To several envs on one URL (v0.6.0)
 
 - Agents before v0.6.0 do not name their env. A control plane serving one
@@ -238,6 +311,9 @@ never need the control plane.
 | Escrowed keys                  | Uploaded again by any agent with `keys` whose   |
 |                                | cluster still holds the key, on its next        |
 |                                | check-in.                                       |
+| Revocations (key status and    | Lost: a revoked key counts as active again, can |
+| `KEYS`/`REVOKED#` items)       | become the env key and is restored into         |
+|                                | clusters. Revoke it again.                      |
 | Commands, sessions, seals and  | Lost: seals in flight fail, and people seal     |
 | pending changes                | their pending changes again. All of it expires  |
 |                                | within hours anyway.                            |
@@ -245,31 +321,51 @@ never need the control plane.
 | and rate windows               | windows last a minute. Nothing to do.           |
 | Login replay records           | Short-lived; nothing to do.                     |
 
-So escrow is the only state that cannot be rebuilt, and only for a key that
-no running cluster with the `keys` capability holds any more: after losing
-an env's only cluster, say, or every cluster in a region.
+So two kinds of state cannot be rebuilt. Escrow, for a key that no running
+cluster with the `keys` capability holds any more: after losing an env's
+only cluster, say, or every cluster in a region. And revocations, which
+only admins make, and only the table records.
 
 ### Restoring the table
 
 Point-in-time recovery, and an AWS Backup restore, create a new table; they
 cannot overwrite the old one. So a restore is a configuration change:
 
-1. Restore to a new table name (`sealer-prod-restored`), with the same
+1. List the env's revoked keys, to make the revocations again. From the
+   old table, if it can still be read:
+
+   ```sh
+   aws dynamodb query --table-name sealer-prod \
+     --key-condition-expression 'pk = :pk AND begins_with(sk, :r)' \
+     --expression-attribute-values '{":pk":{"S":"KEYS"},":r":{"S":"REVOKED#"}}' \
+     --projection-expression 'fingerprint, revoked_by, revoked_at'
+   ```
+
+   Otherwise from the control plane's logs: every `key.revoked` and
+   `key.reinstated` event, the latest for each fingerprint.
+2. Restore to a new table name (`sealer-prod-restored`), with the same
    customer-managed KMS key.
-2. On the new table, turn on TTL on `expires_at` and point-in-time
+3. On the new table, turn on TTL on `expires_at` and point-in-time
    recovery, and add it to the backup plan: a restore copies none of them.
-3. Give the control plane's role its DynamoDB actions on the new table.
-4. Set the env's `dynamodbTable` (or `APP_DYNAMODB_TABLE`) to it, and
+4. Give the control plane's role its DynamoDB actions on the new table.
+5. Set the env's `dynamodbTable` (or `APP_DYNAMODB_TABLE`) to it, and
    deploy.
-5. Watch the fleet: agents check in, upload the keys the table lacks, and
+6. Revoke each key from step 1 that the new table does not list as
+   revoked, from the fleet page's Keys table, and reinstate any it lists
+   that was reinstated since. A key no agent has reported to the new table
+   yet is not listed; it is after the agents' next check-in. Until then a
+   revoked key can be the env key, but a pull request refuses values
+   sealed with it once it is revoked again.
+7. Watch the fleet: agents check in, upload the keys the table lacks, and
    restore the keys their clusters lack.
 
 Anything after the restore point is gone: sessions and pending changes,
-and escrow uploads, which agents make again for keys their clusters hold.
-If the table and its backups are both lost, a new empty table (created as
-in [deployment.md](deployment.md#4-the-control-plane-in-the-tools-account),
-then steps 3 to 5) rebuilds the same way, except for keys no running
-cluster holds.
+escrow uploads, which agents make again for keys their clusters hold, and
+revocations, which step 6 makes again. If the table and its backups are
+both lost, a new empty table (created as in
+[deployment.md](deployment.md#4-the-control-plane-in-the-tools-account),
+then steps 4 to 7, with step 1 from the logs) rebuilds the same way, except
+for keys no running cluster holds.
 
 ### Losing a region
 
@@ -308,15 +404,27 @@ the fleet view says it holds back the env key (design §7).
 
 ### A compromised key
 
-Revoke it, from the fleet page's Keys table or with the admin API
-(`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A revoked key
-is never the env key and is never restored into a cluster again; clusters
-that hold it keep it, so values sealed with it still decrypt. Revoking
-doesn't make those values secret again: rotate them, and seal the new
-values. If the revoked key was the newest, the env falls back to the newest
-key every cluster still shares; to get a fresh one, let a controller renew
-or restart one with its key Secrets relabelled, as the sealed-secrets docs
-describe. Reinstate a key revoked by mistake the same way.
+Revoke it, from the fleet page's Keys table or, where the env allows it, with
+the admin API (`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A
+revoked key is never the env key and is never restored into a cluster again;
+clusters that hold it keep it, so values sealed with it still decrypt. Seals
+still running with it fail, and people with pending changes sealed with it see
+them marked "Seal again": their pull request is refused until they seal those
+values again or remove them. Pull requests opened before the revocation are not
+changed; check open ones for the key's fingerprint, which each lists, shortened.
+Revoking doesn't make those values secret again: rotate them, and seal the new
+values. If the revoked key was the newest, the env falls back to the newest key
+every cluster still shares; if there is none, sealing waits for a new key
+(`no_usable_key`). To get a fresh one, let a controller renew or restart one
+with its key Secrets relabelled, as the sealed-secrets docs describe. Reinstate
+a key revoked by mistake the same way.
+
+An admin's grant is checked at sign-in and kept for the session, 8 hours by
+default (`APP_USER_SESSION_TTL`). Someone removed from the admin team, such
+as a suspected insider, can still revoke and reinstate keys until their
+session ends; shorten the session if that matters. Revocations are kept
+only in the env's table; restoring the table loses those made after the
+restore point (see "Restoring the table").
 
 ## Troubleshooting
 
@@ -333,6 +441,19 @@ restores normally close the gap within a few check-ins. If they do not:
   agent's role, for example). A failed restore is retried 5 minutes later.
 
 "No cluster has reported a sealing key yet" means no agent has checked in.
+
+**A seal is refused with "no usable sealing key", or the env says a new
+key is needed.** Every key the clusters share is revoked or dated in the
+future (`no_usable_key` in the fleet). Let a controller renew its key, or
+reinstate a key revoked by mistake.
+
+**An agent's issues say "key order unknown".** The agent cannot tell how
+its controller orders keys: the setting comes from somewhere it cannot
+read, such as a ConfigMap through `envFrom`, or the controller's
+Deployment could not be read. It refuses to restore keys, so the control
+plane sends it none, and its cluster cannot catch up on keys the others
+hold. Set the key order where the agent can read it: the controller's
+arguments, or a plain environment variable.
 
 **"no agent is available to seal".** No agent is healthy, has `seal` and
 holds the env key. The fleet's `healthy` and `issues` say which part is

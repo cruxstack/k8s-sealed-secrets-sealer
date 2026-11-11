@@ -126,7 +126,7 @@ func TestLoadControlPlanes_AdminTokenPerEnv(t *testing.T) {
 	doc := `
 envs:
   - {name: dev, dynamodbTable: a, kmsTransitKeyId: alias/dev, registryFile: r, adminToken: ` + devToken + `}
-  - {name: prod, dynamodbTable: b, kmsTransitKeyId: alias/prod, registryFile: r, adminToken: "` + arn + `"}
+  - {name: prod, dynamodbTable: b, kmsTransitKeyId: alias/prod, registryFile: r, adminToken: "` + arn + `", adminTokenKeyChanges: true}
   - {name: test, dynamodbTable: c, kmsTransitKeyId: alias/test, registryFile: r}
 `
 	cfgs, err := loadControlPlanes(env(sharedEnv(doc, map[string]string{"APP_ADMIN_TOKEN": shared})), func(got string) (string, error) {
@@ -142,6 +142,12 @@ envs:
 	for i, want := range []string{devToken, prodToken, shared} {
 		if cfgs[i].AdminToken != want {
 			t.Errorf("%s's admin token is not its own", cfgs[i].EnvName)
+		}
+	}
+	// only the env that allows it lets its token change keys
+	for i, want := range []bool{false, true, false} {
+		if cfgs[i].AdminTokenKeyChanges != want {
+			t.Errorf("%s: admin token key changes = %v, want %v", cfgs[i].EnvName, cfgs[i].AdminTokenKeyChanges, want)
 		}
 	}
 
@@ -230,8 +236,13 @@ func TestLoadControlPlanes_Refuses(t *testing.T) {
 		want []string
 	}{
 		"env-scoped settings outside APP_ENVS": {
-			sharedEnv(twoEnvs, map[string]string{"APP_DYNAMODB_TABLE": "sealer", "APP_ENV_NAME": "dev"}),
-			[]string{"APP_DYNAMODB_TABLE cannot be set with APP_ENVS", "APP_ENV_NAME cannot be set with APP_ENVS"},
+			sharedEnv(twoEnvs, map[string]string{"APP_DYNAMODB_TABLE": "sealer", "APP_ENV_NAME": "dev", "APP_ADMIN_TOKEN_KEY_CHANGES": "true"}),
+			[]string{"APP_DYNAMODB_TABLE cannot be set with APP_ENVS", "APP_ENV_NAME cannot be set with APP_ENVS",
+				"APP_ADMIN_TOKEN_KEY_CHANGES cannot be set with APP_ENVS"},
+		},
+		"key changes without an admin token": {
+			sharedEnv("envs: [{name: dev, dynamodbTable: a, kmsTransitKeyId: k, registryFile: r, adminTokenKeyChanges: true}]", nil),
+			[]string{"APP_ENVS[dev]: APP_ADMIN_TOKEN_KEY_CHANGES (adminTokenKeyChanges) needs an admin token"},
 		},
 		"no envs":       {sharedEnv("envs: []", nil), []string{"APP_ENVS lists no envs"}},
 		"unknown field": {sharedEnv("envs: [{name: dev, tabel: x}]", nil), []string{"APP_ENVS:", "tabel"}},

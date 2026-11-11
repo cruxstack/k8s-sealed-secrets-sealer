@@ -74,6 +74,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	_, err = fleet.ChooseSealer(f, nil, nil)
 	var outOfSync *fleet.KeysOutOfSyncError
 	switch {
+	case errors.Is(err, fleet.ErrNoUsableKey):
+		v.Sealing = "unavailable"
+		v.Message = "Sealing is paused: every key the clusters share is revoked or not valid yet, so a new key is needed."
 	case errors.As(err, &outOfSync) && len(outOfSync.Clusters) == 0:
 		v.Sealing, v.Message = "unavailable", "Sealing waits for the clusters to report their keys."
 	case errors.As(err, &outOfSync):

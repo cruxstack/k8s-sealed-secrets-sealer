@@ -165,8 +165,8 @@ function KeyRow({
 
 /**
  * The env's keys, newest first, with how many clusters hold each, its
- * escrowed copies and its status. Admins revoke a key here, after a dialog
- * that says what revoking does and does not do, and reinstate one.
+ * escrowed copies and its status. Admins revoke a key here, and reinstate
+ * one, each after a dialog that says what it does.
  */
 export function KeyTable({
   keys,
@@ -179,7 +179,10 @@ export function KeyTable({
   now?: Date;
 }) {
   const queryClient = useQueryClient();
-  const [confirming, setConfirming] = useState<FleetKey | null>(null);
+  const [confirming, setConfirming] = useState<{
+    key: FleetKey;
+    action: "revoke" | "reinstate";
+  } | null>(null);
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["fleet"] });
     // the env key may have moved, and with it whether sealing works
@@ -197,17 +200,16 @@ export function KeyTable({
   });
   const reinstate = useMutation({
     mutationFn: (k: FleetKey) => reinstateKey(k.fingerprint),
-    onSuccess: (_, k) => toast(`Reinstated ${shortFingerprint(k.fingerprint)}`),
+    onSuccess: (_, k) => {
+      setConfirming(null);
+      toast(`Reinstated ${shortFingerprint(k.fingerprint)}`);
+    },
     onSettled: refresh,
   });
+  const pending = revoke.isPending || reinstate.isPending;
 
   return (
     <>
-      {reinstate.error && (
-        <p role="alert" className="text-sm text-destructive">
-          Could not reinstate the key: {extractApiError(reinstate.error)}
-        </p>
-      )}
       <div className="overflow-x-auto rounded-xl border bg-card">
         <table className="w-full text-sm">
           <caption className="sr-only">
@@ -250,9 +252,12 @@ export function KeyTable({
                 }
                 onRevoke={() => {
                   revoke.reset();
-                  setConfirming(k);
+                  setConfirming({ key: k, action: "revoke" });
                 }}
-                onReinstate={() => reinstate.mutate(k)}
+                onReinstate={() => {
+                  reinstate.reset();
+                  setConfirming({ key: k, action: "reinstate" });
+                }}
               />
             ))}
           </tbody>
@@ -261,10 +266,10 @@ export function KeyTable({
 
       <Dialog
         open={confirming !== null}
-        onOpenChange={(o) => !o && !revoke.isPending && setConfirming(null)}
+        onOpenChange={(o) => !o && !pending && setConfirming(null)}
       >
         <DialogContent>
-          {confirming && (
+          {confirming?.action === "revoke" && (
             <>
               <DialogHeader>
                 <DialogTitle>Revoke this key?</DialogTitle>
@@ -272,16 +277,16 @@ export function KeyTable({
                   The control plane stops using{" "}
                   <code
                     className="font-mono text-xs"
-                    title={confirming.fingerprint}
+                    title={confirming.key.fingerprint}
                   >
-                    {shortFingerprint(confirming.fingerprint)}
+                    {shortFingerprint(confirming.key.fingerprint)}
                   </code>
-                  : values are no longer sealed with it, it is not restored to
-                  any cluster, and no cluster counts as missing it.
+                  : nothing more is sealed with it, it is not restored to any
+                  cluster, and no cluster counts as missing it.
                 </DialogDescription>
               </DialogHeader>
               <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
-                {confirming.env_key && (
+                {confirming.key.env_key && (
                   <li>
                     <span className="font-medium text-foreground">
                       It is the env key.
@@ -290,6 +295,11 @@ export function KeyTable({
                     or stops until there is one.
                   </li>
                 )}
+                <li>
+                  Seals still running with it fail, and pending changes sealed
+                  with it must be sealed again before a pull request. Pull
+                  requests already open are not changed.
+                </li>
                 <li>
                   It does not remove the key from any cluster: clusters keep it
                   and still decrypt values sealed with it, as can anyone who has
@@ -315,9 +325,59 @@ export function KeyTable({
                 <Button
                   variant="destructive"
                   disabled={revoke.isPending}
-                  onClick={() => revoke.mutate(confirming)}
+                  onClick={() => revoke.mutate(confirming.key)}
                 >
                   Revoke key
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+          {confirming?.action === "reinstate" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Reinstate this key?</DialogTitle>
+                <DialogDescription>
+                  The control plane uses{" "}
+                  <code
+                    className="font-mono text-xs"
+                    title={confirming.key.fingerprint}
+                  >
+                    {shortFingerprint(confirming.key.fingerprint)}
+                  </code>{" "}
+                  again: it is restored to every cluster that lacks it, and
+                  counts as missing there until it is.
+                </DialogDescription>
+              </DialogHeader>
+              <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
+                <li>
+                  <span className="font-medium text-foreground">
+                    It may become the env key.
+                  </span>{" "}
+                  Once every cluster holds it, it is the env key if it is the
+                  newest key they share, and values are sealed with it.
+                </li>
+                <li>
+                  Reinstate it only if it was revoked by mistake: anyone who has
+                  a copy of an exposed key can decrypt what is sealed with it.
+                </li>
+              </ul>
+              {reinstate.error && (
+                <p role="alert" className="text-sm text-destructive">
+                  Could not reinstate the key:{" "}
+                  {extractApiError(reinstate.error)}
+                </p>
+              )}
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button variant="outline" disabled={reinstate.isPending}>
+                    Cancel
+                  </Button>
+                </DialogClose>
+                <Button
+                  disabled={reinstate.isPending}
+                  onClick={() => reinstate.mutate(confirming.key)}
+                >
+                  Reinstate key
                 </Button>
               </DialogFooter>
             </>

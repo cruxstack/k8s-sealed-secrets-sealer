@@ -88,6 +88,12 @@ export interface Fleet {
   /** The newest key every in-scope cluster holds; null when there is none. */
   env_key: KeyRef | null;
   keys_in_sync: boolean;
+  /**
+   * Set when there is no env key although no cluster is missing a key: every
+   * key the clusters share is revoked or not valid yet, so a new key is
+   * needed.
+   */
+  no_usable_key?: boolean;
   /** How many keys of a cluster the control plane keeps track of. */
   key_limit: number;
   /** The keys clusters report and the revoked keys, newest first. */
@@ -212,6 +218,11 @@ export interface PendingChange {
   sealed_at: string;
   sealed_by: AgentRef;
   fingerprint: string;
+  /**
+   * Set when the key it was sealed with has since been revoked: it must be
+   * sealed again, or removed, before a pull request.
+   */
+  key_revoked?: boolean;
 }
 
 /** The user's pending changes to one repository, based on one commit. */

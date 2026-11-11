@@ -28,9 +28,10 @@ type AgentState struct {
 	CheckInIntervalSeconds int `dynamodbav:"checkin_interval_seconds,omitempty"`
 	// KeysReported is how many keys the agent reported, more than Keys
 	// holds when some were left out; zero in states stored before it was
-	// recorded. DroppedUpTo is the newest NotBefore among the keys left
-	// out that were not revoked, nil when there were none: a key no newer
-	// than that may be held although Keys does not list it.
+	// recorded. DroppedUpTo is the newest NotBefore among the usable keys
+	// left out (neither revoked nor dated in the future), nil when there
+	// were none: a key no newer than that may be held although Keys does
+	// not list it.
 	KeysReported int        `dynamodbav:"keys_reported,omitempty"`
 	DroppedUpTo  *time.Time `dynamodbav:"dropped_up_to,omitempty"`
 	// JoinedAt is when the agent first checked in, or first checked in

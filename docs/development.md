@@ -315,6 +315,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_REGISTRY`                     | control plane | the registry inline (Lambda)       |
 | `APP_AGENT_SESSION_KEY`            | control plane | required, at least 32 bytes        |
 | `APP_ADMIN_TOKEN`                  | control plane | unset: admin API disabled          |
+| `APP_ADMIN_TOKEN_KEY_CHANGES`      | control plane | `false`: the token only reads      |
 | `APP_DYNAMODB_TABLE`               | control plane | required                           |
 | `APP_DYNAMODB_ENDPOINT`            | control plane | AWS (set for emulators)            |
 | `APP_DYNAMODB_CREATE_TABLE`        | control plane | `false` (emulators only)           |
@@ -376,13 +377,18 @@ Each env needs a name, a table and a transit key of its own, and a registry
 one env's registry. An env may also set `kmsRegion`, `allowedTeams` and
 `adminTeams` (which replace the shared teams, even when empty), `adminToken`
 (its own admin token, or an SSM parameter ARN holding it, instead of
-`APP_ADMIN_TOKEN`), `envAnnotation`, `regionAnnotation`, `discoveryFileGlobs`
-and `keyRenewPeriod`. With `APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`,
-`APP_REGISTRY_FILE`, `APP_DYNAMODB_TABLE` and `APP_KMS_TRANSIT_KEY_ID` are
-refused. Env names cannot be the UI's own paths (`secrets`, `fleet`,
-`login` and so on). [docs/deployment.md](deployment.md) shows a whole
-deployment across envs, accounts and regions.
+`APP_ADMIN_TOKEN`), `adminTokenKeyChanges`, `envAnnotation`,
+`regionAnnotation`, `discoveryFileGlobs` and `keyRenewPeriod`. With
+`APP_ENVS` set, `APP_ENV_NAME`, `APP_REGISTRY`, `APP_REGISTRY_FILE`,
+`APP_DYNAMODB_TABLE`, `APP_KMS_TRANSIT_KEY_ID` and
+`APP_ADMIN_TOKEN_KEY_CHANGES` are refused. Env names cannot be the UI's own
+paths (`secrets`, `fleet`, `login` and so on).
+[docs/deployment.md](deployment.md) shows a whole deployment across envs,
+accounts and regions.
 
 `APP_ADMIN_TOKEN` is shared by default: one token reads every env's fleet
 through the admin API ([docs/operations.md](operations.md#admin-api)). An
-env's `adminToken` in `APP_ENVS` gives that env a token of its own.
+env's `adminToken` in `APP_ENVS` gives that env a token of its own. The
+token revokes and reinstates keys only in an env that allows it:
+`APP_ADMIN_TOKEN_KEY_CHANGES=true` with one env, or the env's
+`adminTokenKeyChanges: true` in `APP_ENVS`.

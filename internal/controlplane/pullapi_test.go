@@ -269,6 +269,73 @@ func TestPullRequest_Refuses(t *testing.T) {
 	}
 }
 
+// A key revoked while values sealed with it wait in a session, or while a
+// seal with it runs, never reaches a pull request: the values are sealed
+// again with a new key first.
+func TestPullRequest_RefusesValuesSealedWithARevokedKey(t *testing.T) {
+	sh := newSealHarness(t)
+	ctx := context.Background()
+	sess := sh.openSession()
+	sh.sealNow(sess.ID, billing, "api-token", "billing-s3cr3t")
+	rec := sh.seal(sess.ID, search, "index-token", "search-s3cr3t")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("seal = %d %s", rec.Code, rec.Body)
+	}
+	queued := decode[sealView](t, rec)
+
+	k, ok, err := sh.store.GetKey(ctx, sh.key.Fingerprint)
+	if err != nil || !ok {
+		t.Fatalf("key record: %v %v", ok, err)
+	}
+	at := sh.clock()
+	k.Status, k.StatusBy, k.StatusAt = store.KeyRevoked, "carol", &at
+	if ok, err := sh.store.SetKeyStatus(ctx, k); err != nil || !ok {
+		t.Fatalf("revoke: %v %v", ok, err)
+	}
+
+	// the seal queued before the revocation fails, and makes no change; the
+	// agent did its part, so its result is accepted
+	sh.runAgent(queued.Agent.ID)
+	if got := sh.sealStatus(sess.ID, queued.ID); got.Status != sealFailed || got.Error != "the key was revoked; seal the value again" {
+		t.Fatalf("seal after the revocation = %+v", got)
+	}
+	session := *decode[sessionResponse](t, sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/session", nil, false)).Session
+	if len(session.Changes) != 1 || session.Changes[0].Key != "api-token" || !session.Changes[0].KeyRevoked {
+		t.Fatalf("changes = %+v", session.Changes)
+	}
+
+	// the change sealed earlier is refused, by name
+	rec = sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sess.ID+"/pull-request", nil, true)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "api-token in "+billing) {
+		t.Fatalf("pull request = %d %s", rec.Code, rec.Body)
+	}
+	if _, opened := sh.github.PullRequest("example-org", "apps", 1); opened {
+		t.Fatal("a pull request was opened")
+	}
+
+	// no key is left to seal with: a new one is needed, and seals say so
+	if rec := sh.seal(sess.ID, billing, "api-token", "v"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "a new key is needed") {
+		t.Fatalf("seal with no usable key = %d %s", rec.Code, rec.Body)
+	}
+	if logs := sh.logs.String(); !strings.Contains(logs, "event=keys.out_of_sync") || !strings.Contains(logs, "reason=no_usable_key") {
+		t.Error("keys.out_of_sync does not give the reason")
+	}
+	if got := decode[statusView](t, sh.do("alice", http.MethodGet, "/api/v1/status", nil, false)); got.Sealing != "unavailable" || !strings.Contains(got.Message, "a new key is needed") {
+		t.Fatalf("status = %+v", got)
+	}
+
+	// with a new key in every cluster, the value sealed again goes through
+	revokedKey := sh.key
+	sh.key = newTestKey(t, time.Now().Add(-time.Minute))
+	for _, id := range []string{"dev-use1-blue", "dev-use1-green", "dev-use2-blue"} {
+		sh.checkIn(id, revokedKey.Key, sh.key.Key)
+	}
+	sh.sealNow(sess.ID, billing, "api-token", "billing-s3cr3t")
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request after sealing again = %d", code)
+	}
+}
+
 func TestPullRequest_RetriesWhereGitHubActedButTheAnswerWasLost(t *testing.T) {
 	for _, path := range []string{"/git/refs", "/pulls"} {
 		t.Run(path, func(t *testing.T) {

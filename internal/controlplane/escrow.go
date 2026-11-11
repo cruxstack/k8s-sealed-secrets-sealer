@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"maps"
@@ -35,6 +36,12 @@ const maxEscrowCopies = 3
 // failed restores of a key, to choose the copy it returns: long enough to
 // step through every copy at the pace restores are retried.
 const restoreFailureLookback = time.Hour
+
+// restoreHistoryTTL is how long an agent's restore results, read for one
+// escrow download, serve the downloads after it: a restore downloads all of
+// its keys well within it, and the retry of a failed restore comes
+// retryAfterFailure later, so it always reads them afresh.
+const restoreHistoryTTL = time.Minute
 
 // escrowContext is the encryption context every escrowed key is sealed with.
 func escrowContext(env, fingerprint string) map[string]string {
@@ -145,9 +152,10 @@ func validateEscrow(in protocol.EscrowUpload, env, fp string) string {
 //
 // The agent checks a restored key before installing it: the envelope opens
 // under its own escrow key and context, and the private key matches the
-// certificate. A key with several copies returns the next one each time
-// the agent's restores of it have failed, so a copy that does not open is
-// skipped on the next try.
+// certificate. A key with several copies returns one the agent's restores
+// have not found bad (chooseCopy), so a copy that does not open is skipped
+// on the next try. Only the agent's own results count: another agent could
+// otherwise steer it away from the copies that open.
 func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *registry.Agent) {
 	ctx := r.Context()
 	fp := protocol.ParseFingerprintPath(r.PathValue("fingerprint"))
@@ -177,15 +185,13 @@ func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *r
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	// failures older than that no longer move the choice; command IDs
-	// (ULIDs) are stamped with the wall clock
-	commands, err := s.store.CommandsSince(ctx, agent.ID, time.Now().Add(-restoreFailureLookback))
+	history, err := s.restoreHistory(ctx, agent.ID)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to read commands", "agent_id", agent.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	n := restoreFailures(commands, fp) % len(recs)
+	n := chooseCopy(recs, history[fp])
 	rec := recs[n]
 	s.logger.InfoContext(ctx, "escrowed key downloaded",
 		"event", "key.escrow_read", "env", s.env, "agent_id", agent.ID, "cluster", agent.Cluster, "fingerprint", fp,
@@ -193,10 +199,75 @@ func (s *Server) agentGetEscrow(w http.ResponseWriter, r *http.Request, agent *r
 	httpserver.WriteJSON(w, http.StatusOK, rec)
 }
 
-// restoreFailures counts an agent's restores of a key that failed, from its
-// keys.restore.v1 results.
-func restoreFailures(commands []store.CommandRecord, fp string) int {
-	n := 0
+// copyFailures is what an agent's recent restores of one key say about the
+// key's escrowed copies.
+type copyFailures struct {
+	// bad lists the copies, by uploader, that did not open or held another
+	// key.
+	bad []string
+	// unnamed counts failures that name no copy: from older agents, or
+	// before the agent got one. Each moves the agent on to the next copy,
+	// as before copies were named.
+	unnamed int
+	// failed counts every failure the copy was or may have been at fault
+	// for.
+	failed int
+}
+
+// chooseCopy returns which of a key's copies to hand an agent: the first
+// its restores have not found bad, moved on by one for each failure that
+// names no copy. When every copy failed, it goes round them all.
+func chooseCopy(recs []protocol.EscrowRecord, f copyFailures) int {
+	var good []int
+	for i, r := range recs {
+		if !slices.Contains(f.bad, r.UploadedBy) {
+			good = append(good, i)
+		}
+	}
+	if len(good) == 0 {
+		return f.failed % len(recs)
+	}
+	return good[f.unnamed%len(good)]
+}
+
+// restoreHistory returns what an agent's restores of the last
+// restoreFailureLookback say about each key's copies. It reads the agent's
+// commands once for all the keys a restore downloads, not once per key.
+func (s *Server) restoreHistory(ctx context.Context, agentID string) (map[string]copyFailures, error) {
+	now := s.now()
+	s.historyMu.Lock()
+	h, ok := s.histories[agentID]
+	s.historyMu.Unlock()
+	if ok && !now.Before(h.at) && now.Sub(h.at) < restoreHistoryTTL {
+		return h.byKey, nil
+	}
+	// failures older than the lookback no longer move the choice; command
+	// IDs (ULIDs) are stamped with the wall clock
+	commands, err := s.store.CommandsSince(ctx, agentID, time.Now().Add(-restoreFailureLookback))
+	if err != nil {
+		return nil, err
+	}
+	byKey := restoreFailures(commands)
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.histories) > 10_000 {
+		s.histories = map[string]restoreHistory{}
+	}
+	s.histories[agentID] = restoreHistory{at: now, byKey: byKey}
+	return byKey, nil
+}
+
+// restoreHistory is an agent's restore failures by key, as read at a time.
+type restoreHistory struct {
+	at    time.Time
+	byKey map[string]copyFailures
+}
+
+// restoreFailures sums up an agent's failed restores, by key, from its
+// keys.restore.v1 results. A failure the copy was not at fault for, such
+// as a Secret the agent could not create, says nothing about the copy.
+func restoreFailures(commands []store.CommandRecord) map[string]copyFailures {
+	out := map[string]copyFailures{}
 	for _, c := range commands {
 		if c.Type != protocol.CommandKeysRestore || c.Result == "" {
 			continue
@@ -206,10 +277,19 @@ func restoreFailures(commands []store.CommandRecord, fp string) int {
 			continue
 		}
 		for _, f := range res.Failed {
-			if f.Fingerprint == fp {
-				n++
+			cf := out[f.Fingerprint]
+			switch {
+			case f.UploadedBy == "":
+				cf.unnamed++
+				cf.failed++
+			case f.BadCopy:
+				cf.failed++
+				if !slices.Contains(cf.bad, f.UploadedBy) {
+					cf.bad = append(cf.bad, f.UploadedBy)
+				}
 			}
+			out[f.Fingerprint] = cf
 		}
 	}
-	return n
+	return out
 }
