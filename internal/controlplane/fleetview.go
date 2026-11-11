@@ -51,7 +51,7 @@ func (s *Server) loadFleet(ctx context.Context, now time.Time, usage bool) (flee
 	if err != nil {
 		return fleet.Fleet{}, err
 	}
-	keys, err := s.fleetKeys(ctx, snap, nil)
+	keys, err := s.fleetKeys(ctx, snap, nil, usage)
 	if err != nil {
 		return fleet.Fleet{}, err
 	}
@@ -69,8 +69,10 @@ func (s *Server) loadFleet(ctx context.Context, now time.Time, usage bool) (flee
 
 // fleetKeys returns what the env records about the keys in a snapshot. For
 // a check-in, self is the checking agent, whose keys are read again where
-// it may still add an escrowed copy.
-func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.AgentState) (fleet.Keys, error) {
+// it may still add an escrowed copy. With revoked, the escrowed copies of
+// revoked keys no cluster holds are read too, for the fleet view: a
+// deleted key's are what reinstating it restores from until its purge.
+func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.AgentState, revoked bool) (fleet.Keys, error) {
 	var fps []string
 	for _, st := range snap.states {
 		for _, k := range st.Keys {
@@ -80,6 +82,14 @@ func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.
 	// a reinstated key may be in no cluster, and is restored from escrow
 	for fp := range snap.reinstated {
 		fps = append(fps, fp)
+	}
+	if revoked {
+		now := s.now()
+		for fp, r := range snap.revoked {
+			if !r.Purged(now) {
+				fps = append(fps, fp)
+			}
+		}
 	}
 	escrow, err := s.escrowUploaders(ctx, fps, self)
 	if err != nil {

@@ -380,7 +380,7 @@ func latestRemoval(commands []store.CommandRecord) (protocol.KeysDeleteResult, b
 // the check-in was stored and holds its new state; seen says whether the
 // agent had checked in before.
 func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store.AgentState, snap fleetSnapshot, seen bool) ([]string, error) {
-	keys, err := s.fleetKeys(ctx, snap, &state)
+	keys, err := s.fleetKeys(ctx, snap, &state, false)
 	if err != nil {
 		return nil, err
 	}

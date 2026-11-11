@@ -272,8 +272,10 @@ func TestKeyDelete_ReinstatedKeyHeldByNoneIsRestored(t *testing.T) {
 		}
 		kh.cleanupCheckIn(id, counts(kh.clock(), map[string]int{env.Fingerprint: 1}), env)
 	}
-	if k := fleetKey(t, kh.fleet(), old.Fingerprint); len(k.Holders) != 0 {
-		t.Fatalf("holders after the removals = %v", k.Holders)
+	// held by none, its escrowed copy is still there to reinstate it from,
+	// and the fleet says so
+	if k := fleetKey(t, kh.fleet(), old.Fingerprint); len(k.Holders) != 0 || k.EscrowCopies != 1 {
+		t.Fatalf("after the removals: holders %v, escrow copies %d", k.Holders, k.EscrowCopies)
 	}
 
 	// a restore found it present in b before it was deleted, which would
@@ -311,6 +313,9 @@ func TestKeyDelete_PurgedKeyCannotBeReinstated(t *testing.T) {
 	old := newTestKey(t, time.Now().Add(-48*time.Hour))
 	env := newTestKey(t, time.Now().Add(-time.Hour))
 	kh.cleanupCheckIn("a", nil, old, env)
+	if code := kh.upload("a", old); code != http.StatusOK {
+		t.Fatalf("upload = %d", code)
+	}
 	if rec := kh.setStatus(old.Fingerprint, "revoke"); rec.Code != http.StatusOK {
 		t.Fatalf("revoke = %d", rec.Code)
 	}
@@ -328,7 +333,7 @@ func TestKeyDelete_PurgedKeyCannotBeReinstated(t *testing.T) {
 	}
 	// a still holds it, so it is listed, purged
 	kh.cleanupCheckIn("a", counts(kh.clock(), map[string]int{env.Fingerprint: 1}), old, env)
-	if k := fleetKey(t, kh.fleet(), old.Fingerprint); k.Status != store.KeyDeleted || !k.Purged {
+	if k := fleetKey(t, kh.fleet(), old.Fingerprint); k.Status != store.KeyDeleted || !k.Purged || k.EscrowCopies != 0 {
 		t.Fatalf("purged key a holds = %+v", k)
 	}
 	kh.cleanupCheckIn("a", counts(kh.clock(), map[string]int{env.Fingerprint: 1}), env)

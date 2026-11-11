@@ -532,7 +532,10 @@ func keyList(agents []Agent, env *store.KeyRef, keys Keys, now time.Time) []Key 
 	}
 	out := make([]Key, 0, len(byFP))
 	for _, k := range byFP {
-		k.EscrowCopies = len(keys.Escrow[k.Fingerprint])
+		if !k.Purged {
+			// a purged key's copies are gone, though a cache may list them
+			k.EscrowCopies = len(keys.Escrow[k.Fingerprint])
+		}
 		k.EnvKey = env != nil && env.Fingerprint == k.Fingerprint
 		k.FutureDated = FutureDated(store.KeyRef{NotBefore: k.NotBefore}, now)
 		k.References = references(agents, k.Fingerprint, now)
