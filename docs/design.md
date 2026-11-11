@@ -24,6 +24,9 @@ Goals:
 - **Runs serverless on AWS** (API Gateway and Lambda, preferred) or as a
   container on Kubernetes, from the same code. Past about 50 agents a
   container costs less (section 15).
+- **Old keys can be retired.** Values sealed with older keys can be
+  resealed onto the env key, a file at a time or on a schedule, so keys
+  nothing uses any more can be deleted (section 16).
 - **Runs and is tested locally** on a single k3d cluster.
 - **Agnostic.** Annotation keys, environment, region and cluster names are all
   configuration. The project is MIT licensed.
@@ -36,7 +39,9 @@ Non-goals for v1:
 - Sharing keys or data across environments. Each environment has its own
   sealing keys, KMS keys, agent registry and DynamoDB table, whether it has a
   control plane of its own or shares one URL with others (section 15).
-- Resealing existing values (see section 16).
+- Rotating values. Resealing moves a value onto the env key without
+  changing it (section 16); a value whose key may be exposed must be sealed
+  again with a new value.
 - Non-GitHub source control.
 
 ## 2. Concepts and terms
@@ -75,6 +80,9 @@ Non-goals for v1:
 | Reference     | A value in a SealedSecret a cluster's controller watches,      |
 |               | sealed with a given key. Agents with `cleanup` count them, and |
 |               | a key with any cannot be deleted (section 10).                 |
+| Reseal        | Moving a sealed value onto the env key without changing it:    |
+|               | an agent wraps its one-time key again for the env key, under   |
+|               | the same label (section 16).                                   |
 
 ## 3. Architecture
 
@@ -340,9 +348,9 @@ check-in with a field they do not know, but ignore a header; one that
 predates the header takes the agent to check in every 15 seconds.
 
 Commands are typed and versioned: `seal.v1`, `keys.restore.v1`,
-`renewal.enable.v1`, `keys.delete.v1`. Each has an ID (a ULID), the target
-agent ID, the env, a creation time, an expiry and a typed payload. The
-rules:
+`renewal.enable.v1`, `keys.delete.v1`, `reseal.v1`. Each has an ID (a
+ULID), the target agent ID, the env, a creation time, an expiry and a typed
+payload. The rules:
 
 - **Fixed command set.** The agent has a handler per type compiled in. There is
   no generic exec, apply or proxy command. An unknown type or a payload that
@@ -383,7 +391,9 @@ rules:
   respond. One poll leases at most 16 commands and 512 KiB, well within what
   agents read (8 MiB, and 1 MiB up to v0.6.2) and Lambda returns; the rest
   wait for the next poll. If a lease fails after others, the poll still
-  sends those.
+  sends those. A `reseal.v1` payload, up to 320 KiB, is kept in an item of
+  its own and read only for a command about to be leased, so the reads of
+  an agent's recent commands, every poll and seal makes, do not read it.
 - **Capabilities come from the agent's Helm values,** never from the control
   plane. Values decide which RBAC is installed and which handlers the agent
   enables. An agent refuses a command for a capability it does not have, and
@@ -395,14 +405,18 @@ rules:
 | `keys`     | `keys.restore.v1`, escrow upload       | off     |
 | `renewal`  | `renewal.enable.v1`                    | off     |
 | `cleanup`  | `keys.delete.v1`, counting references  | off     |
+| `reseal`   | `reseal.v1`                            | off     |
 
 `keys` and `renewal` are off by default because they grant access to the
 sealing keys and to the controller Deployment. Key sync, which most
 multi-cluster envs need, works only on agents where an operator turned them
 on. `cleanup` needs `keys`, and is off by default because it reads
-SealedSecrets in every namespace and deletes key Secrets. An agent may have
-none (`APP_CAPABILITIES=none`, which the chart sets when all are off): it
-still checks in, reporting its controller's active key.
+SealedSecrets in every namespace and deletes key Secrets. `reseal` needs
+`keys` too, whose key Secrets it opens values with, and adds no RBAC; it is
+off by default because it uses the cluster's private keys for the control
+plane (section 16). An agent may have none (`APP_CAPABILITIES=none`, which
+the chart sets when all are off): it still checks in, reporting its
+controller's active key.
 
 The only command that deletes anything is `keys.delete.v1`, and an agent
 refuses it for a key that any value in its cluster is sealed with
@@ -1074,7 +1088,10 @@ can delete those as it can any data. **It cannot** read or forge any private
 sealing key, decrypt anything stored before or after, make an agent produce
 cluster-wide ciphertext or encrypt to a key outside the env, make an agent
 delete a key a value in its cluster is sealed with, turn on agent
-capabilities, or run anything else on a cluster.
+capabilities, or run anything else on a cluster. Through agents with
+`reseal`, it can have values it holds the ciphertext of moved onto the env
+key, but never under another label: not into another namespace, name or
+scope (section 16).
 
 **A compromised cluster** already holds every env key, so injecting a key
 gives it nothing new while it is compromised. An injected key would, however,
@@ -1232,23 +1249,34 @@ no secondary indexes, and on-demand capacity suits its load.
 [docs/deployment.md](deployment.md#4-the-control-plane-in-the-tools-account)
 shows creating one.
 
-| Entity         | `pk`               | `sk`                | TTL                   |
-| -------------- | ------------------ | ------------------- | --------------------- |
-| Agent state    | `AGENT#<id>`       | `STATE`             | none                  |
-| Key usage      | `AGENT#<id>`       | `USAGE`             | none                  |
-| Command        | `AGENT#<id>`       | `CMD#<ulid>`        | expiry + 1 hour       |
-| Key            | `KEY#<fp>`         | `META`              | none                  |
-| Key escrow     | `KEY#<fp>`         | `ESCROW`            | purge, once deleted   |
-| Escrow copy    | `KEY#<fp>`         | `ESCROW#<agent id>` | purge, once deleted   |
-| Revoked key    | `KEYS`             | `REVOKED#<fp>`      | none                  |
-| Reinstated key | `KEYS`             | `REINSTATED#<fp>`   | reinstated + 7 days   |
-| Session        | `USER#<user id>`   | `SESSION#<repo>`    | idle timeout (1 hour) |
-| Session count  | `USER#<user id>`   | `SESSIONS`          | session's maximum age |
-| Seal           | `SESSION#<id>`     | `SEAL#<ulid>`       | session's maximum age |
-| Pending change | `SESSION#<id>`     | `CHANGE#<id>`       | session's maximum age |
-| Change places  | `SESSION#<id>`     | `CHANGES`           | last place's end      |
-| Login replay   | `REPLAY#<hash>`    | `REPLAY`            | signature expiry      |
-| Rate window    | `RATE#<key>#<end>` | `RATE`              | window end            |
+| Entity          | `pk`               | `sk`                  | TTL                    |
+| --------------- | ------------------ | --------------------- | ---------------------- |
+| Agent state     | `AGENT#<id>`       | `STATE`               | none                   |
+| Key usage       | `AGENT#<id>`       | `USAGE`               | none                   |
+| Command         | `AGENT#<id>`       | `CMD#<ulid>`          | expiry + 1 hour        |
+| Command payload | `COMMAND#<ulid>`   | `PAYLOAD`             | expiry + 1 hour        |
+| Key             | `KEY#<fp>`         | `META`                | none                   |
+| Key escrow      | `KEY#<fp>`         | `ESCROW`              | purge, once deleted    |
+| Escrow copy     | `KEY#<fp>`         | `ESCROW#<agent id>`   | purge, once deleted    |
+| Revoked key     | `KEYS`             | `REVOKED#<fp>`        | none                   |
+| Reinstated key  | `KEYS`             | `REINSTATED#<fp>`     | reinstated + 7 days    |
+| Session         | `USER#<user id>`   | `SESSION#<repo>`      | idle timeout (1 hour)  |
+| Session count   | `USER#<user id>`   | `SESSIONS`            | session's maximum age  |
+| Seal            | `SESSION#<id>`     | `SEAL#<ulid>`         | session's maximum age  |
+| Pending change  | `SESSION#<id>`     | `CHANGE#<id>`         | session's maximum age  |
+| Change places   | `SESSION#<id>`     | `CHANGES`             | last place's end       |
+| File reseal     | `SESSION#<id>`     | `RESEAL#<ulid>`       | session's maximum age  |
+| Schedule        | `RESEAL`           | `SCHEDULE#<id>`       | none                   |
+| Schedule count  | `RESEAL`           | `SCHEDULES`           | none                   |
+| Run             | `RESEAL`           | `RUN#<ulid>`          | end + 180 days         |
+| Run repository  | `RUN#<ulid>`       | `REPO#<repo>`         | last change + 180 days |
+| Run work        | `RUN#<ulid>`       | `WORK#<repo>`         | 30 days                |
+| Run results     | `RUN#<ulid>`       | `BATCH#<repo>#<ulid>` | 30 days                |
+| Results marker  | `RUN#<ulid>`       | `DONE#<repo>#<ulid>`  | 30 days                |
+| Open reseal PR  | `RESEAL`           | `PR#OPEN#<repo>#<n>`  | none                   |
+| Ended reseal PR | `RESEAL`           | `PR#DONE#<repo>#<n>`  | end + 180 days         |
+| Login replay    | `REPLAY#<hash>`    | `REPLAY`              | signature expiry       |
+| Rate window     | `RATE#<key>#<end>` | `RATE`                | window end             |
 
 - **Agent state:** last check-in, version, supported commands, capabilities,
   controller settings, key set (the newest 250), how many keys were
@@ -1348,6 +1376,54 @@ shows creating one.
   stored apart from the targets so listings leave them out; they are
   never returned to clients. Never plaintext. Discarding a session leaves
   its seals and changes to expire unreachable.
+- **Command payload:** the payload of a `reseal.v1`, kept apart from its
+  command, which keeps its size, so polls read only small items.
+- **File reseal:** a file's values sent for resealing in a session: the
+  file, agent, env key, requesting user, the documents values were sent
+  from, each command with its keys and items, the counts known before
+  sending, and what each command did (`outcomes`, one entry per command,
+  set once, so commands finishing at once do not overwrite each other).
+  Its pending changes are `Pending change` items of kind `reseal`, which
+  name the keys their values came off (`resealed_from`).
+- **Schedule:** name, repositories, orgs, interval, whether it is enabled,
+  its next run, who created and last changed it when, its active run and
+  its latest. Starting a run writes the run and sets the schedule's active
+  run in one transaction, on condition it has none (and, for a run on
+  schedule, that its next run is still the one read), so one tick starts a
+  given run and a schedule has one active run at most.
+- **Schedule count:** how many schedules the env has, changed in the same
+  transaction as each schedule created or deleted, on condition it stays
+  under 50.
+- **Run:** the schedule, its name, scope and creator as the run started,
+  trigger, who requested it, status, start and end, how many repositories
+  and how many of them ended which way, value counts, pull requests opened,
+  the repository keys started and not done, the last one started (runs go
+  through their repositories in key order), and the lease of the tick
+  advancing it (`lease_until`, epoch milliseconds). A tick saves it on
+  condition it still holds the lease and the run is active, so a run an
+  admin cancelled meanwhile stays cancelled. Runs are listed newest first,
+  one query of the `RESEAL` partition.
+- **Run repository:** a repository's status in a run, its file and value
+  counts, its pull request, why it was skipped or failed, at most 50
+  failures and the keys values came off: what run views read, for every
+  repository of a run.
+- **Run work:** what a run needs to carry on with a repository, apart, so
+  run views do not read it: the commit read, the candidate files and how
+  many were read, the files with documents for the env, the commands
+  queued, and the attempts to open its pull request.
+- **Run results and marker:** what one of a run's commands did with each
+  value, with the document it is for and its new ciphertext, written when
+  the result comes in, with a small marker in the same transaction; ticks
+  list a repository's markers to see which commands answered, and read the
+  results once all have. They are kept only while runs can use them.
+- **Reseal pull request:** see section 16. Open ones are under `PR#OPEN#`
+  and move under `PR#DONE#` in one transaction when a tick sees them merged
+  or closed, so the open ones, which ticks and the default list read, are
+  one query however many ended ones are kept. Schedules, runs and pull
+  requests share the `RESEAL` partition: its reads are small and a few a
+  minute, far from a partition's limits. An env with thousands of open
+  reseal pull requests at once would want them under a partition per
+  repository owner.
 - **Login replay:** a hash of an aws-sts login's signature, written once STS
   has accepted the login, so each signed request logs an agent in only once.
   It is kept 35 minutes, longer than STS accepts the signature.
@@ -1371,6 +1447,11 @@ fingerprint), never values or ciphertexts:
 |              | `change.removed`, `pr.opened`, `pr.failed`; `seal.sealed`    |
 |              | from the agent                                               |
 | Repositories | `repo.permission_mismatch`                                   |
+| Resealing    | `reseal.requested`, `reseal.schedule_created`,               |
+|              | `reseal.schedule_updated`, `reseal.schedule_deleted`,        |
+|              | `reseal.run_started`, `reseal.run_finished`,                 |
+|              | `reseal.pr_opened`, `reseal.pr_merged`, `reseal.pr_closed`,  |
+|              | `reseal.failed`; `reseal.done` from the agent                |
 | Rate limits  | `request.rate_limited`                                       |
 | Agents       | `agent.login`, `agent.session_renewed`,                      |
 |              | `agent.login_rejected`, `agent.login_throttled`,             |
@@ -1395,7 +1476,8 @@ plane's, and keep them for at least a year, or as long as your compliance
 rules ask, where people who can seal cannot change them. On Lambda, a
 CloudWatch Logs group keeps everything until a retention is set, so set
 one. The pull requests are a second, lasting record: each commit's
-`Requested-by:` trailer names who sealed which keys into which files.
+`Requested-by:` trailer names who sealed which keys into which files, and
+for a run's, who created its schedule.
 
 ## 12. User authentication and authorization
 
@@ -1464,6 +1546,11 @@ one. The pull requests are a second, lasting record: each commit's
   keys there. Automation reads the same fleet through the admin API, with
   a token rather than a sign-in, and changes keys with it only where the
   env allows it ([docs/operations.md](operations.md#admin-api)).
+- **Resealing** is for admins too: they reseal a file in their session, for
+  which they also need write access to the repository, manage schedules,
+  and see runs and reseal pull requests, which show only the repositories
+  they can read (section 16). The admin token reads schedules, runs and
+  reseal pull requests, and changes none of them.
 - **One sign-in for every env.** A deployment serving several envs signs
   people in once. At sign-in the control plane works out, for each env,
   whether its teams admit the person and whether they administer it; the
@@ -1499,6 +1586,8 @@ one. The pull requests are a second, lasting record: each commit's
   | Open a session            | 10 per user                 |
   | Seal a value              | 20 per session, 30 per user |
   | Open a pull request       | 5 per user                  |
+  | Reseal a file             | 10 per user                 |
+  | A run, or reseal PRs      | 60 per user                 |
 - **GitHub's rate limit.** One App's hourly budget serves every env and
   user. Each instance keeps what GitHub told it, shared by the envs it
   serves: the installation's repositories for 5 minutes, a repository's
@@ -1610,7 +1699,8 @@ a local image registry, driven by Tilt through atmos (`atmos dev up`).
 
 The simulated clusters are `dev-use1-blue`, `dev-use1-green` and
 `dev-use2-blue`: one env, two regions, two clusters in one region. Their
-agents have every capability, and count key references every 30 seconds.
+agents have every capability, and count key references every 30 seconds;
+the control plane ticks every 5 seconds.
 Agents use k8s-oidc identity; all three share the k3d cluster's issuer and
 are told apart by their service account subject. Each simulated cluster
 gets the same Helm chart and RBAC layout as a real one. The same control
@@ -1637,6 +1727,11 @@ all three. The end-to-end tests prove the same property another way:
   its controller watches. A key no value uses is revoked, deleted once every
   cluster counted it since, removed from every cluster, and reinstated from
   escrow.
+- A value sealed with an older key is resealed in a session, and only it
+  changes in the pull request; applied, it decrypts to the same value in
+  every cluster, which counts it under the env key. A schedule's run opens
+  one pull request for the repository, a second skips it while that is
+  open, and the tick sees it closed once it is closed in the mock.
 
 [docs/development.md](development.md#tests-and-checks) lists every check.
 Key rotation (the env key staying put until every cluster holds a new key)
@@ -1679,9 +1774,12 @@ and is then read again about once a minute (section 4), or packaged as a
 file. The function's role needs `ssm:GetParameter` on those parameters (and
 `kms:Decrypt` for SecureStrings), the table's DynamoDB actions and
 `kms:Decrypt` on its KMS key, and `kms:GenerateDataKey` on the transit key.
-Each agent holds a Lambda invocation most of the time, so past about 50
-agents a container costs less; [docs/operations.md](operations.md) has the
-size limits and what each agent costs.
+An EventBridge Scheduler schedule invokes the function every minute with
+`{"sealer": "tick"}` to run reseal schedules (section 16); its role needs
+`lambda:InvokeFunction` on the function. Each agent holds a Lambda
+invocation most of the time, so past about 50 agents a container costs
+less; [docs/operations.md](operations.md) has the size limits and what each
+agent costs.
 
 AWS infrastructure lives in a separate repository,
 `terraform-aws-k8s-sealed-secrets-sealer`: API Gateway HTTP API, Lambda,
@@ -1747,16 +1845,236 @@ has its own table, keys and agents, and sessions cannot cross envs), but
 choose one deployment per env when prod must be isolated from everything
 else.
 
-## 16. Future work (not in v1)
+## 16. Resealing
 
-- **Reseal all.** Re-encrypt every sealed value in the env's repositories with
-  the env key, so old keys can eventually be removed. Either the agent calls
-  the controller's `/v1/rotate` (which re-encrypts without exposing plaintext
-  to the agent but uses the controller's newest key) or re-encrypts in its own
-  memory with the env key. Results go through the same session and pull
-  request pipeline. Needs long-running batch commands with progress.
+Resealing moves sealed values off older keys onto the env key, without
+changing them. Once every value a key sealed has moved, and the pull requests
+that move them are merged and deployed, the key has no references left and
+can be deleted (section 10, "Deleting a key").
 
-## 17. Build order
+Resealing does not protect a value sealed with a key that may be exposed.
+Git history keeps the old ciphertext, which the old key still opens, so such
+a value must be rotated: a new value sealed in its place. The UI says so
+wherever it offers resealing, and so does every pull request it opens.
+
+**How a value is resealed.** A sealed value is sealed-secrets'
+`HybridEncrypt` output: a 2-byte big-endian length, an RSA-OAEP (SHA-256)
+encryption of a one-time AES-256 key under the value's label, then the value
+encrypted with AES-GCM under that key, with a zero nonce and no additional
+data. The label (`namespace/name`, the namespace, or nothing, by scope) binds
+only the RSA part. An agent with the `reseal` capability rewraps each value
+of a `reseal.v1` command:
+
+1. It derives the label from the item's namespace, name and scope as the
+   controller does (`EncryptionLabel`), and tries only that label.
+2. It decrypts the RSA part with the keys of the key Secrets in its
+   controller's namespace, each named by its private key as the reference
+   count names them (section 10), the env key first. A value the env key
+   opens is `current`; one no key opens is `failed`.
+3. Otherwise it encrypts the same one-time key to the env key, under the
+   same label, keeps the AES-GCM part as it is, and checks that the env
+   key's private key opens the new RSA part to the same one-time key. The
+   value is `resealed`, and the result names the key it came off.
+
+The value itself is never decrypted, not even in the agent's memory, and
+the one-time key is cleared at once. Keeping it is sound: it was only ever
+used for this value, and the old ciphertext, which git keeps, already opens
+to the value with the old key; the new ciphertext opens to nothing more.
+
+**Why it is safe against a compromised control plane.** The new value has
+the label the old one opened with, so a reseal can never move a value to
+another namespace, another name or a wider scope: a command that names
+another namespace for a ciphertext gets a failure, since no key opens it
+under that label. The agent reseals only to a key its own controller holds
+and the command names, refuses cluster-wide values as it refuses to seal
+them, and returns ciphertexts only, never a one-time key or a value. The
+control plane checks that each resealed value's AES-GCM part is the
+original's, byte for byte. So a compromised control plane can have values it
+holds the ciphertext of moved onto the env key, where only clusters that
+could open them already can; nothing more.
+
+**Commands.** A `reseal.v1` carries at most 500 values and 320 KiB, counting
+each value's ciphertext and 1 KiB, so the command and its result each fit
+in a DynamoDB item; every value of a key in a file goes in the same command.
+Its payload is kept in an item of its own, read only when the command is
+leased, so the polls that read an agent's commands do not read it. It
+expires after 10 minutes, as key commands do. The agent is chosen as for a
+seal (section 7), among healthy agents with `reseal` that report `reseal.v1`
+and hold the env key, in the documents' regions first. A value whose key
+that agent's cluster does not hold fails there; it is not tried elsewhere.
+
+### Resealing a file
+
+An env admin who can write to the repository reseals a file from their
+session (`POST .../session/{id}/reseals` with its `path`). The control
+plane reads the file at the session's commit and sends every value of its
+documents for the env, except where a pending change of the session sets
+the key in that document: a reseal never replaces a value sealed in the
+session. The values of a document that cannot be sealed into, such as a
+cluster-wide one, fail without being sent.
+
+Each key with resealed values becomes a pending change of kind `reseal`
+that sets only the documents whose value was resealed; `current` and
+`failed` values make none. Its ID is its own, so a later seal of the key
+replaces it in the documents the seal covers, as any newer seal does. Every
+key with values to reseal holds a place among the session's 50 changes
+until its command is done, and a file whose keys would not fit is refused
+at once, saying how many changes it can make. The pull request lists the
+resealed values apart from the sealed ones: which keys of which files, in
+which documents, from which keys to the env key. It is recorded as a reseal
+pull request (below).
+
+`GET .../session/{id}/reseals/{reseal}` serves its progress: `queued`,
+`resealing`, `done`, `failed` or `expired`, with the file's values counted
+(total, resealed, current, failed, and pending: left out for a pending
+change), the failures and the changes it made. The values of a command no
+agent answered in time fail.
+
+### Schedules and runs
+
+An env admin creates schedules, at most 50 per env: a name, repositories
+(`owner/name`, up to 100) and orgs (up to 20), at least one of them, and an
+interval of 1 to 365 days. A new schedule's next run is an interval from
+now. Once a run starts on schedule, the next is an interval after the one
+that started, moved past now if runs were missed. Changing the interval
+sets the next run an interval from now, as does enabling the schedule
+again; disabling it clears the next run, and any other change keeps it.
+
+A run is started by a tick when its schedule is due, or by an admin with
+"Run now". A schedule has one active run at most: a due schedule waits for
+it, and "Run now" is refused meanwhile (409). Ticks advance a run a bounded
+step at a time:
+
+1. **Discover** the repositories: those listed, and every repository of the
+   GitHub App's installation owned by a listed org, compared without case,
+   leaving out archived and disabled ones. A listed repository the App
+   cannot reach fails. A run covers at most 500 repositories, the first by
+   name, and says how many it left out.
+2. **Each repository,** five at a time:
+   - it is skipped while a reseal pull request an earlier run opened there
+     is still open, checked on GitHub first when it was not lately: merge or
+     close it first;
+   - the head of its default branch is read, its files are found as for
+     people (section 13), at most 200 with documents for the env, and each
+     file's values go to an agent as the file is read, a few files a tick,
+     while agents have fewer than 8 commands in flight;
+   - once every command answered or expired, one pull request carries every
+     resealed value, in one commit on `sealer/<env>/reseal-<run id>` from
+     the head the run read, opened through the same GitHub App code as a
+     session's. Its text says how many values in how many files moved from
+     which keys to the env key, names the schedule, and says resealing does
+     not rotate values; its `Requested-by:` trailer names the schedule's
+     creator. No ciphertext. A repository with nothing resealed is
+     `unchanged`, or `failed` when values failed.
+3. **Finish:** `succeeded` when every repository was opened, unchanged or
+   skipped; `partial` when some failed; `failed` when all did, or none was
+   in scope. An admin can cancel a run: it queues nothing more, its commands
+   in flight expire, and pull requests it opened stay. Deleting a schedule
+   cancels its active run.
+
+A run does not hang on an agent that never answers: its commands expire
+after 10 minutes, and their values fail ("no agent answered in time"). For
+its first 10 minutes, a run waits for an agent able to reseal, as one that
+restarts comes back; after that, values no agent can take fail, and a later
+run tries them again.
+
+**Ticks.** In a container, `cmd/server` ticks every `APP_TICK_INTERVAL` (a
+minute by default, 5 seconds in the local stack). On Lambda, an EventBridge
+Scheduler schedule invokes the function every minute (`rate(1 minute)`)
+with the payload `{"sealer": "tick"}`, and the function ticks within the
+time the invocation has, less 10 seconds; any other event is an HTTP
+request, as before. Without that schedule, schedules never run. A tick,
+for each env in turn:
+
+- starts the due schedules, each with a conditional write on its next run,
+  so of ticks that start the same run, one does;
+- leases each active run it advances (`lease_until`, a conditional write),
+  so overlapping ticks, on several Lambda instances or containers, never
+  advance one at once, and gives the lease up when it is done;
+- checks open reseal pull requests on GitHub, the least recently checked
+  first, at most 10, each once it has gone 15 ticks unchecked: about every
+  15 minutes at a tick a minute.
+
+Ticks spend at most 100 GitHub requests a minute in an env, counted in the
+table, so every instance shares the count. One step that needs more, such
+as opening a pull request of many files, runs in a minute of its own.
+
+### Reseal pull requests
+
+Every pull request with resealed values is recorded: those runs open
+(`source: schedule`, with the schedule and run) and those opened from a
+session with reseal changes (`source: session`). Each has its repository,
+number, URL, title and branch, when it opened, who requested it, how many
+values in how many files it reseals, the keys it moves values off, and its
+state: `open`, `merged` or `closed`, with when, and when it was last
+checked. Merged and closed ones are kept 180 days.
+
+### Who sees what
+
+Env admins manage schedules, and see runs and reseal pull requests.
+Repository names are never shown to someone who cannot read them: a run's
+details and the list of reseal pull requests show only the repositories
+the admin can read, checked as the repository list checks them (section 12)
+and counted against the same limit, and count the rest as `hidden`. A list
+of runs names no repository, and counts none hidden. Schedules show the
+repositories and orgs admins gave them. The admin token reads schedules,
+runs and reseal pull requests, every repository included, and changes
+nothing. `GET {api}/status` says whether the env can reseal now
+(`can_reseal`, with why not in `reseal_blocked`).
+
+| Route                                     | Purpose                            |
+| ----------------------------------------- | ---------------------------------- |
+| `POST .../session/{id}/reseals`           | Reseal a file's values; answers    |
+|                                           | `202`.                             |
+| `GET .../session/{id}/reseals/{reseal}`   | A file reseal's progress.          |
+| `GET {api}/reseal/schedules`              | The schedules, each with its       |
+|                                           | latest run.                        |
+| `POST {api}/reseal/schedules`             | Create a schedule.                 |
+| `PATCH {api}/reseal/schedules/{id}`       | Change a schedule.                 |
+| `DELETE {api}/reseal/schedules/{id}`      | Delete a schedule, cancelling its  |
+|                                           | active run.                        |
+| `POST {api}/reseal/schedules/{id}/run`    | Run now; `409` while a run is      |
+|                                           | active.                            |
+| `GET {api}/reseal/runs`                   | Runs, newest first (`?schedule=`,  |
+|                                           | `?limit=`, 50 at most).            |
+| `GET {api}/reseal/runs/{id}`              | A run with its repositories.       |
+| `POST {api}/reseal/runs/{id}/cancel`      | Cancel a run.                      |
+| `GET {api}/reseal/pull-requests`          | Reseal pull requests               |
+|                                           | (`?state=open`, `merged`,          |
+|                                           | `closed` or `all`).                |
+| `GET {api}/admin/reseal/...`              | The GETs above, with the admin     |
+|                                           | token.                             |
+
+**Events,** at info or warn, name the env, the user or schedule, the
+repository and counts, never a value or ciphertext:
+
+| Event                     | When                                            |
+| ------------------------- | ----------------------------------------------- |
+| `reseal.requested`        | An admin reseals a file in a session.           |
+| `reseal.schedule_created` | An admin creates a schedule.                    |
+| `reseal.schedule_updated` | An admin changes one.                           |
+| `reseal.schedule_deleted` | An admin deletes one.                           |
+| `reseal.run_started`      | A run starts, on schedule or by "Run now".      |
+| `reseal.run_finished`     | A run ends, or is cancelled: its status and     |
+|                           | counts.                                         |
+| `reseal.pr_opened`        | A reseal pull request is opened.                |
+| `reseal.pr_merged`        | A tick sees one merged.                         |
+| `reseal.pr_closed`        | A tick sees one closed without merging.         |
+| `reseal.failed`           | A command, a repository or values of one        |
+|                           | failed, with why.                               |
+| `reseal.done`             | An agent reseals a command's values (agent).    |
+| `reseal.tick_failed`      | A tick met an error; the next goes on.          |
+
+## 17. Future work (not in v1)
+
+- **Resealing with another cluster's agent.** A value whose key the chosen
+  agent's cluster does not hold fails; trying an agent of another cluster is
+  left for later.
+- **Runs across GitHub App installations.** A run reaches the repositories
+  of the App's one installation; an org the App is installed on separately
+  is not reached.
+
+## 18. Build order
 
 Each step is one pull request or a few:
 

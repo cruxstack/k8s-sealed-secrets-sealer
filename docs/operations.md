@@ -21,7 +21,9 @@ A token only reads the fleet, unless the env lets it change keys:
 keys too; elsewhere those routes answer `403`. Give an env that allows it
 its own `adminToken`, so a token handed to monitoring cannot change its
 keys. Signed-in admins change keys from the fleet page either way. Nothing
-else in the admin API changes anything.
+else in the admin API changes anything. A token also reads reseal
+schedules, runs and pull requests, every repository included (see
+"Resealing").
 
 | Route                                                        | Answers                                     |
 | ------------------------------------------------------------ | ------------------------------------------- |
@@ -33,10 +35,17 @@ else in the admin API changes anything.
 | `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/delete`    | Deletes a revoked key no value uses (see    |
 |                                                              | "Deleting old keys"), where the env allows  |
 |                                                              | it; `409` with the reason when it may not   |
+| `GET /api/v1/envs/{env}/admin/reseal/schedules`              | The env's reseal schedules                  |
+| `GET /api/v1/envs/{env}/admin/reseal/runs`                   | Its runs, newest first (`?schedule=`,       |
+|                                                              | `?limit=`, 50 at most)                      |
+| `GET /api/v1/envs/{env}/admin/reseal/runs/{id}`              | A run, with every repository                |
+| `GET /api/v1/envs/{env}/admin/reseal/pull-requests`          | Its reseal pull requests (`?state=open`,    |
+|                                                              | `merged`, `closed` or `all`)                |
 | `GET /api/v1/admin/fleet`,                                   | The same, when the control plane serves a   |
 | `POST /api/v1/admin/keys/{fingerprint}/revoke`,              | single env                                  |
 | `POST /api/v1/admin/keys/{fingerprint}/reinstate`,           |                                             |
-| `POST /api/v1/admin/keys/{fingerprint}/delete`               |                                             |
+| `POST /api/v1/admin/keys/{fingerprint}/delete`,              |                                             |
+| `GET /api/v1/admin/reseal/...`                               |                                             |
 | `GET /healthz`, `GET /readyz`                                | `200` while the process runs; no token      |
 
 ```sh
@@ -205,7 +214,8 @@ Alert, too, on these log events, at warn level or above:
   `renewal.enable_failed`,
   `agent.login_rejected`, `agent.checkin_rejected`, `seal.invalid_result`,
   `repo.permission_mismatch`, `agent.login_throttled`,
-  `registry.reload_failed`, `github.request_failed`;
+  `registry.reload_failed`, `github.request_failed`, `reseal.failed`,
+  `reseal.invalid_result`, `reseal.tick_failed`;
 - agents: `agent.checkin_failed`, `agent.poll_failed`,
   `agent.clock_skew`, `controller.read_failed`, `controller.key_unusable`,
   `controller.active_key_unlabeled`, `controller.cert_expired`,
@@ -222,6 +232,11 @@ them (section 11).
 After `registry.reload_failed` the control plane keeps the registry in
 force, so an agent just removed from it keeps its access. The fleet doesn't
 show this; only the event does.
+
+Where reseal schedules run, alert too on a run that ends `partial` or
+`failed` (`reseal.run_finished` at warn), and on a reseal pull request open
+for longer than your review cycle (`GET .../admin/reseal/pull-requests`,
+by `opened_at`): while it is open, later runs skip its repository.
 
 ## Size limits
 
@@ -320,6 +335,18 @@ never need the control plane.
   a key's escrowed copies even when it reinstates the key, so they are
   purged all the same.
 
+### To resealing
+
+- Upgrade the control plane first. One that predates resealing refuses the
+  check-in of an agent with `reseal`, a capability it does not know.
+- Then turn `reseal` on in the agents that should reseal, in their values
+  (`capabilities.reseal`, with `keys`) and their registry entries.
+- On Lambda, add the tick schedule
+  ([deployment](deployment.md#4-the-control-plane-in-the-tools-account)).
+  A container ticks on its own (`tickInterval`).
+- Nothing else changes: the table keeps its key schema, and the control
+  plane's role already has every DynamoDB action resealing uses.
+
 ### From v0.7.0 or v0.7.1
 
 - The admin token no longer revokes or reinstates keys unless the env
@@ -378,6 +405,13 @@ never need the control plane.
 | and rate windows               | windows last a minute, or ten for the lookups   |
 |                                | repository lists make. Nothing to do.           |
 | Login replay records           | Short-lived; nothing to do.                     |
+| Reseal schedules               | Lost: create them again. Their runs' pull       |
+|                                | requests stay on GitHub.                        |
+| Runs, reseal pull requests and | Lost: the list of reseal pull requests forgets  |
+| file reseals                   | those opened before, and a run no longer skips  |
+|                                | a repository for one still open. Close or merge |
+|                                | those on GitHub; a run in flight is gone, and   |
+|                                | its schedule runs again when next due.          |
 
 So two kinds of state cannot be rebuilt. Escrow, for a key that no running
 cluster with the `keys` capability holds any more: after losing an env's
@@ -494,7 +528,8 @@ restore point (see "Restoring the table").
 Keys pile up over time, one per renewal, and every cluster holds every key.
 With the `cleanup` capability on every agent of an env (in its values and
 its registry entry), the fleet page shows how many values each key seals,
-by cluster. A key no value uses can go:
+by cluster. Values still on an old key can be moved onto the env key first
+(see "Resealing"). A key no value uses can go:
 
 1. Make sure no value you still need is sealed with it outside the
    clusters: in a branch, an app not deployed yet, or an open pull request.
@@ -514,6 +549,43 @@ come back, unless a cluster still holds it: a cluster that counts values
 sealed with a deleted key, or refuses to remove it for them, undoes the
 deletion (`key.delete_undone`), and the key is revoked again. Reinstate it
 then, and that cluster escrows it again.
+
+### Resealing
+
+Resealing moves values off older keys onto the env key, unchanged (design
+section 16), so old keys reach zero references and can be deleted. It
+does not rotate values: a value sealed with a key that may be exposed must
+be sealed again with a new value, since git history keeps the old
+ciphertext. It needs agents with the `reseal` capability (in their values
+and registry entries) and, on Lambda, the tick schedule
+([deployment](deployment.md#4-the-control-plane-in-the-tools-account)).
+`GET .../status` says whether the env can reseal now (`can_reseal`), and
+why not.
+
+- **A file:** an admin who can write to the repository reseals it from a
+  session, and opens the pull request as with any seal.
+- **On a schedule:** an admin creates a schedule of repositories and orgs,
+  every so many days. Each run opens one pull request per repository with
+  every value it moved, from the default branch's head, and skips a
+  repository while an earlier run's pull request is still open there.
+  "Run now" starts one at once.
+
+Watch them on the reseal pages, or with the admin token:
+
+- **Runs** (`.../admin/reseal/runs`, then `.../runs/{id}`): each
+  repository's status, its pull request, and the values that failed, with
+  why: "no key in this cluster opens it" for a value no key of the agent's
+  cluster opens with its label (sealed for another env, or with a key
+  deleted from the cluster), "no agent answered in time" for a command
+  that expired, and so on. A run reads at most 200 files of a repository
+  and covers at most 500 repositories; it says so when it left any out.
+- **Reseal pull requests** (`.../admin/reseal/pull-requests`): every open
+  one, and with `?state=all` the merged and closed ones of the last 180
+  days. Ticks check open ones on GitHub about every 15 ticks; a run checks
+  one again before it skips a repository for it.
+
+Once the pull requests are merged and deployed, the old keys' references
+fall to zero on the fleet page, and they can be revoked and deleted.
 
 ## Troubleshooting
 
