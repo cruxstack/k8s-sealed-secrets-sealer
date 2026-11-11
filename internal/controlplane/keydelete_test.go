@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -274,6 +275,19 @@ func TestKeyDelete_ReinstatedKeyHeldByNoneIsRestored(t *testing.T) {
 	if k := fleetKey(t, kh.fleet(), old.Fingerprint); len(k.Holders) != 0 {
 		t.Fatalf("holders after the removals = %v", k.Holders)
 	}
+
+	// a restore found it present in b before it was deleted, which would
+	// hold it off for an hour; that says nothing once it is reinstated
+	finished := kh.clock().Add(-time.Minute)
+	payload, _ := json.Marshal(protocol.KeysRestorePayload{Fingerprints: []string{old.Fingerprint}})
+	found, _ := json.Marshal(protocol.KeysRestoreResult{Restored: []string{}, AlreadyPresent: []string{old.Fingerprint}, Failed: []protocol.KeyFailure{}})
+	if err := kh.store.PutCommand(context.Background(), store.CommandRecord{
+		AgentID: "b", ID: ulid.Make().String(), Type: protocol.CommandKeysRestore, Status: store.CommandSucceeded,
+		CreatedAt: finished, ExpiresAt: finished.Add(keyCommandTTL), FinishedAt: &finished, Payload: string(payload), Result: string(found),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kh.advance(settleAfterSuccess)
 
 	if rec := kh.setStatus(old.Fingerprint, "reinstate"); rec.Code != http.StatusOK {
 		t.Fatalf("reinstate = %d", rec.Code)

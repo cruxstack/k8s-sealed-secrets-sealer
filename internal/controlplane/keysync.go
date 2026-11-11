@@ -118,7 +118,7 @@ func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.Agent
 	// NotBefore; and it runs one restore at a time, each ending in a
 	// controller restart, so a long one goes out a command at a time
 	if me != nil && me.InScope && me.CanRestore() && !restoreRecent(commands, now) {
-		held := heldPresent(commands, now)
+		held := heldPresent(commands, keys.Reinstated, now)
 		for _, fp := range me.MissingKeys {
 			if len(keys.Escrow[fp]) > 0 && !held[fp] {
 				plan.Restore = append(plan.Restore, fp)
@@ -255,11 +255,16 @@ func recent(c store.CommandRecord, now time.Time) bool {
 }
 
 // heldPresent are keys a restore found already present within presentHold:
-// restoring them again would only find them again.
-func heldPresent(commands []store.CommandRecord, now time.Time) map[string]bool {
+// restoring them again would only find them again. A restore that finished
+// before a deleted key was reinstated says nothing of it: the key was
+// removed since.
+func heldPresent(commands []store.CommandRecord, reinstated map[string]store.ReinstatedKey, now time.Time) map[string]bool {
 	held := map[string]bool{}
 	for _, c := range commands {
 		for _, fp := range foundPresent(c, now) {
+			if r, ok := reinstated[fp]; ok && !c.FinishedAt.After(r.At) {
+				continue
+			}
 			held[fp] = true
 		}
 	}

@@ -88,9 +88,10 @@ func (s *Server) fleetKeys(ctx context.Context, snap fleetSnapshot, self *store.
 	return fleet.Keys{Revoked: snap.revoked, Escrow: escrow, Reinstated: snap.reinstated}, nil
 }
 
-// escrowUploaders returns who escrowed each key. Escrow records are never
-// deleted, so what is known is cached. A key is read again only while self
-// holds it and may still add its copy.
+// escrowUploaders returns who escrowed each key. Escrow records are removed
+// only when a deleted key's copies are purged, and such a key is never
+// escrowed, restored or reinstated again, so what is known is cached. A key
+// is read again only while self holds it and may still add its copy.
 func (s *Server) escrowUploaders(ctx context.Context, fps []string, self *store.AgentState) (map[string][]string, error) {
 	out := map[string][]string{}
 	var read []string
