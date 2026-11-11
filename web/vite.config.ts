@@ -42,5 +42,7 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    // the palette's test reads index.css as text; other CSS stays out
+    css: { include: [/src\/index\.css/] },
   },
 });
