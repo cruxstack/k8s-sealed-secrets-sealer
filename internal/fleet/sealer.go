@@ -13,6 +13,9 @@ import (
 // ErrNoSealer means no agent can seal right now.
 var ErrNoSealer = errors.New("no agent is available to seal: none is healthy, able to seal and holding the env key")
 
+// ErrNoResealer means no agent can reseal right now.
+var ErrNoResealer = errors.New("no agent is available to reseal: none is healthy, has the reseal capability and holds the env key")
+
 // ErrNoUsableKey means the clusters share keys but each is revoked or dated
 // in the future, so nothing can be sealed until a new key reaches every
 // cluster.
@@ -38,6 +41,16 @@ func (e *KeysOutOfSyncError) Error() string {
 // first, then those with the fewest commands in flight, then the most
 // recent check-in; ties go to the lowest ID, so the choice is stable.
 func ChooseSealer(f Fleet, regions []string, inFlight map[string]int) (Agent, error) {
+	return choose(f, protocol.CapabilitySeal, protocol.CommandSeal, ErrNoSealer, regions, inFlight)
+}
+
+// ChooseResealer picks the agent for a reseal as ChooseSealer does for a
+// seal, among agents with the reseal capability that handle reseal.v1.
+func ChooseResealer(f Fleet, regions []string, inFlight map[string]int) (Agent, error) {
+	return choose(f, protocol.CapabilityReseal, protocol.CommandReseal, ErrNoResealer, regions, inFlight)
+}
+
+func choose(f Fleet, capability, command string, none error, regions []string, inFlight map[string]int) (Agent, error) {
 	if f.EnvKey == nil {
 		if f.NoUsableKey {
 			return Agent{}, ErrNoUsableKey
@@ -53,12 +66,12 @@ func ChooseSealer(f Fleet, regions []string, inFlight map[string]int) (Agent, er
 	}
 	var candidates []Agent
 	for _, a := range f.Agents {
-		if canSeal(a, f.EnvKey.Fingerprint) {
+		if canRun(a, f.EnvKey.Fingerprint, capability, command) {
 			candidates = append(candidates, a)
 		}
 	}
 	if len(candidates) == 0 {
-		return Agent{}, ErrNoSealer
+		return Agent{}, none
 	}
 	preferred := func(a Agent) bool { return slices.Contains(regions, a.Region) }
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -77,12 +90,14 @@ func ChooseSealer(f Fleet, regions []string, inFlight map[string]int) (Agent, er
 	return candidates[0], nil
 }
 
-// canSeal reports whether an agent can seal with the env key now.
-func canSeal(a Agent, envKey string) bool {
+// canRun reports whether an agent can run a command that needs the env key
+// now: it is healthy, registered and reporting the capability, handles the
+// command and holds the key.
+func canRun(a Agent, envKey, capability, command string) bool {
 	if !a.Healthy || a.LastCheckIn == nil ||
-		!slices.Contains(a.RegisteredCapabilities, protocol.CapabilitySeal) ||
-		!slices.Contains(a.Capabilities, protocol.CapabilitySeal) ||
-		!slices.Contains(a.Commands, protocol.CommandSeal) {
+		!slices.Contains(a.RegisteredCapabilities, capability) ||
+		!slices.Contains(a.Capabilities, capability) ||
+		!slices.Contains(a.Commands, command) {
 		return false
 	}
 	for _, k := range a.Keys {

@@ -94,3 +94,33 @@ func TestChooseSealer(t *testing.T) {
 		t.Fatalf("no usable key: %v", err)
 	}
 }
+
+func TestChooseResealer(t *testing.T) {
+	env := key("SHA256:env", 30)
+	envKey := env
+	resealer := func(id, region string) Agent {
+		a := sealer(id, region, time.Second, env)
+		a.RegisteredCapabilities = []string{protocol.CapabilityKeys, protocol.CapabilityReseal}
+		a.Capabilities = []string{protocol.CapabilityKeys, protocol.CapabilityReseal}
+		a.Commands = []string{protocol.CommandKeysRestore, protocol.CommandReseal}
+		return a
+	}
+	// a sealer without reseal is no candidate, nor one registered without
+	// it, or one that does not handle reseal.v1
+	unregistered := resealer("c", "use2")
+	unregistered.RegisteredCapabilities = []string{protocol.CapabilityKeys}
+	old := resealer("d", "use2")
+	old.Commands = []string{protocol.CommandKeysRestore}
+	f := Fleet{EnvKey: &envKey, Agents: []Agent{sealer("a", "use2", time.Second, env), resealer("b", "use1"), unregistered, old}}
+	got, err := ChooseResealer(f, []string{"use2"}, nil)
+	if err != nil || got.ID != "b" {
+		t.Fatalf("ChooseResealer = %s, %v", got.ID, err)
+	}
+	f.Agents = f.Agents[:1]
+	if _, err := ChooseResealer(f, nil, nil); !errors.Is(err, ErrNoResealer) {
+		t.Fatalf("no candidates: %v", err)
+	}
+	if _, err := ChooseSealer(f, nil, nil); err != nil {
+		t.Fatalf("the sealer still seals: %v", err)
+	}
+}

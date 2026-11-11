@@ -44,10 +44,12 @@ type Session struct {
 	SubmitDeadline int64 `dynamodbav:"submit_deadline,omitempty"`
 }
 
-// reserveChange decides a ReserveChange for both stores. reserved maps the
-// places seals hold (placeKey) to when each lapses (epoch milliseconds). It
-// returns the places to keep, the seal's among them.
-func reserveChange(reserved map[string]int64, changeID, sealID string, existing []string, limit int, until, now time.Time) (map[string]int64, error) {
+// reserveChanges decides a ReserveChanges for both stores. reserved maps
+// the places seals hold (placeKey) to when each lapses (epoch
+// milliseconds); places maps the changes to hold places for to the seal
+// (or reseal command) each is for. It returns the places to keep, the new
+// ones among them.
+func reserveChanges(reserved map[string]int64, places map[string]string, existing []string, limit int, until, now time.Time) (map[string]int64, error) {
 	held := map[string]bool{}
 	for _, id := range existing {
 		held[id] = true
@@ -56,21 +58,34 @@ func reserveChange(reserved map[string]int64, changeID, sealID string, existing 
 	for place := range kept {
 		held[placeChange(place)] = true
 	}
-	if !held[changeID] && len(held) >= limit {
+	added := 0
+	for changeID := range places {
+		if !held[changeID] {
+			added++
+		}
+	}
+	if added > 0 && len(held)+added > limit {
 		return nil, ErrTooManyChanges
 	}
-	place := placeKey(changeID, sealID)
-	kept[place] = max(kept[place], until.UnixMilli())
+	for changeID, sealID := range places {
+		place := placeKey(changeID, sealID)
+		kept[place] = max(kept[place], until.UnixMilli())
+	}
 	return kept, nil
 }
 
-// releaseChange decides a ReleaseChange for both stores: the places to
-// keep, without the seal's, and whether it held one.
-func releaseChange(reserved map[string]int64, changeID, sealID string, now time.Time) (map[string]int64, bool) {
+// releaseChanges decides a ReleaseChanges for both stores: the places to
+// keep, without those given, and whether any was held.
+func releaseChanges(reserved map[string]int64, places map[string]string, now time.Time) (map[string]int64, bool) {
 	kept := livePlaces(reserved, now)
-	place := placeKey(changeID, sealID)
-	_, held := kept[place]
-	delete(kept, place)
+	held := false
+	for changeID, sealID := range places {
+		place := placeKey(changeID, sealID)
+		if _, ok := kept[place]; ok {
+			held = true
+		}
+		delete(kept, place)
+	}
 	return kept, held
 }
 
@@ -137,11 +152,22 @@ type Seal struct {
 	ExpiresAt time.Time `dynamodbav:"seal_expires_at"`
 }
 
+// Kinds of pending change.
+const (
+	// ChangeSeal is a value sealed in the session; changes stored before
+	// kinds were recorded are seals.
+	ChangeSeal = "seal"
+	// ChangeReseal is a file's values moved onto the env key, for the
+	// documents whose value was resealed.
+	ChangeReseal = "reseal"
+)
+
 // Change is a pending change: a value sealed for the target documents of a
 // file, waiting to be committed. There is one per file, key and regions in a
 // session; sealing the same key into the same file for the same regions
-// again replaces it. Changes of one key may overlap, and the newest wins for
-// each document (see Effective).
+// again replaces it. A reseal makes one per file and key, of its own.
+// Changes of one key may overlap, and the newest wins for each document (see
+// Effective).
 type Change struct {
 	SessionID   string `dynamodbav:"session_id"`
 	ID          string `dynamodbav:"change_id"`
@@ -161,4 +187,13 @@ type Change struct {
 	SealedAt    time.Time `dynamodbav:"sealed_at"`
 	// ExpiresAt is the session's EndsAt.
 	ExpiresAt time.Time `dynamodbav:"change_expires_at"`
+	// Kind is ChangeSeal (also when empty) or ChangeReseal. A reseal's
+	// targets are the documents, by position, whose value it resealed;
+	// ResealedFrom names the keys those values came off, and Fingerprint
+	// the env key they are on now.
+	Kind         string   `dynamodbav:"kind,omitempty"`
+	ResealedFrom []string `dynamodbav:"resealed_from,omitempty"`
 }
+
+// Resealed reports whether the change is a reseal.
+func (c Change) Resealed() bool { return c.Kind == ChangeReseal }

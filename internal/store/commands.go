@@ -58,6 +58,19 @@ type CommandRecord struct {
 	SessionID string `dynamodbav:"session_id,omitempty"`
 	Result    string `dynamodbav:"result,omitempty"`
 	Error     string `dynamodbav:"error,omitempty"`
+	// ExternalPayload keeps Payload in an item of its own, for a command
+	// whose payload is large (reseal.v1): polls, seals and key sync read an
+	// agent's recent commands often, and should not read such payloads each
+	// time. Reads of commands leave its Payload empty; CommandPayload reads
+	// it. PayloadBytes is its size, for what a poll may send.
+	ExternalPayload bool `dynamodbav:"external_payload,omitempty"`
+	PayloadBytes    int  `dynamodbav:"payload_bytes,omitempty"`
+	// ResealID is the file reseal, in SessionID, that a reseal.v1 command's
+	// results go to; RunID and RunRepo are the run and the repository (its
+	// RepoKey) for a command a run queued.
+	ResealID string `dynamodbav:"reseal_id,omitempty"`
+	RunID    string `dynamodbav:"run_id,omitempty"`
+	RunRepo  string `dynamodbav:"run_repo,omitempty"`
 }
 
 // Open reports whether the command is still waiting or running at now.
@@ -71,8 +84,12 @@ func (c CommandRecord) Expired(now time.Time) bool {
 }
 
 // Protocol returns the command as sent to the agent, with its secret, if
-// any, as the payload's "value" field.
+// any, as the payload's "value" field. A command with an external payload
+// needs it read first (Store.CommandPayload).
 func (c CommandRecord) Protocol() (protocol.Command, error) {
+	if c.ExternalPayload && c.Payload == "" {
+		return protocol.Command{}, fmt.Errorf("failed to prepare command %s: its payload was not read", c.ID)
+	}
 	payload := json.RawMessage(c.Payload)
 	if c.Secret != "" {
 		var fields map[string]json.RawMessage

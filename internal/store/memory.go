@@ -36,6 +36,10 @@ type Memory struct {
 	reserved map[string]map[string]int64
 	// requests counts requests by rate limit window
 	requests map[rateWindow]int
+	// payloads holds external command payloads by command ID
+	payloads map[string]string
+	// reseal holds what resealing stores (memory_reseal.go)
+	reseal resealMemory
 	// now is the clock TTLs expire by; tests set it with SetClock
 	now func() time.Time
 }
@@ -268,8 +272,22 @@ func (m *Memory) PutCommand(_ context.Context, c CommandRecord) error {
 	if m.commands[c.AgentID] == nil {
 		m.commands[c.AgentID] = map[string]CommandRecord{}
 	}
+	if c.ExternalPayload {
+		if m.payloads == nil {
+			m.payloads = map[string]string{}
+		}
+		m.payloads[c.ID] = c.Payload
+		c.Payload, c.PayloadBytes = "", len(c.Payload)
+	}
 	m.commands[c.AgentID][c.ID] = c
 	return nil
+}
+
+func (m *Memory) CommandPayload(_ context.Context, id string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.payloads[id]
+	return p, ok, nil
 }
 
 func (m *Memory) Commands(_ context.Context, agentID string) ([]CommandRecord, error) {
@@ -503,10 +521,14 @@ func (m *Memory) Seal(_ context.Context, sessionID, commandID string) (Seal, boo
 	return s, ok, nil
 }
 
-func (m *Memory) ReserveChange(_ context.Context, sessionID, changeID, sealID string, existing []string, maxChanges int, until, now time.Time) error {
+func (m *Memory) ReserveChange(ctx context.Context, sessionID, changeID, sealID string, existing []string, maxChanges int, until, now time.Time) error {
+	return m.ReserveChanges(ctx, sessionID, map[string]string{changeID: sealID}, existing, maxChanges, until, now)
+}
+
+func (m *Memory) ReserveChanges(_ context.Context, sessionID string, places map[string]string, existing []string, maxChanges int, until, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	kept, err := reserveChange(m.reserved[sessionID], changeID, sealID, existing, maxChanges, until, now)
+	kept, err := reserveChanges(m.reserved[sessionID], places, existing, maxChanges, until, now)
 	if err != nil {
 		return err
 	}
@@ -514,10 +536,14 @@ func (m *Memory) ReserveChange(_ context.Context, sessionID, changeID, sealID st
 	return nil
 }
 
-func (m *Memory) ReleaseChange(_ context.Context, sessionID, changeID, sealID string, now time.Time) error {
+func (m *Memory) ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error {
+	return m.ReleaseChanges(ctx, sessionID, map[string]string{changeID: sealID}, now)
+}
+
+func (m *Memory) ReleaseChanges(_ context.Context, sessionID string, places map[string]string, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	kept, _ := releaseChange(m.reserved[sessionID], changeID, sealID, now)
+	kept, _ := releaseChanges(m.reserved[sessionID], places, now)
 	m.reserved[sessionID] = kept
 	return nil
 }

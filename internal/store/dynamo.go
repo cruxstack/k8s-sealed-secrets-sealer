@@ -36,6 +36,10 @@ const (
 	skUsage      = "USAGE"
 	cmdPrefix    = "CMD#"
 
+	// commandDataPrefix and skPayload key a command's external payload
+	commandDataPrefix = "COMMAND#"
+	skPayload         = "PAYLOAD"
+
 	// escrowCopyPrefix keys the escrowed copies of a key after the first
 	// (skEscrow), one per uploading agent.
 	escrowCopyPrefix = skEscrow + "#"
@@ -701,25 +705,67 @@ func commandKey(agentID, id string) map[string]types.AttributeValue {
 }
 
 func (d *Dynamo) PutCommand(ctx context.Context, c CommandRecord) error {
+	payload := c.Payload
+	if c.ExternalPayload {
+		c.Payload, c.PayloadBytes = "", len(payload)
+	}
+	expires := c.ExpiresAt.Add(commandRetention).Unix()
 	item, err := attributevalue.MarshalMap(commandItem{
 		PK:            agentPrefix + c.AgentID,
 		SK:            cmdPrefix + c.ID,
 		Deadline:      c.ExpiresAt.UnixMilli(),
-		ExpiresAt:     c.ExpiresAt.Add(commandRetention).Unix(),
+		ExpiresAt:     expires,
 		CommandRecord: c,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode command %s: %w", c.ID, err)
 	}
-	_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+	put := &types.Put{
 		TableName:           &d.table,
 		Item:                item,
 		ConditionExpression: aws.String("attribute_not_exists(pk)"),
-	})
+	}
+	if !c.ExternalPayload {
+		_, err = d.api.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName: put.TableName, Item: put.Item, ConditionExpression: put.ConditionExpression,
+		})
+	} else {
+		// the payload first in the same write, so a leased command always
+		// finds it
+		_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			{Put: &types.Put{
+				TableName: &d.table,
+				Item: map[string]types.AttributeValue{
+					attrPK:        &types.AttributeValueMemberS{Value: commandDataPrefix + c.ID},
+					attrSK:        &types.AttributeValueMemberS{Value: skPayload},
+					"payload":     &types.AttributeValueMemberS{Value: payload},
+					attrExpiresAt: &types.AttributeValueMemberN{Value: strconv.FormatInt(expires, 10)},
+				},
+				ConditionExpression: aws.String("attribute_not_exists(pk)"),
+			}},
+			{Put: put},
+		}})
+	}
 	if err != nil {
 		return fmt.Errorf("failed to queue command %s for agent %s: %w", c.ID, c.AgentID, err)
 	}
 	return nil
+}
+
+func (d *Dynamo) CommandPayload(ctx context.Context, id string) (string, bool, error) {
+	res, err := d.api.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      &d.table,
+		Key:            itemKey(commandDataPrefix+id, skPayload),
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read the payload of command %s: %w", id, err)
+	}
+	v, ok := res.Item["payload"].(*types.AttributeValueMemberS)
+	if !ok {
+		return "", false, nil
+	}
+	return v.Value, true, nil
 }
 
 func (d *Dynamo) Commands(ctx context.Context, agentID string) ([]CommandRecord, error) {

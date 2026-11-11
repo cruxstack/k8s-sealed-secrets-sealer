@@ -39,7 +39,8 @@ const (
 	// between instances. A command type that lives longer belongs here.
 	commandLookback = max(sealCommandTTL, keyCommandTTL) + time.Minute
 	// maxResultBody bounds a command result: a seal's ciphertexts, at most
-	// protocol.SealBudgetBytes in base64, with their names.
+	// protocol.SealBudgetBytes in base64, with their names, or a reseal's,
+	// at most protocol.ResealBudgetBytes with their IDs.
 	maxResultBody = 512 << 10
 	// maxResultError bounds a failed command's error message.
 	maxResultError = 1024
@@ -112,6 +113,18 @@ func (s *Server) leaseCommands(ctx context.Context, agent *registry.Agent) ([]pr
 		}
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < leaseMargin {
 			break
+		}
+		// a payload kept apart is read only for a command about to be leased
+		if c.ExternalPayload && len(leased) > 0 && size+c.PayloadBytes > maxPollBytes {
+			break
+		}
+		if c.ExternalPayload {
+			payload, found, err := s.store.CommandPayload(ctx, c.ID)
+			if err != nil || !found {
+				s.logger.ErrorContext(ctx, "failed to read command payload", "agent_id", agent.ID, "command_id", c.ID, "found", found, "error", err)
+				continue
+			}
+			c.Payload = payload
 		}
 		cmd, n, err := sendable(c)
 		if err != nil {
@@ -205,8 +218,12 @@ func (s *Server) agentCommandResult(w http.ResponseWriter, r *http.Request, agen
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if cmd.Type == protocol.CommandSeal {
+	switch cmd.Type {
+	case protocol.CommandSeal:
 		s.finishSeal(w, r, agent, cmd, in)
+		return
+	case protocol.CommandReseal:
+		s.finishReseal(w, r, agent, cmd, in)
 		return
 	}
 	ok, err := s.store.FinishCommand(ctx, agent.ID, id, in.Status, string(in.Result), in.Error, s.now().UTC())

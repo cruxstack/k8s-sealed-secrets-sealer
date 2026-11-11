@@ -60,11 +60,22 @@ type sealHarness struct {
 	now time.Time
 	// reload, when set, reads the registry again; nil leaves it unchanged
 	reload func(context.Context) (*registry.Registry, map[string]LoginVerifier, error)
+
+	// caps are the agents' capabilities, as registered and reported;
+	// admins the users who administer the env
+	caps   []string
+	admins map[string]bool
 }
 
 // newSealHarness serves the fixture repositories, with files added to
 // example-org/apps (path to content) for one test.
 func newSealHarness(t *testing.T, files ...map[string]string) *sealHarness {
+	t.Helper()
+	return newSealHarnessWith(t, []string{protocol.CapabilitySeal}, files...)
+}
+
+// newSealHarnessWith is newSealHarness with agents that have caps.
+func newSealHarnessWith(t *testing.T, caps []string, files ...map[string]string) *sealHarness {
 	t.Helper()
 	fixtures, err := mockgithub.Fixtures()
 	if err != nil {
@@ -101,13 +112,13 @@ func newSealHarness(t *testing.T, files ...map[string]string) *sealHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := registry.Parse([]byte(`
+	reg, err := registry.Parse([]byte(strings.ReplaceAll(`
 issuers: [{name: local, url: "https://k8s.example.com", jwksFile: k.json}]
 agents:
-  - {id: dev-use1-blue, cluster: dev-use1-blue, region: use1, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
-  - {id: dev-use1-green, cluster: dev-use1-green, region: use1, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:b:agent"}}}
-  - {id: dev-use2-blue, cluster: dev-use2-blue, region: use2, capabilities: [seal], identity: {k8s: {issuer: local, subject: "system:serviceaccount:c:agent"}}}
-`), "")
+  - {id: dev-use1-blue, cluster: dev-use1-blue, region: use1, capabilities: [CAPS], identity: {k8s: {issuer: local, subject: "system:serviceaccount:a:agent"}}}
+  - {id: dev-use1-green, cluster: dev-use1-green, region: use1, capabilities: [CAPS], identity: {k8s: {issuer: local, subject: "system:serviceaccount:b:agent"}}}
+  - {id: dev-use2-blue, cluster: dev-use2-blue, region: use2, capabilities: [CAPS], identity: {k8s: {issuer: local, subject: "system:serviceaccount:c:agent"}}}
+`, "CAPS", strings.Join(caps, ", "))), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +132,7 @@ agents:
 	sh := &sealHarness{
 		t: t, store: store.NewMemory(), kms: envelope.NewFakeKMS("transit"), logs: &bytes.Buffer{},
 		agents: map[string]string{}, users: userSessions, sessions: map[string]string{}, github: github, app: gh,
-		now: time.Now().UTC(), key: newTestKey(t, time.Now().Add(-time.Hour)),
+		now: time.Now().UTC(), key: newTestKey(t, time.Now().Add(-time.Hour)), caps: caps, admins: map[string]bool{},
 	}
 	block, _ := pem.Decode(sh.key.PrivatePEM)
 	if sh.keyPriv, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
@@ -168,12 +179,19 @@ func (sh *sealHarness) advance(d time.Duration) {
 	sh.now = sh.now.Add(d)
 }
 
-// checkIn reports a seal-only agent holding keys.
+// checkIn reports an agent with the harness's capabilities holding keys,
+// handling the commands of those capabilities.
 func (sh *sealHarness) checkIn(id string, keys ...protocol.Key) {
 	sh.t.Helper()
 	in := checkIn(keys...)
-	in.Capabilities = []string{protocol.CapabilitySeal}
-	in.Commands = []string{protocol.CommandSeal}
+	in.Capabilities = slices.Clone(sh.caps)
+	in.Commands = nil
+	for cmd, c := range protocol.CommandCapability {
+		if slices.Contains(sh.caps, c) {
+			in.Commands = append(in.Commands, cmd)
+		}
+	}
+	slices.Sort(in.Commands)
 	rec := sh.agentDo(http.MethodPost, "/agent/v1/checkin", id, in)
 	if rec.Code != http.StatusOK {
 		sh.t.Fatalf("check-in %s = %d %s", id, rec.Code, rec.Body)
@@ -208,7 +226,7 @@ func (sh *sealHarness) do(login, method, path string, body any, csrf bool) *http
 	token, ok := sh.sessions[login]
 	if !ok {
 		var err error
-		if token, _, err = sh.users.Issue(testUsers[login], userauth.Grants{"dev": false}); err != nil {
+		if token, _, err = sh.users.Issue(testUsers[login], userauth.Grants{"dev": sh.admins[login]}); err != nil {
 			sh.t.Fatal(err)
 		}
 		sh.sessions[login] = token

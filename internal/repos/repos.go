@@ -482,6 +482,42 @@ func (s *Service) File(ctx context.Context, user *userauth.User, owner, name, co
 	return s.file(ctx, r, snap.candidates[i])
 }
 
+// FileValues checks the user's write access and returns a discovered
+// file's documents for the env at a commit, with the values in each
+// document's spec.encryptedData, in the same order: what resealing it
+// sends. Its content is read from GitHub again, not from the cache, which
+// holds no values.
+func (s *Service) FileValues(ctx context.Context, user *userauth.User, owner, name, commit, filePath string) (File, []map[string]string, error) {
+	r, _, err := s.repository(ctx, user, owner, name, true)
+	if err != nil {
+		return File{}, nil, err
+	}
+	snap, err := s.snapshot(ctx, r, commit)
+	if err != nil {
+		return File{}, nil, err
+	}
+	i := sort.Search(len(snap.candidates), func(i int) bool { return snap.candidates[i].Path >= filePath })
+	if i == len(snap.candidates) || snap.candidates[i].Path != filePath {
+		return File{}, nil, ErrFileNotFound
+	}
+	e := snap.candidates[i]
+	content, err := s.gh.Blob(ctx, r.Owner, r.Name, e.SHA)
+	if err != nil {
+		return File{}, nil, err
+	}
+	f := File{Path: e.Path, Blob: e.SHA}
+	docs, values, err := manifest.EncryptedData(content, s.ann, s.env)
+	if reason, ok := contentError(err); ok {
+		f.Error = reason
+		return f, nil, nil
+	}
+	if err != nil {
+		return File{}, nil, err
+	}
+	f.Documents = docs
+	return f, values, nil
+}
+
 // repository checks the user's access and returns the repository and that
 // access. Nothing can be pushed to an archived repository, so it is never
 // writable.

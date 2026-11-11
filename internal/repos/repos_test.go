@@ -624,3 +624,34 @@ func TestLRU(t *testing.T) {
 		t.Errorf("an expired entry was returned or kept: %d entries", c.len())
 	}
 }
+
+func TestFileValues(t *testing.T) {
+	s, gh, _ := newService(t, nil)
+	ctx := context.Background()
+	_, head, err := s.Head(ctx, alice, "example-org", "apps", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, values, err := s.FileValues(ctx, alice, "example-org", "apps", head, "deploy/worker/sealed-secret.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Documents) != 3 || len(values) != 3 || f.Blob == "" {
+		t.Fatalf("file = %+v, values = %v", f, values)
+	}
+	if v := values[0]["queue-url"]; !strings.HasPrefix(v, "AgB") || len(values[0]) != len(f.Documents[0].Keys) {
+		t.Fatalf("values of the first document = %v", values[0])
+	}
+	// every call reads the file: the cache holds no values
+	reads := gh.blobs.Load()
+	if _, _, err := s.FileValues(ctx, alice, "example-org", "apps", head, "deploy/worker/sealed-secret.yaml"); err != nil || gh.blobs.Load() != reads+1 {
+		t.Fatalf("second read: %v, %d blob reads", err, gh.blobs.Load()-reads)
+	}
+	// write access, as for a seal
+	if _, _, err := s.FileValues(ctx, bob, "example-org", "apps", head, "deploy/worker/sealed-secret.yaml"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("bob: %v", err)
+	}
+	if _, _, err := s.FileValues(ctx, alice, "example-org", "apps", head, "deploy/billing/deployment.yaml"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("undiscovered file: %v", err)
+	}
+}

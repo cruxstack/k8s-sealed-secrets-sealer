@@ -139,8 +139,12 @@ type Store interface {
 	// the limit is reached.
 	CountRequest(ctx context.Context, key string, n, limit int, windowEnd time.Time) (bool, error)
 
-	// PutCommand queues a command.
+	// PutCommand queues a command, its payload apart when it has
+	// ExternalPayload set.
 	PutCommand(ctx context.Context, c CommandRecord) error
+	// CommandPayload returns the payload of a command with an external
+	// payload, until the command is removed.
+	CommandPayload(ctx context.Context, id string) (string, bool, error)
 	// Commands returns an agent's commands, oldest first.
 	Commands(ctx context.Context, agentID string) ([]CommandRecord, error)
 	// CommandsSince returns an agent's commands whose IDs (ULIDs) were made
@@ -215,6 +219,12 @@ type Store interface {
 	// stored (the change then counts itself, and removing it frees its
 	// place) or the seal failed.
 	ReleaseChange(ctx context.Context, sessionID, changeID, sealID string, now time.Time) error
+	// ReserveChanges holds places, as ReserveChange does, for several
+	// changes at once, each for its seal (places maps change IDs to seal
+	// IDs): all of them, or with ErrTooManyChanges none.
+	ReserveChanges(ctx context.Context, sessionID string, places map[string]string, existing []string, max int, until, now time.Time) error
+	// ReleaseChanges gives up the places ReserveChanges held.
+	ReleaseChanges(ctx context.Context, sessionID string, places map[string]string, now time.Time) error
 	// PutChange stores a pending change, replacing the one for the same
 	// file and key unless that came from a newer seal, and reports whether
 	// it did.
@@ -231,4 +241,26 @@ type Store interface {
 	// commandID, and reports whether it did. A change a newer seal
 	// replaced in the meantime stays.
 	PruneChange(ctx context.Context, sessionID, id, commandID string) (bool, error)
+
+	// PutFileReseal records a file's values sent for resealing in a
+	// session.
+	PutFileReseal(ctx context.Context, r FileReseal) error
+	// FileReseal returns a file reseal of a session.
+	FileReseal(ctx context.Context, sessionID, id string) (FileReseal, bool, error)
+	// RecordResealOutcome records what one of a file reseal's commands did,
+	// once, and reports whether this call did.
+	RecordResealOutcome(ctx context.Context, sessionID, id, commandID string, o ResealOutcome) (bool, error)
+
+	// PutResealPullRequest records an open reseal pull request, replacing
+	// an earlier record of it.
+	PutResealPullRequest(ctx context.Context, p ResealPullRequest) error
+	// ResealPullRequests returns the open reseal pull requests, or with
+	// open false the merged and closed ones, of one repository (a RepoKey)
+	// when given, by repository and number.
+	ResealPullRequests(ctx context.Context, open bool, repoKey string) ([]ResealPullRequest, error)
+	// UpdateResealPullRequest records what GitHub said of an open reseal
+	// pull request: when it was checked and, once it is merged or closed,
+	// that, keeping it for ResealRetention among the ended ones. It reports
+	// whether the pull request was still recorded open.
+	UpdateResealPullRequest(ctx context.Context, p ResealPullRequest) (bool, error)
 }

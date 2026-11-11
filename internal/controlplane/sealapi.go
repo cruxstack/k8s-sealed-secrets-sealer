@@ -369,6 +369,12 @@ func sessionFull(changes []store.Change) string {
 
 // chooseSealer picks the agent for a seal and returns it with the env key.
 func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Time) (fleet.Agent, string, error) {
+	return s.chooseAgent(ctx, regions, now, fleet.ChooseSealer)
+}
+
+// chooseAgent picks an agent with choose, counting the commands in flight
+// of each that might be chosen, and returns it with the env key.
+func (s *Server) chooseAgent(ctx context.Context, regions []string, now time.Time, choose func(fleet.Fleet, []string, map[string]int) (fleet.Agent, error)) (fleet.Agent, string, error) {
 	f, err := s.loadFleet(ctx, now, false)
 	if err != nil {
 		return fleet.Agent{}, "", err
@@ -385,7 +391,7 @@ func (s *Server) chooseSealer(ctx context.Context, regions []string, now time.Ti
 		}
 		inFlight[a.ID] = len(cmds)
 	}
-	agent, err := fleet.ChooseSealer(f, regions, inFlight)
+	agent, err := choose(f, regions, inFlight)
 	if err != nil {
 		return fleet.Agent{}, "", err
 	}

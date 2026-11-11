@@ -315,6 +315,10 @@ func (s *Server) Handler() http.Handler {
 			mux.HandleFunc("GET "+session+"/{id}/seals/{seal}", u.RequireUser(s.getSeal))
 			mux.HandleFunc("DELETE "+session+"/{id}/changes/{change}", write(s.deleteChange))
 			mux.HandleFunc("POST "+session+"/{id}/pull-request", write(s.limit(s.createPullRequest, limitPulls)))
+			// resealing a file is for env admins, who must also be able to
+			// write to the repository, as for a seal
+			mux.HandleFunc("POST "+session+"/{id}/reseals", write(u.RequireAdmin(s.limit(s.requestReseal, limitReseals))))
+			mux.HandleFunc("GET "+session+"/{id}/reseals/{reseal}", u.RequireUser(s.getReseal))
 		}
 	}
 

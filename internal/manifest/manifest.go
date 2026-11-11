@@ -117,11 +117,24 @@ func IsRegion(s string) bool { return s != "" && len(validation.IsDNS1123Label(s
 // Find returns the SealedSecret documents in content whose env annotation
 // equals env. Other documents, and other envs' SealedSecrets, are ignored.
 func Find(content []byte, ann Annotations, env string) ([]Document, error) {
+	docs, _, err := find(content, ann, env, false)
+	return docs, err
+}
+
+// EncryptedData returns what Find does, and the values in each document's
+// spec.encryptedData by its key, in the same order as the documents. A key
+// whose value is not a string is left out of its document's values.
+func EncryptedData(content []byte, ann Annotations, env string) ([]Document, []map[string]string, error) {
+	return find(content, ann, env, true)
+}
+
+func find(content []byte, ann Annotations, env string, withValues bool) ([]Document, []map[string]string, error) {
 	docs, err := parse(content)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []Document
+	var values []map[string]string
 	for i, d := range docs {
 		root := documentRoot(d)
 		if root == nil || scalar(mapValue(root, "kind")) != "SealedSecret" {
@@ -147,8 +160,26 @@ func Find(content []byte, ann Annotations, env string) ([]Document, error) {
 		}
 		doc.Problem = problem(root, spec, doc)
 		out = append(out, doc)
+		if withValues {
+			values = append(values, scalars(mapValue(spec, "encryptedData")))
+		}
 	}
-	return out, nil
+	return out, values, nil
+}
+
+// scalars returns a mapping's string values by key.
+func scalars(n *yaml.Node) map[string]string {
+	out := map[string]string{}
+	n = resolve(n)
+	if n == nil || n.Kind != yaml.MappingNode {
+		return out
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if v := resolve(n.Content[i+1]); v != nil && v.Kind == yaml.ScalarNode && (v.Tag == "!!str" || v.Tag == "") {
+			out[n.Content[i].Value] = v.Value
+		}
+	}
+	return out
 }
 
 // problem returns why a document cannot be sealed into, or "".
