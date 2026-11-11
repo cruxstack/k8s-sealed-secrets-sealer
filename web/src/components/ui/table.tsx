@@ -77,10 +77,13 @@ export function TableCell({
   return <td className={cn("px-4 py-3", className)} {...props} />;
 }
 
-/** An empty cell: an em dash, in the sans font even in a monospace column. */
-export function Dash() {
+/**
+ * An empty cell: an em dash, in the sans font even in a monospace column.
+ * `label` says what it stands for to a screen reader ("none" by default).
+ */
+export function Dash({ label = "none" }: { label?: string }) {
   return (
-    <span className="font-sans text-muted-foreground" aria-label="none">
+    <span className="font-sans text-muted-foreground" aria-label={label}>
       —
     </span>
   );
