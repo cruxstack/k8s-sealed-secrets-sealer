@@ -249,14 +249,16 @@ the run for inspection. Besides bringing the stack up, it checks that:
   finds the second current; its pull request changes only the first's
   `encryptedData` lines and says resealing does not rotate values; applied,
   every controller unseals the resealed value, and counts it under the env
-  key and none under the older one;
+  key and nothing more under the older one;
 - a schedule of `example-org/apps`, run now, opens one pull request on
   `sealer/dev/reseal-<run>` changing only that value, listed among the
   reseal pull requests with alice's from the session; a second run skips
   the repository while it is open; closed in the mock, the tick marks it
-  closed; the agents and the control plane log resealing and no value; and
-  dave gets `403` on schedules and on resealing a file. These checks take
-  about three to four minutes, and wait at most about twelve.
+  closed; the agents and the control plane log resealing and no value;
+  dave gets `403` on schedules and on resealing a file; and the checks
+  remove the SealedSecrets they applied and the schedule they made, and
+  close the pull requests. These checks take about three to four minutes,
+  and wait at most about twelve.
 
 ## Local agent identity
 

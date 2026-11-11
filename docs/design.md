@@ -1089,9 +1089,11 @@ sealing key, decrypt anything stored before or after, make an agent produce
 cluster-wide ciphertext or encrypt to a key outside the env, make an agent
 delete a key a value in its cluster is sealed with, turn on agent
 capabilities, or run anything else on a cluster. Through agents with
-`reseal`, it can have values it holds the ciphertext of moved onto the env
-key, but never under another label: not into another namespace, name or
-scope (section 16).
+`reseal`, it can have values it holds the ciphertext of moved onto the key
+an agent's controller seals with, which every cluster holding that key
+then opens; but never onto an older key, which may be exposed, and never
+under another label: not into another namespace, name or scope (section
+16).
 
 **A compromised cluster** already holds every env key, so injecting a key
 gives it nothing new while it is compromised. An injected key would, however,
@@ -1870,7 +1872,9 @@ of a `reseal.v1` command:
 2. It decrypts the RSA part with the keys of the key Secrets in its
    controller's namespace, each named by its private key as the reference
    count names them (section 10), the env key first. A value the env key
-   opens is `current`; one no key opens is `failed`.
+   opens is `current`; one no key opens is `failed`. The env key must be
+   the key its controller seals with, its active key, read as for a
+   check-in; otherwise it refuses the command.
 3. Otherwise it encrypts the same one-time key to the env key, under the
    same label, keeps the AES-GCM part as it is, and checks that the env
    key's private key opens the new RSA part to the same one-time key. The
@@ -1885,13 +1889,16 @@ to the value with the old key; the new ciphertext opens to nothing more.
 the label the old one opened with, so a reseal can never move a value to
 another namespace, another name or a wider scope: a command that names
 another namespace for a ciphertext gets a failure, since no key opens it
-under that label. The agent reseals only to a key its own controller holds
-and the command names, refuses cluster-wide values as it refuses to seal
-them, and returns ciphertexts only, never a one-time key or a value. The
-control plane checks that each resealed value's AES-GCM part is the
-original's, byte for byte. So a compromised control plane can have values it
-holds the ciphertext of moved onto the env key, where only clusters that
-could open them already can; nothing more.
+under that label. The agent reseals only onto the key its own controller
+seals with, the newest, never onto an older key a cluster still holds: a
+key revoked because it may be exposed, say, which would otherwise reach
+back into every value in git. It refuses cluster-wide values as it
+refuses to seal them, and returns ciphertexts only, never a one-time key
+or a value. The control plane checks that each resealed value's AES-GCM
+part is the original's, byte for byte. So a compromised control plane can
+have values it holds the ciphertext of moved onto the key controllers seal
+with, which every cluster holding that key opens, as it opens any value
+sealed now; nothing more.
 
 **Commands.** A `reseal.v1` carries at most 500 values and 320 KiB, counting
 each value's ciphertext and 1 KiB, so the command and its result each fit
@@ -1900,8 +1907,11 @@ Its payload is kept in an item of its own, read only when the command is
 leased, so the polls that read an agent's commands do not read it. It
 expires after 10 minutes, as key commands do. The agent is chosen as for a
 seal (section 7), among healthy agents with `reseal` that report `reseal.v1`
-and hold the env key, in the documents' regions first. A value whose key
-that agent's cluster does not hold fails there; it is not tried elsewhere.
+and whose controller seals with the env key, in the documents' regions
+first. Clusters made in the same second, such as the local stack's, may
+each seal with their own key, so only some agents qualify; when none
+does, resealing waits, and the status says why. A value whose key that
+agent's cluster does not hold fails there; it is not tried elsewhere.
 
 ### Resealing a file
 
@@ -1909,14 +1919,19 @@ An env admin who can write to the repository reseals a file from their
 session (`POST .../session/{id}/reseals` with its `path`). The control
 plane reads the file at the session's commit and sends every value of its
 documents for the env, except where a pending change of the session sets
-the key in that document: a reseal never replaces a value sealed in the
-session. The values of a document that cannot be sealed into, such as a
-cluster-wide one, fail without being sent.
+the key in that document. It is refused while a seal of the session is
+still running, whose change it could not leave out yet. The values of a
+document that cannot be sealed into, such as a cluster-wide one, fail
+without being sent. A file reseal sends at most 2,000 values, so its record
+stays small; a larger file is refused, and a schedule can reseal it.
 
 Each key with resealed values becomes a pending change of kind `reseal`
 that sets only the documents whose value was resealed; `current` and
-`failed` values make none. Its ID is its own, so a later seal of the key
-replaces it in the documents the seal covers, as any newer seal does. Every
+`failed` values make none. A reseal never replaces a value sealed in the
+session: where a seal and a reseal set the same key of a document, the
+seal wins, whichever came first, in what the session shows, in the changes
+it prunes and in the pull request. Its ID is its own, so a seal of the key
+covers it, and a newer reseal replaces it. Every
 key with values to reseal holds a place among the session's 50 changes
 until its command is done, and a file whose keys would not fit is refused
 at once, saying how many changes it can make. The pull request lists the
@@ -1976,7 +1991,10 @@ A run does not hang on an agent that never answers: its commands expire
 after 10 minutes, and their values fail ("no agent answered in time"). For
 its first 10 minutes, a run waits for an agent able to reseal, as one that
 restarts comes back; after that, values no agent can take fail, and a later
-run tries them again.
+run tries them again. Values resealed onto an env key revoked before the
+pull request opens are left out of it and fail. A run that makes no
+progress for an hour fails, so its schedule can run again; a pull request
+that cannot be opened is tried three times.
 
 **Ticks.** In a container, `cmd/server` ticks every `APP_TICK_INTERVAL` (a
 minute by default, 5 seconds in the local stack). On Lambda, an EventBridge
@@ -1988,16 +2006,20 @@ for each env in turn:
 
 - starts the due schedules, each with a conditional write on its next run,
   so of ticks that start the same run, one does;
-- leases each active run it advances (`lease_until`, a conditional write),
-  so overlapping ticks, on several Lambda instances or containers, never
-  advance one at once, and gives the lease up when it is done;
+- leases each active run it advances (`lease_until`, a conditional write)
+  for as long as the tick has and a minute, so overlapping ticks, on
+  several Lambda instances or containers, never advance one at once, and
+  gives the lease up when it is done; a run that ends, or is cancelled,
+  clears its schedule's active run in the same write;
 - checks open reseal pull requests on GitHub, the least recently checked
   first, at most 10, each once it has gone 15 ticks unchecked: about every
   15 minutes at a tick a minute.
 
 Ticks spend at most 100 GitHub requests a minute in an env, counted in the
-table, so every instance shares the count. One step that needs more, such
-as opening a pull request of many files, runs in a minute of its own.
+table, so every instance shares the count; answers the control plane has
+cached cost nothing. One step that needs more, such as discovering 100
+repositories or opening a pull request of many files, runs in a minute of
+its own.
 
 ### Reseal pull requests
 
@@ -2016,11 +2038,13 @@ Repository names are never shown to someone who cannot read them: a run's
 details and the list of reseal pull requests show only the repositories
 the admin can read, checked as the repository list checks them (section 12)
 and counted against the same limit, and count the rest as `hidden`. A list
-of runs names no repository, and counts none hidden. Schedules show the
-repositories and orgs admins gave them. The admin token reads schedules,
-runs and reseal pull requests, every repository included, and changes
-nothing. `GET {api}/status` says whether the env can reseal now
-(`can_reseal`, with why not in `reseal_blocked`).
+of runs names no repository, and counts none hidden. Schedules are the
+exception: they show every env admin the repositories and orgs admins gave
+them, since a schedule is what admins edit, and one that hid some of its
+own repositories could not be edited without losing them. The admin token
+reads schedules, runs and reseal pull requests, every repository included,
+and changes nothing. `GET {api}/status` says whether the env can reseal
+now (`can_reseal`, with why not in `reseal_blocked`).
 
 | Route                                     | Purpose                            |
 | ----------------------------------------- | ---------------------------------- |

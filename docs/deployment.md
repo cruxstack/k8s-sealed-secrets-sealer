@@ -219,11 +219,15 @@ cluster of an env, in its values and its registry entry, or in none.
 (design section 16): it decrypts only the RSA-wrapped one-time key of each
 value, with the key Secrets `keys` lets it read, and wraps it again for the
 env key under the same label. It adds no RBAC, needs `keys`, and the chart
-refuses it without. The control plane sends reseals to agents with
-`reseal` that hold the env key, as it sends seals; a value whose key the
-agent's cluster does not hold fails there. Key sync gives every cluster
-every key, so any agent can reseal any value of the env: a few with
-`reseal`, in clusters that are always up, are enough.
+refuses it without. An agent moves values only onto the key its own
+controller seals with, never onto an older one, so the control plane
+sends reseals only to agents whose controller seals with the env key; a
+value whose key the agent's cluster does not hold fails there. Key sync
+gives every cluster every key, so any such agent can reseal any value of
+the env: a few with `reseal`, in clusters that are always up, are
+enough. Clusters made in the same second may each seal with their own
+key; until a renewal gives them one newer key, only the cluster whose own
+key is the env key reseals, so give that one `reseal` too.
 
 Installed with `helm install sealer-agent ... --namespace sealer`, the chart
 creates the service account `sealer-agent` (the release's full name, unless

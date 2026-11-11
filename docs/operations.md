@@ -560,10 +560,13 @@ ciphertext. It needs agents with the `reseal` capability (in their values
 and registry entries) and, on Lambda, the tick schedule
 ([deployment](deployment.md#4-the-control-plane-in-the-tools-account)).
 `GET .../status` says whether the env can reseal now (`can_reseal`), and
-why not.
+why not: no agent with `reseal` is healthy and holds the env key, or none
+of their controllers seals with the env key yet.
 
 - **A file:** an admin who can write to the repository reseals it from a
-  session, and opens the pull request as with any seal.
+  session, once its seals have finished, and opens the pull request as
+  with any seal. A value sealed in the session always wins over a reseal
+  of it. A file with more than 2,000 values is left to a schedule.
 - **On a schedule:** an admin creates a schedule of repositories and orgs,
   every so many days. Each run opens one pull request per repository with
   every value it moved, from the default branch's head, and skips a
@@ -577,8 +580,11 @@ Watch them on the reseal pages, or with the admin token:
   why: "no key in this cluster opens it" for a value no key of the agent's
   cluster opens with its label (sealed for another env, or with a key
   deleted from the cluster), "no agent answered in time" for a command
-  that expired, and so on. A run reads at most 200 files of a repository
-  and covers at most 500 repositories; it says so when it left any out.
+  that expired, "the key it was resealed onto was revoked" for a value
+  left out of its pull request, and so on. A run reads at most 200 files
+  of a repository and covers at most 500 repositories; it says so when it
+  left any out. A run that makes no progress for an hour fails, so its
+  schedule can run again.
 - **Reseal pull requests** (`.../admin/reseal/pull-requests`): every open
   one, and with `?state=all` the merged and closed ones of the last 180
   days. Ticks check open ones on GitHub about every 15 ticks; a run checks
