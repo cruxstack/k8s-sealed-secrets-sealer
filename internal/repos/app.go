@@ -3,8 +3,11 @@ package repos
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync/atomic"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
 
 // Scheduled work, such as a reseal run, acts for no signed-in user: these
@@ -60,4 +63,30 @@ func (s *Service) AppOpenPullRequest(ctx context.Context, r githubapp.Repository
 // PullRequestState reads a pull request's state.
 func (s *Service) PullRequestState(ctx context.Context, owner, name string, number int) (githubapp.PullState, error) {
 	return s.gh.PullRequestState(ctx, owner, name, number)
+}
+
+// Readable returns which of the repositories, named "owner/name", the user
+// can read by their own permission, by the names' lowercase forms, as the
+// repository list checks them: a permission is reused for as long as the
+// list reuses it. A repository whose permission could not be checked in
+// time, or at all, is not readable. It also returns how many permissions it
+// looked up on GitHub, for rate limits.
+func (s *Service) Readable(ctx context.Context, user *userauth.User, names []string) (map[string]bool, int) {
+	var lookups atomic.Int32
+	ok := make([]bool, len(names))
+	forEach(ctx, len(names), func(i int) {
+		owner, name, found := strings.Cut(names[i], "/")
+		if !found || !githubapp.ValidName(owner) || !githubapp.ValidName(name) {
+			return
+		}
+		a, err := s.access(ctx, user, owner, name, s.listPermissionTTL(), &lookups)
+		ok[i] = err == nil && a.Read
+	})
+	out := map[string]bool{}
+	for i, n := range names {
+		if ok[i] {
+			out[strings.ToLower(n)] = true
+		}
+	}
+	return out, int(lookups.Load())
 }

@@ -58,6 +58,10 @@ const (
 	// about every 15 minutes at a tick a minute.
 	prRefreshPerTick = 10
 	prRefreshTicks   = 15
+	// agentWait is how long after a run starts it waits for an agent that
+	// can reseal, as one restarting comes back; after it, values that no
+	// agent can take fail, and a later run tries them again.
+	agentWait = 10 * time.Minute
 	// skipRecheck is how old a check of an open pull request may be when
 	// it skips a repository: older, it is checked again first.
 	skipRecheck = time.Minute
@@ -648,9 +652,11 @@ func (st *runStep) resealRepo(ctx context.Context, repo *store.ResealRunRepo, wo
 			work.Next = len(work.Candidates)
 			break
 		}
-		// an agent must be free before the file is read
-		if _, _, err := st.tick.resealer(ctx, nil); errors.Is(err, errWait) {
-			return err
+		// an agent must be free before the file is read; for a while after
+		// the run started, it waits for one to come back
+		_, _, err := st.tick.resealer(ctx, nil)
+		if _, refused := resealRefusal(err); errors.Is(err, errWait) || (refused && st.s.now().Sub(st.run.StartedAt) < agentWait) {
+			return errWait
 		}
 		c := work.Candidates[work.Next]
 		if !st.tick.take(ctx, 1) {

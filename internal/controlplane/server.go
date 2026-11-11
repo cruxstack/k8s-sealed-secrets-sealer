@@ -300,6 +300,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/v1/admin"+revoke, keyChange(s.setKeyStatus(store.KeyRevoked)))
 		mux.HandleFunc("POST /api/v1/admin"+reinstate, keyChange(s.setKeyStatus(store.KeyActive)))
 		mux.HandleFunc("POST /api/v1/admin"+del, keyChange(s.deleteKey))
+		// the token reads resealing as it reads the fleet, every repository
+		// included, and changes nothing
+		mux.HandleFunc("GET /api/v1/admin/reseal/schedules", s.requireAdmin(s.listSchedules))
+		mux.HandleFunc("GET /api/v1/admin/reseal/runs", s.requireAdmin(s.listRuns))
+		mux.HandleFunc("GET /api/v1/admin/reseal/runs/{id}", s.requireAdmin(s.getRun))
+		mux.HandleFunc("GET /api/v1/admin/reseal/pull-requests", s.requireAdmin(s.listResealPulls))
 	}
 
 	if u := s.users; u != nil {
@@ -315,6 +321,22 @@ func (s *Server) Handler() http.Handler {
 		if s.repos != nil {
 			mux.HandleFunc("GET /api/v1/repos", u.RequireUser(s.limit(s.listRepos, limitRepos)))
 			mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/files", u.RequireUser(s.limit(s.listFiles, limitFiles)))
+
+			// resealing's schedules, runs and pull requests are for admins;
+			// views that name repositories show only those the admin can
+			// read
+			read := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireAdmin(h)) }
+			change := func(h http.HandlerFunc) http.HandlerFunc { return u.RequireUser(u.RequireCSRF(u.RequireAdmin(h))) }
+			const schedules, runs = "/api/v1/reseal/schedules", "/api/v1/reseal/runs"
+			mux.HandleFunc("GET "+schedules, read(s.listSchedules))
+			mux.HandleFunc("POST "+schedules, change(s.createSchedule))
+			mux.HandleFunc("PATCH "+schedules+"/{id}", change(s.updateSchedule))
+			mux.HandleFunc("DELETE "+schedules+"/{id}", change(s.deleteSchedule))
+			mux.HandleFunc("POST "+schedules+"/{id}/run", change(s.runSchedule))
+			mux.HandleFunc("GET "+runs, read(s.listRuns))
+			mux.HandleFunc("GET "+runs+"/{id}", read(s.limit(s.getRun, limitResealViews)))
+			mux.HandleFunc("POST "+runs+"/{id}/cancel", change(s.cancelRun))
+			mux.HandleFunc("GET /api/v1/reseal/pull-requests", read(s.limit(s.listResealPulls, limitResealViews)))
 		}
 		if s.repos != nil && s.transit != nil {
 			// state-changing routes need the CSRF token

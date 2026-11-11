@@ -40,6 +40,9 @@ import (
 
 const billing = "deploy/billing/sealed-secret.yaml"
 
+// harnessAdminToken is the seal harness's admin token.
+const harnessAdminToken = "harness-admin-token-0123456789abcdef0123456789"
+
 // sealHarness is the dev env of the local stack, with the GitHub mock's
 // fixture repositories: three seal-only agents in two regions.
 type sealHarness struct {
@@ -145,6 +148,7 @@ agents:
 		Registry:     reg,
 		Sessions:     agentSessions,
 		Store:        sh.store,
+		AdminToken:   harnessAdminToken,
 		Users:        users.Env("dev"),
 		Repos:        rs,
 		Transit:      sh.kms,

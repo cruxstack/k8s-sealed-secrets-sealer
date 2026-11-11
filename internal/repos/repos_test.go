@@ -655,3 +655,23 @@ func TestFileValues(t *testing.T) {
 		t.Errorf("undiscovered file: %v", err)
 	}
 }
+
+func TestReadable(t *testing.T) {
+	s, gh, _ := newService(t, nil)
+	ctx := context.Background()
+	names := []string{"example-org/apps", "Example-Org/Platform", "example-org/restricted", "example-org/missing", "not a name"}
+	got, lookups := s.Readable(ctx, alice, names)
+	if !got["example-org/apps"] || !got["example-org/platform"] || got["example-org/restricted"] || got["example-org/missing"] || len(got) != 2 {
+		t.Fatalf("alice reads %v", got)
+	}
+	if lookups != 4 || gh.permissions.Load() != 4 {
+		t.Fatalf("%d lookups, %d on GitHub", lookups, gh.permissions.Load())
+	}
+	// reused, as the repository list reuses them
+	if _, lookups := s.Readable(ctx, alice, names); lookups != 0 {
+		t.Fatalf("%d lookups the second time", lookups)
+	}
+	if got, _ := s.Readable(ctx, carol, names); len(got) != 0 {
+		t.Fatalf("carol reads %v", got)
+	}
+}

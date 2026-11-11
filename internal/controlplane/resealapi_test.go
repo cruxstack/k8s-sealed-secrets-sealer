@@ -90,11 +90,17 @@ func newResealFixture(t *testing.T) *resealFixture {
 	if _, ok := sh.github.Push("example-org", "apps", "main", "mock", map[string]string{resealPath: b.String()}); !ok {
 		t.Fatal("push")
 	}
-	// every cluster holds the older key too; the env key is the newer
-	for id := range sh.agents {
-		sh.checkIn(id, old.Key, sh.key.Key)
-	}
+	f.checkInAll()
 	return f
+}
+
+// checkInAll checks every agent in, each holding the older key and the env
+// key, the newer.
+func (f *resealFixture) checkInAll() {
+	f.sh.t.Helper()
+	for id := range f.sh.agents {
+		f.sh.checkIn(id, f.old.Key, f.sh.key.Key)
+	}
 }
 
 // runResealer leases an agent's commands and runs them as the agent would,

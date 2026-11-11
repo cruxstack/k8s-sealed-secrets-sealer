@@ -277,8 +277,8 @@ type Store interface {
 	// leaving its runs as they are. It reports whether the schedule
 	// exists.
 	UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bool, error)
-	// DeleteResealSchedule deletes a schedule and returns it as it was,
-	// reporting whether it existed.
+	// DeleteResealSchedule deletes a schedule and returns it as it was when
+	// deleted, its active run included, reporting whether it existed.
 	DeleteResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error)
 
 	// StartResealRun records a new run of a schedule with no active run,

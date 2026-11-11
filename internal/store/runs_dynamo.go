@@ -163,28 +163,42 @@ func (d *Dynamo) UpdateResealSchedule(ctx context.Context, s ResealSchedule) (bo
 }
 
 func (d *Dynamo) DeleteResealSchedule(ctx context.Context, id string) (ResealSchedule, bool, error) {
-	s, found, err := d.ResealSchedule(ctx, id)
-	if err != nil || !found {
-		return ResealSchedule{}, false, err
+	// the active run returned must be the one deleted with it: a run
+	// started meanwhile makes it read again
+	for range maxReserveAttempts {
+		s, found, err := d.ResealSchedule(ctx, id)
+		if err != nil || !found {
+			return ResealSchedule{}, false, err
+		}
+		condition := "attribute_exists(pk) AND attribute_not_exists(active_run_id)"
+		var values map[string]types.AttributeValue
+		if s.ActiveRunID != "" {
+			condition = "active_run_id = :run"
+			values = map[string]types.AttributeValue{":run": &types.AttributeValueMemberS{Value: s.ActiveRunID}}
+		}
+		_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			{Delete: &types.Delete{
+				TableName: &d.table, Key: itemKey(resealPK, schedulePrefix+id),
+				ConditionExpression: aws.String(condition), ExpressionAttributeValues: values,
+			}},
+			{Update: &types.Update{
+				TableName:                 &d.table,
+				Key:                       itemKey(resealPK, skSchedules),
+				UpdateExpression:          aws.String("ADD #n :less"),
+				ExpressionAttributeNames:  map[string]string{"#n": "schedules"},
+				ExpressionAttributeValues: map[string]types.AttributeValue{":less": number(-1)},
+			}},
+		}})
+		if failed, ok := failedConditions(err); ok && failed[0] {
+			// deleted, or a run started or ended, meanwhile
+			continue
+		}
+		if err != nil {
+			return ResealSchedule{}, false, fmt.Errorf("failed to delete schedule %s: %w", id, err)
+		}
+		return s, true, nil
 	}
-	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
-		{Delete: &types.Delete{TableName: &d.table, Key: itemKey(resealPK, schedulePrefix+id), ConditionExpression: aws.String("attribute_exists(pk)")}},
-		{Update: &types.Update{
-			TableName:                 &d.table,
-			Key:                       itemKey(resealPK, skSchedules),
-			UpdateExpression:          aws.String("ADD #n :less"),
-			ExpressionAttributeNames:  map[string]string{"#n": "schedules"},
-			ExpressionAttributeValues: map[string]types.AttributeValue{":less": number(-1)},
-		}},
-	}})
-	if failed, ok := failedConditions(err); ok && failed[0] {
-		// deleted meanwhile
-		return ResealSchedule{}, false, nil
-	}
-	if err != nil {
-		return ResealSchedule{}, false, fmt.Errorf("failed to delete schedule %s: %w", id, err)
-	}
-	return s, true, nil
+	return ResealSchedule{}, false, fmt.Errorf("failed to delete schedule %s: it kept changing", id)
 }
 
 func (d *Dynamo) StartResealRun(ctx context.Context, run ResealRun, expectNext, next *time.Time) error {
