@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
@@ -71,6 +72,11 @@ type KeySync struct {
 	// monotonic clock; a restart waits settle after it
 	lastCreate time.Time
 	settle     time.Duration
+	// restartPoll is the constant, overridden in tests
+	restartPoll time.Duration
+	// restoring counts the restores running; the check-in loop leaves
+	// restarts to them
+	restoring atomic.Int32
 }
 
 // KeySyncOptions configures a KeySync.
@@ -113,6 +119,7 @@ func NewKeySync(opts KeySyncOptions) *KeySync {
 
 		restartBackoff: restartRetry,
 		settle:         time.Second,
+		restartPoll:    restartPoll,
 	}
 }
 
@@ -257,8 +264,14 @@ func (k *KeySync) Restore(ctx context.Context, cmd protocol.Command) (any, error
 	}
 	prefix := settings.keyPrefix
 
+	// the check-in loop leaves restarts to this restore until it ends: the
+	// restart below covers every key it restores
+	k.beginRestore()
+	defer k.endRestore()
+
 	// a key held under any label value is present: one relabeled (as
-	// compromised, say) must not come back as active
+	// compromised, say) must not come back as active. The result says so,
+	// and the control plane holds such keys off for a while.
 	present, err := k.keySecrets(ctx, keyLabel)
 	if err != nil {
 		return nil, err

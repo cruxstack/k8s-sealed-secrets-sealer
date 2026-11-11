@@ -725,21 +725,32 @@ required: the controller lists key secrets only at startup
 (`initKeyRegistry`) and does not watch for new ones. It deletes the
 controller's pods that were created before the newest restored key's Secret,
 and their Deployment starts new ones; with one replica the controller is
-unavailable for the few seconds its new pod takes to start. Deleting pods
-needs no write access to the Deployment. Before deleting anything, the agent
-checks that every key Secret would load, since a new pod stops at one that
-does not. The agent refuses the whole command if its controller orders keys
-by `SecretCreationTimestamp`, or if it cannot tell how it orders them.
+unavailable for the few seconds its new pod takes to start. With several,
+it deletes one pod at a time, each once the pod that replaced the last is
+ready. A pod counts as the controller's only when the Deployment owns its
+ReplicaSet, so another workload's pods that the Deployment's selector
+happens to match are never deleted, nor taken as proof that a key loaded.
+Deleting pods needs no write access to the Deployment. A delete is not an
+eviction, so the controller's PodDisruptionBudget does not hold it back.
+Before deleting anything, the agent checks that every key Secret would
+load, since a new pod stops at one that does not. The agent refuses the
+whole command if its controller orders keys by `SecretCreationTimestamp`,
+or if it cannot tell how it orders them.
 
 A restored key counts as held only once the controller has loaded it: when
 every ready controller pod was created after the key's Secret (in a later
 second, as creation times are whole seconds), or when the controller seals
 with it. Until then the agent leaves it out of its check-ins and does not
 seal with it, so it cannot become the env key while this cluster could not
-decrypt with it. If the restart failed or never happened, the agent retries
-it on its check-ins, backing off from 30 seconds to 10 minutes, and a
-repeated restore command retries it too. While the controller restarts, the
-agent seals with the keys it reported last.
+decrypt with it. When the agent cannot tell, because the controller's
+Deployment or pods cannot be read or none of its pods is ready (as while it
+restarts), it skips that check-in rather than leave out keys the controller
+loaded long ago. If the restart failed or never happened, the agent retries
+it at each check-in, whether or not the control plane answers, backing off
+from 30 seconds to 10 minutes, and a repeated restore command retries it
+too. While a restore runs, the check-in loop leaves restarts to it, so the
+controller restarts once for the whole restore. While the controller
+restarts, the agent seals with the keys it reported last.
 
 Key commands expire after 10 minutes. The control plane does not queue a
 restore for a key that an open restore command already covers, nor for 2
@@ -981,9 +992,11 @@ revoked by mistake can be reinstated. Taking a key out of the clusters is
 key retirement (section 16).
 
 **Controller namespace.** The controller runs in its own namespace, not
-`kube-system`. RBAC cannot limit `list secrets` by label, so an agent with the
-`keys` capability can read every Secret in the controller namespace; that
-namespace must hold only the controller and its keys.
+`kube-system`. RBAC cannot limit `list secrets` or `delete pods` by label,
+so an agent with the `keys` capability can read every Secret and delete any
+pod in the controller namespace; that namespace must hold only the
+controller and its keys. The agent chart refuses `keys` with the controller
+in `kube-system`.
 
 **Agent RBAC.** The Helm chart installs a Role in the controller namespace,
 bound to the agent's ServiceAccount in the agent's own namespace:
@@ -994,7 +1007,8 @@ bound to the agent's ServiceAccount in the agent's own namespace:
 |            | (for `/v1/cert.pem`); `get` the controller Deployment (to     |
 |            | read its flags).                                              |
 | `seal`     | Nothing more: sealing uses public certificates in process.    |
-| `keys`     | `list`, `create` Secrets; `list`, `delete` Pods (restart).    |
+| `keys`     | `list`, `create` Secrets; `list`, `delete` Pods and `list`    |
+|            | ReplicaSets (restart).                                        |
 | `renewal`  | `patch` the controller Deployment.                            |
 
 `get` and `patch` are limited to the named Service and Deployment with

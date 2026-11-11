@@ -44,9 +44,16 @@ func keySecret(name string, cert []byte, labeled bool) *corev1.Secret {
 // controllerLabels select the controller's pods.
 var controllerLabels = map[string]string{"app.kubernetes.io/name": "sealed-secrets"}
 
+// The controller's Deployment and its ReplicaSet; controllerPod makes pods
+// of that ReplicaSet.
+const (
+	deploymentUID = types.UID("deployment")
+	replicaSetUID = types.UID("replicaset")
+)
+
 func controllerDeployment(args ...string) *appsv1.Deployment {
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sealed-secrets-controller", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "sealed-secrets-controller", Namespace: ns, UID: deploymentUID},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: controllerLabels},
 			Template: corev1.PodTemplateSpec{
@@ -59,6 +66,20 @@ func controllerDeployment(args ...string) *appsv1.Deployment {
 	}
 }
 
+// controllerReplicaSet is the ReplicaSet of the controller's Deployment.
+func controllerReplicaSet() *appsv1.ReplicaSet {
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sealed-secrets-controller-abc", Namespace: ns, UID: replicaSetUID, Labels: controllerLabels,
+			OwnerReferences: []metav1.OwnerReference{ownerRef("Deployment", "sealed-secrets-controller", deploymentUID)},
+		},
+	}
+}
+
+func ownerRef(kind, name string, uid types.UID) metav1.OwnerReference {
+	return metav1.OwnerReference{Kind: kind, Name: name, UID: uid, Controller: new(true)}
+}
+
 // controllerPod is a running controller pod created at created.
 func controllerPod(name string, created time.Time, ready bool) *corev1.Pod {
 	status := corev1.ConditionFalse
@@ -69,6 +90,7 @@ func controllerPod(name string, created time.Time, ready bool) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: ns, Labels: controllerLabels,
 			UID: types.UID(name), CreationTimestamp: metav1.NewTime(created),
+			OwnerReferences: []metav1.OwnerReference{ownerRef("ReplicaSet", "sealed-secrets-controller-abc", replicaSetUID)},
 		},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
@@ -88,7 +110,7 @@ func restoredSecret(name string, cert []byte, created time.Time) *corev1.Secret 
 func inventory(certs CertSource, listKeys bool, objs ...runtime.Object) *Inventory {
 	return NewInventory(InventoryOptions{
 		Certs:      certs,
-		Kube:       fake.NewClientset(objs...),
+		Kube:       fake.NewClientset(append(objs, controllerReplicaSet())...),
 		Namespace:  ns,
 		Name:       "sealed-secrets-controller",
 		Deployment: "sealed-secrets-controller",
@@ -220,13 +242,108 @@ func TestInventory_LeavesOutRestoredKeysNotLoaded(t *testing.T) {
 		t.Fatalf("after a restart: err = %v, keys = %d, pending = %v", err, len(r.Keys), r.Pending)
 	}
 
-	// pods that cannot be listed prove nothing
-	inv = inventory(staticCerts{pem: active}, true, append(objs, controllerPod("new", now, true))...)
-	inv.kube.(*fake.Clientset).PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("rbac"))
-	})
-	if r, err = inv.Collect(context.Background()); err != nil || containsKey(r.Keys, restoredKey.Fingerprint) {
-		t.Fatalf("with pods unreadable: err = %v, keys = %d", err, len(r.Keys))
+	// a new pod of another workload that the selector matches is not the
+	// controller's, so it proves nothing
+	other := controllerPod("other", now, true)
+	other.OwnerReferences = []metav1.OwnerReference{ownerRef("ReplicaSet", "other", "other-replicaset")}
+	inv = inventory(staticCerts{pem: active}, true, append(objs, other)...)
+	if r, err = inv.Collect(context.Background()); err == nil && containsKey(r.Keys, restoredKey.Fingerprint) {
+		t.Fatal("another workload's pod counted as the controller having loaded the key")
+	}
+}
+
+// A restored key the controller loaded long ago stays in the report when
+// its pods cannot be told apart for a moment: Collect fails instead of
+// reporting it missing, and the sealer keeps the last report.
+func TestInventory_FailsRatherThanLeaveOutLoadedKeys(t *testing.T) {
+	now := time.Now()
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), now.Add(-time.Hour))
+	old := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), now.Add(-48*time.Hour))
+	oldKey, _ := toProtocolKey(old)
+	transient := errors.New("etcdserver: request timed out")
+	fail := func(verb, resource string, err error) func(*fake.Clientset) {
+		return func(kube *fake.Clientset) {
+			kube.PrependReactor(verb, resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, err
+			})
+		}
+	}
+	cases := map[string]func(*fake.Clientset){
+		"pods unreadable":        fail("list", "pods", transient),
+		"replica sets forbidden": fail("list", "replicasets", apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "replicasets"}, "", errors.New("rbac"))),
+		"deployment unreadable":  fail("get", "deployments", transient),
+		// the restart window: the old pod is terminating and the new one
+		// is not ready yet
+		"no pod ready": func(kube *fake.Clientset) {
+			ctx := context.Background()
+			pod, err := kube.CoreV1().Pods(ns).Get(ctx, "pod", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod.DeletionTimestamp = &metav1.Time{Time: now}
+			if _, err := kube.CoreV1().Pods(ns).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := kube.CoreV1().Pods(ns).Create(ctx, controllerPod("new", now.Add(time.Second), false), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, breakIt := range cases {
+		t.Run(name, func(t *testing.T) {
+			kube := fake.NewClientset(
+				keySecret("own", active, true),
+				restoredSecret("restored", old, now.Add(-24*time.Hour)),
+				controllerDeployment("--update-status"),
+				controllerReplicaSet(),
+				// created after the restored key's Secret: it loaded it
+				controllerPod("pod", now.Add(-time.Hour), true),
+			)
+			inv := NewInventory(InventoryOptions{
+				Certs: staticCerts{pem: active}, Kube: kube, Namespace: ns,
+				Name: "sealed-secrets-controller", Deployment: "sealed-secrets-controller", ListKeys: true,
+			})
+			r, err := inv.Collect(context.Background())
+			if err != nil || len(r.Keys) != 2 || len(r.Pending) != 0 {
+				t.Fatalf("healthy read: err = %v, keys = %d, pending = %v", err, len(r.Keys), r.Pending)
+			}
+			breakIt(kube)
+			if r, err := inv.Collect(context.Background()); err == nil {
+				t.Fatalf("reported %d keys and pending %v instead of failing", len(r.Keys), r.Pending)
+			}
+			if r, err := inv.Fallback(time.Minute).Collect(context.Background()); err != nil || !containsKey(r.Keys, oldKey.Fingerprint) {
+				t.Fatalf("fallback: err = %v, keys = %d", err, len(r.Keys))
+			}
+		})
+	}
+}
+
+// A Deployment that may not be read, or is not there, leaves the flags
+// unknown; one read that fails otherwise fails the report, rather than
+// report them unknown for one check-in.
+func TestInventory_DeploymentReadErrors(t *testing.T) {
+	active := testcerts.SelfSigned(t, testcerts.RSA(t, 2048), time.Now())
+	cases := map[string]struct {
+		err  error
+		fail bool
+	}{
+		"not found": {err: apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "sealed-secrets-controller")},
+		"transient": {err: errors.New("etcdserver: request timed out"), fail: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			inv := inventory(staticCerts{pem: active}, false, controllerDeployment())
+			inv.kube.(*fake.Clientset).PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, tc.err
+			})
+			r, err := inv.Collect(context.Background())
+			if (err != nil) != tc.fail {
+				t.Fatalf("err = %v, want failure %v", err, tc.fail)
+			}
+			if err == nil && (r.Controller.KeyRenewPeriod != "" || r.Controller.KeyOrderPriority != "") {
+				t.Errorf("flags should be unknown: %+v", r.Controller)
+			}
+		})
 	}
 }
 

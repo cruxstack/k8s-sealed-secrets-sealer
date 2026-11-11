@@ -122,18 +122,32 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) cycle(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, cycleTimeout)
+	cycleCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
 	defer cancel()
 
-	report, err := a.inventory.Collect(ctx)
+	report, err := a.inventory.Collect(cycleCtx)
 	if err != nil {
-		a.logger.WarnContext(ctx, "failed to read controller",
+		a.logger.WarnContext(cycleCtx, "failed to read controller",
 			"event", "controller.read_failed", "error", err)
 		return
 	}
-	a.noteActiveKey(ctx, report)
-	a.noteKeyCount(ctx, len(report.Keys))
+	a.noteActiveKey(cycleCtx, report)
+	a.noteKeyCount(cycleCtx, len(report.Keys))
+	a.checkIn(cycleCtx, report)
 
+	// restored keys are loaded whether or not the control plane answered:
+	// decryption must never wait for it. The restart gets time of its own,
+	// so a check-in that timed out does not cut it short.
+	if a.loader != nil && len(report.Pending) > 0 {
+		loadCtx, cancel := context.WithTimeout(ctx, cycleTimeout)
+		defer cancel()
+		a.loader.LoadRestored(loadCtx, report.Controller.ActiveFingerprint)
+	}
+}
+
+// checkIn reports the controller to the control plane and escrows the keys
+// it asks for.
+func (a *Agent) checkIn(ctx context.Context, report Report) {
 	// an agent with no capabilities still checks in, reporting its
 	// controller's active key; empty lists, not null
 	capabilities, commands := a.capabilities, a.commands
@@ -167,9 +181,6 @@ func (a *Agent) cycle(ctx context.Context) {
 	}
 	if a.escrow != nil && len(resp.EscrowNeeded) > 0 {
 		a.escrow.Escrow(ctx, resp.EscrowNeeded)
-	}
-	if a.loader != nil && len(report.Pending) > 0 {
-		a.loader.LoadRestored(ctx, report.Controller.ActiveFingerprint)
 	}
 }
 

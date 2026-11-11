@@ -1,5 +1,8 @@
 {{- $name := .Values.controller.name }}
 {{- $deployment := include "agent.controllerDeployment" . }}
+{{- if and .Values.capabilities.keys (eq .Values.controller.namespace "kube-system") }}
+{{- fail "capabilities.keys needs the controller in a namespace of its own, not kube-system: it lets the agent list every Secret and delete any pod in the controller's namespace" }}
+{{- end }}
 # Everything the agent may do is granted here, in the controller's namespace
 # only. Nothing is cluster-wide. See docs/design.md, "Agent RBAC".
 apiVersion: rbac.authorization.k8s.io/v1
@@ -36,10 +39,16 @@ rules:
     verbs: ["list", "create"]
   # the controller reads keys only when it starts: see which of its pods
   # predate a restored key, and delete them so its Deployment starts new
-  # ones; pod names are generated, so this cannot be narrowed by name
+  # ones; pod names are generated, so this cannot be narrowed by name. A
+  # delete is not an eviction: PodDisruptionBudgets do not apply.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "delete"]
+  # tell the controller's pods from others its selector matches: a pod is
+  # the controller's only when its ReplicaSet is the Deployment's
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
   {{- end }}
   {{- if .Values.capabilities.renewal }}
   # set --key-renew-period in the controller's arguments. RBAC cannot narrow

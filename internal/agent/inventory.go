@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -87,7 +88,8 @@ func NewInventory(opts InventoryOptions) *Inventory {
 }
 
 // Collect reads the controller's active certificate, its flags and, when
-// allowed, its whole key set.
+// allowed, its whole key set. When part of that cannot be read it fails,
+// rather than report less than the controller holds.
 func (inv *Inventory) Collect(ctx context.Context) (Report, error) {
 	r, err := inv.collect(ctx)
 	if err != nil {
@@ -117,7 +119,10 @@ func (inv *Inventory) collect(ctx context.Context) (Report, error) {
 		},
 		Keys: []protocol.Key{active},
 	}
-	d := inv.controllerDeployment(ctx)
+	d, err := inv.controllerDeployment(ctx)
+	if err != nil {
+		return Report{}, err
+	}
 	if d != nil {
 		s := readSettings(d)
 		r.Controller.KeyRenewPeriod, r.Controller.KeyOrderPriority = s.keyRenewPeriod, s.keyOrderPriority
@@ -130,7 +135,9 @@ func (inv *Inventory) collect(ctx context.Context) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("failed to list key secrets in %s: %w", inv.namespace, err)
 	}
-	r.Pending = inv.pending(ctx, d, list.Items, active.Fingerprint)
+	if r.Pending, err = inv.pending(ctx, d, list.Items, active.Fingerprint); err != nil {
+		return Report{}, err
+	}
 	all := inv.keySet(ctx, list.Items, r.Pending)
 	if !containsKey(all, active.Fingerprint) {
 		// the controller seals with a key that is not a labeled key Secret;
@@ -145,41 +152,55 @@ func (inv *Inventory) collect(ctx context.Context) (Report, error) {
 	return r, nil
 }
 
-// controllerDeployment reads the controller's Deployment, or returns nil
-// when it cannot.
-func (inv *Inventory) controllerDeployment(ctx context.Context) *appsv1.Deployment {
+// controllerDeployment reads the controller's Deployment. It returns nil
+// and no error when the agent may not read it or it does not exist, so the
+// controller's flags are unknown. Any other failure is an error, so one
+// failed read does not report the flags as unknown: the control plane
+// could take renewal as off in this cluster and turn it on in another.
+func (inv *Inventory) controllerDeployment(ctx context.Context) (*appsv1.Deployment, error) {
 	d, err := inv.kube.AppsV1().Deployments(inv.namespace).Get(ctx, inv.deployment, metav1.GetOptions{})
-	if err != nil {
-		level := slog.LevelWarn
-		if apierrors.IsForbidden(err) {
-			level = slog.LevelDebug
-		}
-		inv.logger.Log(ctx, level, "cannot read controller deployment; its flags are unknown",
+	switch {
+	case err == nil:
+		return d, nil
+	case apierrors.IsForbidden(err):
+		inv.logger.DebugContext(ctx, "cannot read controller deployment; its flags are unknown",
 			"deployment", inv.namespace+"/"+inv.deployment, "error", err)
-		return nil
+		return nil, nil
+	case apierrors.IsNotFound(err):
+		inv.logger.WarnContext(ctx, "cannot read controller deployment; its flags are unknown",
+			"deployment", inv.namespace+"/"+inv.deployment, "error", err)
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("failed to get controller deployment %s/%s: %w", inv.namespace, inv.deployment, err)
 	}
-	return d
 }
 
 // pending returns the restored keys among secrets that the controller has
-// not loaded. When its pods cannot be read, none of them counts as loaded.
-func (inv *Inventory) pending(ctx context.Context, d *appsv1.Deployment, secrets []corev1.Secret, active string) []string {
+// not loaded. It fails when it cannot tell: when the controller's pods
+// cannot be read, or none of them is ready, as while it restarts. Leaving
+// the keys out then would report keys it loaded long ago as missing.
+func (inv *Inventory) pending(ctx context.Context, d *appsv1.Deployment, secrets []corev1.Secret, active string) ([]string, error) {
 	if !slices.ContainsFunc(secrets, restoredByAgent) {
-		return nil
+		return nil, nil
 	}
 	var pods []corev1.Pod
-	if d != nil {
-		var err error
-		if pods, err = controllerPods(ctx, inv.kube, d); err != nil {
-			inv.logger.WarnContext(ctx, "cannot tell which restored keys the controller has loaded; leaving them out",
-				"event", "controller.read_failed", "error", err)
-		}
+	var readErr error
+	if d == nil {
+		readErr = fmt.Errorf("cannot read controller deployment %s/%s", inv.namespace, inv.deployment)
+	} else {
+		pods, readErr = controllerPods(ctx, inv.kube, d)
 	}
 	st := restoreState(secrets, pods, active)
-	if len(st.pending) > 0 {
-		inv.logger.DebugContext(ctx, "restored keys the controller has not loaded yet", "fingerprints", st.fingerprints())
+	switch {
+	case len(st.pending) == 0:
+		return nil, nil
+	case readErr != nil:
+		return nil, fmt.Errorf("failed to tell which restored keys the controller has loaded: %w", readErr)
+	case st.unsure:
+		return nil, errors.New("failed to tell which restored keys the controller has loaded: none of its pods is ready")
 	}
-	return st.fingerprints()
+	inv.logger.DebugContext(ctx, "restored keys the controller has not loaded yet", "fingerprints", st.fingerprints())
+	return st.fingerprints(), nil
 }
 
 // keySet reads the certificate of every key Secret, leaving out the keys in

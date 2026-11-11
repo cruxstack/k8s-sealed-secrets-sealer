@@ -90,6 +90,14 @@ if ! helm template check deploy/helm/agent "${agent[@]}" | grep -q 'type: Recrea
   echo "Error: the agent Deployment does not use the Recreate strategy" >&2
   exit 1
 fi
+# keys deletes pods and reads every Secret in the controller's namespace, so
+# not in kube-system; seal alone may run there
+if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.keys=true \
+  --set kms.escrowKeyId=alias/sealer-escrow --set controller.namespace=kube-system >/dev/null 2>&1; then
+  echo "Error: the agent chart enables keys with the controller in kube-system" >&2
+  exit 1
+fi
+validate deploy/helm/agent "${agent[@]}" --set controller.namespace=kube-system
 # only renewal may patch the controller Deployment
 if helm template check deploy/helm/agent "${agent[@]}" --set capabilities.keys=true \
   --set kms.escrowKeyId=alias/sealer-escrow | grep -q '"patch"'; then
