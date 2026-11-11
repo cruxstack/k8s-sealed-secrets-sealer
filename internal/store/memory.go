@@ -19,9 +19,12 @@ type Memory struct {
 	replays map[string]time.Time
 	// commands by agent ID, then command ID
 	commands map[string]map[string]CommandRecord
-	// escrow holds each key's escrowed copies, the primary record first
-	escrow  map[string][]protocol.EscrowRecord
-	revoked map[string]RevokedKey
+	// escrow holds each key's escrowed copies, the primary record first;
+	// escrowExpires the purge time of a deleted key's copies
+	escrow        map[string][]protocol.EscrowRecord
+	escrowExpires map[string]time.Time
+	revoked       map[string]RevokedKey
+	usage         map[string]KeyUsage
 	// sessions by user ID, then repository key; seals and changes by
 	// session ID, then command or change ID
 	sessions map[int64]map[string]Session
@@ -48,11 +51,14 @@ func NewMemory() *Memory {
 		commands: map[string]map[string]CommandRecord{},
 		escrow:   map[string][]protocol.EscrowRecord{},
 		revoked:  map[string]RevokedKey{},
+		usage:    map[string]KeyUsage{},
 		sessions: map[int64]map[string]Session{},
 		seals:    map[string]map[string]Seal{},
 		changes:  map[string]map[string]Change{},
 		reserved: map[string]map[string]int64{},
 		requests: map[rateWindow]int{},
+
+		escrowExpires: map[string]time.Time{},
 	}
 }
 
@@ -96,8 +102,11 @@ func (m *Memory) SetKeyStatus(_ context.Context, k KeyRecord) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.keys[k.Fingerprint]
-	if !ok {
+	switch {
+	case !ok:
 		return false, nil
+	case rec.Status == KeyDeleted:
+		return false, ErrKeyChanged
 	}
 	rec.Status, rec.StatusBy, rec.StatusAt = k.Status, k.StatusBy, k.StatusAt
 	m.keys[k.Fingerprint] = rec
@@ -109,10 +118,70 @@ func (m *Memory) SetKeyStatus(_ context.Context, k KeyRecord) (bool, error) {
 	return true, nil
 }
 
+func (m *Memory) DeleteKey(_ context.Context, k KeyRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.keys[k.Fingerprint]
+	r, listed := m.revoked[k.Fingerprint]
+	if !ok || rec.Status != KeyRevoked || !listed {
+		return ErrKeyChanged
+	}
+	rec.Status, rec.StatusBy, rec.StatusAt, rec.PurgeAt = KeyDeleted, k.StatusBy, k.StatusAt, k.PurgeAt
+	m.keys[k.Fingerprint] = rec
+	r.Status, r.DeletedBy, r.DeletedAt, r.PurgeAt = KeyDeleted, k.StatusBy, k.StatusAt, k.PurgeAt
+	m.revoked[k.Fingerprint] = r
+	m.escrowExpires[k.Fingerprint] = *k.PurgeAt
+	return nil
+}
+
+func (m *Memory) ReinstateDeletedKey(_ context.Context, k KeyRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.keys[k.Fingerprint]
+	if !ok || rec.Status != KeyDeleted {
+		return ErrKeyChanged
+	}
+	rec.Status, rec.StatusBy, rec.StatusAt, rec.PurgeAt = KeyActive, k.StatusBy, k.StatusAt, nil
+	m.keys[k.Fingerprint] = rec
+	delete(m.revoked, k.Fingerprint)
+	delete(m.escrowExpires, k.Fingerprint)
+	return nil
+}
+
 func (m *Memory) RevokedKeys(_ context.Context) (map[string]RevokedKey, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return maps.Clone(m.revoked), nil
+}
+
+func (m *Memory) PutKeyUsage(_ context.Context, u KeyUsage) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if prev, ok := m.usage[u.AgentID]; ok && prev.ScannedAt.Equal(u.ScannedAt) {
+		return false, nil
+	}
+	u.Namespaces, u.Keys = slices.Clone(u.Namespaces), maps.Clone(u.Keys)
+	m.usage[u.AgentID] = u
+	return true, nil
+}
+
+func (m *Memory) KeyUsages(_ context.Context, ids []string) (map[string]KeyUsage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]KeyUsage{}
+	for _, id := range ids {
+		if u, ok := m.usage[id]; ok {
+			out[id] = u
+		}
+	}
+	return out, nil
+}
+
+// escrowGone reports whether a key's escrowed copies are past their purge
+// time, as the table's TTL would remove them. The caller holds m.mu.
+func (m *Memory) escrowGone(fingerprint string) bool {
+	at, ok := m.escrowExpires[fingerprint]
+	return ok && !time.Now().Before(at)
 }
 
 func (m *Memory) PutReplayIfAbsent(_ context.Context, key string, expires time.Time) (bool, error) {
@@ -217,6 +286,10 @@ func (m *Memory) PutEscrow(_ context.Context, rec protocol.EscrowRecord, maxCopi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	recs := m.escrow[rec.Fingerprint]
+	if _, deleted := m.escrowExpires[rec.Fingerprint]; deleted && len(recs) > 0 {
+		// a deleted key's copies expire together: none is added
+		return false, false, nil
+	}
 	if len(recs) >= max(maxCopies, 1) || slices.ContainsFunc(recs, func(r protocol.EscrowRecord) bool { return r.UploadedBy == rec.UploadedBy }) {
 		return false, false, nil
 	}
@@ -230,6 +303,9 @@ func (m *Memory) PutEscrow(_ context.Context, rec protocol.EscrowRecord, maxCopi
 func (m *Memory) Escrow(_ context.Context, fingerprint string) ([]protocol.EscrowRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.escrowGone(fingerprint) {
+		return []protocol.EscrowRecord{}, nil
+	}
 	return slices.Clone(m.escrow[fingerprint]), nil
 }
 
@@ -238,6 +314,9 @@ func (m *Memory) EscrowUploaders(_ context.Context, fingerprints []string) (map[
 	defer m.mu.Unlock()
 	out := map[string][]string{}
 	for _, fp := range fingerprints {
+		if m.escrowGone(fp) {
+			continue
+		}
 		for _, r := range m.escrow[fp] {
 			if !slices.Contains(out[fp], r.UploadedBy) {
 				out[fp] = append(out[fp], r.UploadedBy)

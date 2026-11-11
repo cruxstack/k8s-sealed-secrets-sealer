@@ -241,6 +241,11 @@ func Parse(data []byte, baseDir string) (*Registry, error) {
 			}
 			seen[c] = true
 		}
+		for _, c := range a.Capabilities {
+			if need, ok := protocol.CapabilityNeeds[c]; ok && !seen[need] {
+				fail("%s: capability %q needs %q", where, c, need)
+			}
+		}
 		r.byID[a.ID] = a
 
 		if (a.Identity.K8s == nil) == (a.Identity.AWS == nil) {
