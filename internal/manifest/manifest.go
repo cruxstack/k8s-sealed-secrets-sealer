@@ -9,9 +9,9 @@
 // can never be chosen by a user.
 //
 // Optional hint annotations, under the env annotation's prefix, only help
-// people: what the secret is for (<prefix>/description), the keys it should
-// hold (<prefix>/keys) and where its docs are (<prefix>/docs). They never
-// change what is sealed or where.
+// people: a short name for the secret (<prefix>/title), what it is for
+// (<prefix>/description), the keys it should hold (<prefix>/keys) and where
+// its docs are (<prefix>/docs). They never change what is sealed or where.
 package manifest
 
 import (
@@ -41,6 +41,7 @@ const (
 	MaxDocuments     = 100
 	MaxKeysPerSecret = 200
 	// limits on hint annotations; longer values are cut or ignored
+	maxTitleRunes       = 80
 	maxDescriptionRunes = 300
 	maxDocsURLBytes     = 2048
 )
@@ -98,8 +99,10 @@ type Document struct {
 	// when they can.
 	Problem string `json:"problem,omitempty"`
 
-	// Hints from optional annotations, for people: what the secret is for,
-	// the keys it should hold, and an http(s) link to its docs.
+	// Hints from optional annotations, for people: a short name for the
+	// secret, what it is for, the keys it should hold, and an http(s) link
+	// to its docs.
+	Title        string   `json:"title,omitempty"`
 	Description  string   `json:"description,omitempty"`
 	ExpectedKeys []string `json:"expected_keys,omitempty"`
 	Docs         string   `json:"docs,omitempty"`
@@ -154,7 +157,8 @@ func find(content []byte, ann Annotations, env string, withValues bool) ([]Docum
 			Scope:     scope(annotations),
 			Keys:      mapKeys(mapValue(spec, "encryptedData")),
 
-			Description:  description(annotations[ann.Hint("description")]),
+			Title:        oneLine(annotations[ann.Hint("title")], maxTitleRunes),
+			Description:  oneLine(annotations[ann.Hint("description")], maxDescriptionRunes),
 			ExpectedKeys: expectedKeys(annotations[ann.Hint("keys")]),
 			Docs:         docsURL(annotations[ann.Hint("docs")]),
 		}
@@ -349,10 +353,10 @@ func isMappingOrEmpty(n *yaml.Node) bool {
 	return n == nil || n.Kind == yaml.MappingNode || (n.Kind == yaml.ScalarNode && n.Tag == "!!null")
 }
 
-// description returns a description hint on one line, without control or
-// formatting characters (a bidi override could make it read as something
-// else), cut to a readable length.
-func description(v string) string {
+// oneLine returns a text hint (a title or a description) on one line,
+// without control or formatting characters (a bidi override could make it
+// read as something else), cut to limit runes.
+func oneLine(v string, limit int) string {
 	v = strings.Join(strings.Fields(v), " ")
 	v = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
@@ -360,8 +364,8 @@ func description(v string) string {
 		}
 		return r
 	}, v)
-	if r := []rune(v); len(r) > maxDescriptionRunes {
-		v = strings.TrimSpace(string(r[:maxDescriptionRunes-1])) + "…"
+	if r := []rune(v); len(r) > limit {
+		v = strings.TrimSpace(string(r[:limit-1])) + "…"
 	}
 	return v
 }
