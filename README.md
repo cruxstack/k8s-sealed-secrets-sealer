@@ -14,7 +14,9 @@ request. They never pick a cluster, a region or a certificate.
 > some regions' documents only. Optional annotations tell them what a secret
 > is for, which keys it should hold and where its docs are. Admins see the fleet
 > (every agent, its controller's keys and the env's key state); everyone else
-> sees whether sealing works. Agents keep every cluster holding the same keys.
+> sees whether sealing works. Agents keep every cluster holding the same keys,
+> and can count how many values each key seals, so admins can delete the old
+> keys nothing uses.
 > One deployment can also serve several envs, such as dev and prod, on one
 > URL, with one sign-in and per-env teams.
 > Releases publish the control plane for Lambda, container images and Helm
@@ -63,7 +65,8 @@ controllers never talk to the control plane.
   every cluster in the environment holding the same keys.
 - **Security:** values travel to agents encrypted with a KMS key the control
   plane can only encrypt with. Sealing keys are escrowed under a KMS key the
-  control plane cannot use at all. Agents run with namespaced RBAC, and what
+  control plane cannot use at all. Agents run with namespaced RBAC (the
+  `cleanup` capability adds reading SealedSecrets cluster-wide), and what
   each agent may do is set in its Helm values, never by the control plane.
 
 Read [docs/design.md](docs/design.md) for the full design and security model.

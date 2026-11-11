@@ -60,7 +60,10 @@ The simulated clusters come from `dev/stack.yaml`: `dev-use1-blue`,
 cluster-scoped RBAC, so the clusters are as separate as they can be inside
 one Kubernetes API. Each agent's Role exists only in its own controller's
 namespace; the e2e suite checks that no agent can reach another cluster's
-controller.
+controller. Agents have the `cleanup` capability, whose ClusterRole lets
+each read every simulated cluster's SealedSecrets; each counts only those
+in the namespaces its controller watches, read from the controller's
+arguments, every 30 seconds.
 
 The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
@@ -226,7 +229,16 @@ the run for inspection. Besides bringing the stack up, it checks that:
   file differs from the original only in the dev documents' `encryptedData`
   lines, its description and commit message hold nothing secret, and with
   its dev documents applied, every simulated cluster's controller unseals
-  the value, and each its own region's `db-password`.
+  the value, and each its own region's `db-password`;
+- every cluster counts the values sealed with each key in the SealedSecrets
+  its controller watches (the env key seals 3 values in 2 SealedSecrets in
+  each); a key no value uses cannot be deleted while active, nor once
+  revoked until every cluster counted it since, and then alice deletes it;
+  every agent removes it from its cluster's key Secrets (fingerprints
+  computed from each certificate with `openssl` and `ssh-keygen`) and the
+  fleet shows it held by none; reinstated, it is restored to every cluster
+  from escrow and the env key is unchanged. These checks take about two to
+  three minutes, and wait at most about nine.
 
 ## Local agent identity
 
@@ -350,6 +362,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region               |
 | `APP_CAPABILITIES`                 | agent         | `seal` (`none` for none)           |
 | `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)                   |
+| `APP_KEY_USAGE_INTERVAL`           | agent         | `5m` (30s to 1h), with `cleanup`   |
 | `APP_CONTROLLER_NAMESPACE`         | agent         | required                           |
 | `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |
 | `APP_CONTROLLER_DEPLOYMENT`        | agent         | `APP_CONTROLLER_NAME`              |
@@ -389,6 +402,6 @@ accounts and regions.
 `APP_ADMIN_TOKEN` is shared by default: one token reads every env's fleet
 through the admin API ([docs/operations.md](operations.md#admin-api)). An
 env's `adminToken` in `APP_ENVS` gives that env a token of its own. The
-token revokes and reinstates keys only in an env that allows it:
+token revokes, reinstates and deletes keys only in an env that allows it:
 `APP_ADMIN_TOKEN_KEY_CHANGES=true` with one env, or the env's
 `adminTokenKeyChanges: true` in `APP_ENVS`.

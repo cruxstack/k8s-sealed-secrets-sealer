@@ -17,22 +17,26 @@ only that env.
 A token only reads the fleet, unless the env lets it change keys:
 `APP_ADMIN_TOKEN_KEY_CHANGES=true` with a single env (the chart's
 `adminTokenKeyChanges`), or `adminTokenKeyChanges: true` on the env in
-`APP_ENVS` (the chart's `envs`). Then it revokes and reinstates keys too;
-elsewhere those routes answer `403`. Give an env that allows it its own
-`adminToken`, so a token handed to monitoring cannot change its keys.
-Signed-in admins change keys from the fleet page either way. Nothing else
-in the admin API changes anything.
+`APP_ENVS` (the chart's `envs`). Then it revokes, reinstates and deletes
+keys too; elsewhere those routes answer `403`. Give an env that allows it
+its own `adminToken`, so a token handed to monitoring cannot change its
+keys. Signed-in admins change keys from the fleet page either way. Nothing
+else in the admin API changes anything.
 
 | Route                                                        | Answers                                     |
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /api/v1/envs/{env}/admin/fleet`                         | The env's fleet                             |
 | `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`    | Revokes a key (see "A compromised key"),    |
 |                                                              | where the env allows it                     |
-| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked key, where the env     |
-|                                                              | allows it                                   |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/reinstate` | Reinstates a revoked or deleted key, where  |
+|                                                              | the env allows it                           |
+| `POST /api/v1/envs/{env}/admin/keys/{fingerprint}/delete`    | Deletes a revoked key no value uses (see    |
+|                                                              | "Deleting old keys"), where the env allows  |
+|                                                              | it; `409` with the reason when it may not   |
 | `GET /api/v1/admin/fleet`,                                   | The same, when the control plane serves a   |
 | `POST /api/v1/admin/keys/{fingerprint}/revoke`,              | single env                                  |
-| `POST /api/v1/admin/keys/{fingerprint}/reinstate`            |                                             |
+| `POST /api/v1/admin/keys/{fingerprint}/reinstate`,           |                                             |
+| `POST /api/v1/admin/keys/{fingerprint}/delete`               |                                             |
 | `GET /healthz`, `GET /readyz`                                | `200` while the process runs; no token      |
 
 ```sh
@@ -78,7 +82,24 @@ The fleet, with one agent:
       "escrow_copies": 1,
       "env_key": true,
       "status": "active",
-      "future_dated": false
+      "purged": false,
+      "future_dated": false,
+      "references": {
+        "values": 12,
+        "sealed_secrets": 5,
+        "clusters": [
+          {
+            "agent": "prod-use1-blue",
+            "cluster": "prod-use1-blue",
+            "values": 12,
+            "sealed_secrets": 5,
+            "counted_at": "2026-11-10T11:58:00Z"
+          }
+        ],
+        "uncounted": []
+      },
+      "deletable": false,
+      "delete_blocked": "Revoke the key first."
     }
   ],
   "agents": [
@@ -86,14 +107,14 @@ The fleet, with one agent:
       "id": "prod-use1-blue",
       "cluster": "prod-use1-blue",
       "region": "use1",
-      "registered_capabilities": ["seal", "keys", "renewal"],
+      "registered_capabilities": ["seal", "keys", "renewal", "cleanup"],
       "checked_in": true,
       "healthy": true,
       "in_scope": true,
       "last_checkin": "2026-11-10T12:00:00Z",
       "agent_version": "0.6.0",
-      "capabilities": ["keys", "renewal", "seal"],
-      "commands": ["keys.restore.v1", "renewal.enable.v1", "seal.v1"],
+      "capabilities": ["cleanup", "keys", "renewal", "seal"],
+      "commands": ["keys.delete.v1", "keys.restore.v1", "renewal.enable.v1", "seal.v1"],
       "controller": {
         "namespace": "sealed-secrets",
         "name": "sealed-secrets-controller",
@@ -106,7 +127,14 @@ The fleet, with one agent:
       "keys_reported": 1,
       "keys_dropped": 0,
       "joining": false,
-      "joined_at": "2026-10-01T09:30:00Z"
+      "joined_at": "2026-10-01T09:30:00Z",
+      "key_usage": {
+        "counted_at": "2026-11-10T11:58:00Z",
+        "namespaces": null,
+        "sealed_secrets": 5,
+        "values": 12,
+        "unmatched": 0
+      }
     }
   ]
 }
@@ -122,9 +150,17 @@ The fleet, with one agent:
 | `key_limit`            | How many keys of a cluster are kept track of.              |
 | `keys`                 | The keys clusters report and the revoked keys, newest      |
 |                        | first: who holds each, its escrowed copies, whether it is  |
-|                        | the env key, its `status` (`active` or `revoked`, with     |
-|                        | `revoked_by` and `revoked_at`) and whether it is dated in  |
-|                        | the future.                                                |
+|                        | the env key, its `status` (`active`, `revoked` with        |
+|                        | `revoked_by` and `revoked_at`, or `deleted` with           |
+|                        | `deleted_by`, `deleted_at` and `purge_at` as well) and     |
+|                        | whether it is dated in the future. A deleted key is left   |
+|                        | out once no cluster holds it and it is `purged`.           |
+| `references`           | The values sealed with a key, summed over the clusters     |
+|                        | that counted within the hour, per cluster, and the agents  |
+|                        | that did not count (`uncounted`).                          |
+| `deletable`,           | Whether an admin may delete the key now: only a revoked    |
+| `delete_blocked`       | key no counted value uses. On every other key, why not, in |
+|                        | one sentence, the same a delete is refused with.           |
 | `healthy`              | The agent checked in recently.                             |
 | `in_scope`             | The cluster counts in key comparison: it has checked in,   |
 |                        | and its controller orders keys by `CertNotBefore`, or the  |
@@ -140,6 +176,10 @@ The fleet, with one agent:
 | `joining`, `joined_at` | The cluster joined the env, or was rebuilt, within 30      |
 |                        | minutes, and is left out of the env key while restore      |
 |                        | gives it the env's keys; and when it joined.               |
+| `key_usage`            | The agent's latest count of the values its controller's    |
+|                        | SealedSecrets hold: when it came in, the namespaces it     |
+|                        | covers (null for every one), how many values no key in the |
+|                        | cluster decrypts, or why it failed. Left out without one.  |
 | `issues`               | Why the agent needs attention, in words. Left out when     |
 |                        | there are none.                                            |
 
@@ -160,7 +200,8 @@ Alert, too, on these log events, at warn level or above:
 
 - control plane: `key.sync_failed`, `key.escrow_rejected`,
   `key.escrow_refused`, `key.future_dated`, `keys.near_limit`,
-  `keys.truncated`, `keys.out_of_sync`, `renewal.enable_failed`,
+  `keys.truncated`, `keys.out_of_sync`, `key.remove_refused`,
+  `key.unmatched_values`, `renewal.enable_failed`,
   `agent.login_rejected`, `agent.checkin_rejected`, `seal.invalid_result`,
   `repo.permission_mismatch`, `agent.login_throttled`,
   `registry.reload_failed`, `github.request_failed`;
@@ -169,12 +210,13 @@ Alert, too, on these log events, at warn level or above:
   `controller.active_key_unlabeled`, `controller.cert_expired`,
   `controller.restart_failed` (restored keys are not loaded yet),
   `controller.too_many_keys`, `command.panicked`, `command.report_failed`,
-  `key.sync_failed`.
+  `key.sync_failed`, `key.count_failed`.
 
 `key.discovered` marks every new sealing key. One is expected after each
-renewal (design section 9); any other deserves a look. The design lists
-the events that make up the audit trail, and how long to keep them
-(section 11).
+renewal (design section 9); any other deserves a look. `key.deleted` and
+`key.removed` mark keys leaving the env, which only admins start. The
+design lists the events that make up the audit trail, and how long to keep
+them (section 11).
 
 After `registry.reload_failed` the control plane keeps the registry in
 force, so an agent just removed from it keeps its access. The fleet doesn't
@@ -314,6 +356,15 @@ never need the control plane.
 | Revocations (key status and    | Lost: a revoked key counts as active again, can |
 | `KEYS`/`REVOKED#` items)       | become the env key and is restored into         |
 |                                | clusters. Revoke it again.                      |
+| Deletions (the same items, and | Lost: a key deleted since counts as revoked, or |
+| escrow copies' `expires_at`)   | active, again, and its escrowed copies no       |
+|                                | longer expire. Clusters that removed it are     |
+|                                | missing it if it is active: revoke it, and      |
+|                                | delete it again.                                |
+| Purges                         | Not undone: copies DynamoDB removed are not in  |
+|                                | a restore from after they expired. A key whose  |
+|                                | copies are gone cannot be restored, though the  |
+|                                | restored table may list it as active.           |
 | Commands, sessions, seals and  | Lost: seals in flight fail, and people seal     |
 | pending changes                | their pending changes again. All of it expires  |
 |                                | within hours anyway.                            |
@@ -332,18 +383,20 @@ only admins make, and only the table records.
 Point-in-time recovery, and an AWS Backup restore, create a new table; they
 cannot overwrite the old one. So a restore is a configuration change:
 
-1. List the env's revoked keys, to make the revocations again. From the
-   old table, if it can still be read:
+1. List the env's revoked and deleted keys, to make the revocations and
+   deletions again. From the old table, if it can still be read:
 
    ```sh
    aws dynamodb query --table-name sealer-prod \
      --key-condition-expression 'pk = :pk AND begins_with(sk, :r)' \
      --expression-attribute-values '{":pk":{"S":"KEYS"},":r":{"S":"REVOKED#"}}' \
-     --projection-expression 'fingerprint, revoked_by, revoked_at'
+     --projection-expression 'fingerprint, revoked_by, revoked_at, #s, deleted_at, purge_at' \
+     --expression-attribute-names '{"#s":"status"}'
    ```
 
-   Otherwise from the control plane's logs: every `key.revoked` and
-   `key.reinstated` event, the latest for each fingerprint.
+   Otherwise from the control plane's logs: every `key.revoked`,
+   `key.deleted` and `key.reinstated` event, the latest for each
+   fingerprint.
 2. Restore to a new table name (`sealer-prod-restored`), with the same
    customer-managed KMS key.
 3. On the new table, turn on TTL on `expires_at` and point-in-time
@@ -356,7 +409,10 @@ cannot overwrite the old one. So a restore is a configuration change:
    that was reinstated since. A key no agent has reported to the new table
    yet is not listed; it is after the agents' next check-in. Until then a
    revoked key can be the env key, but a pull request refuses values
-   sealed with it once it is revoked again.
+   sealed with it once it is revoked again. Delete again each key step 1
+   lists as deleted: once the clusters have counted, the fleet page offers
+   it. Its 30 days start again; one past its old `purge_at` can be purged
+   by hand instead, by deleting its `ESCROW` items.
 7. Watch the fleet: agents check in, upload the keys the table lacks, and
    restore the keys their clusters lack.
 
@@ -422,10 +478,33 @@ a key revoked by mistake the same way.
 
 An admin's grant is checked at sign-in and kept for the session, 8 hours by
 default (`APP_USER_SESSION_TTL`). Someone removed from the admin team, such
-as a suspected insider, can still revoke and reinstate keys until their
-session ends; shorten the session if that matters. Revocations are kept
+as a suspected insider, can still revoke, reinstate and delete keys until
+their session ends; shorten the session if that matters. Revocations are kept
 only in the env's table; restoring the table loses those made after the
 restore point (see "Restoring the table").
+
+### Deleting old keys
+
+Keys pile up over time, one per renewal, and every cluster holds every key.
+With the `cleanup` capability on every agent of an env (in its values and
+its registry entry), the fleet page shows how many values each key seals,
+by cluster. A key no value uses can go:
+
+1. Make sure no value you still need is sealed with it outside the
+   clusters: in a branch, an app not deployed yet, or an open pull request.
+   Clusters count only what their controllers watch.
+2. Revoke it. No new value is sealed with it from then on.
+3. Wait for every cluster to count again, a few minutes
+   (`keyUsageInterval`), and delete it. The fleet page says what it waits
+   for, and refuses while any value uses the key.
+4. Each agent removes it from its cluster and restarts its controller;
+   `key.removed` names each cluster, and the key's holders empty.
+
+For 30 days its escrowed copies are kept, and reinstating it brings it back
+to every cluster. Watch `key.unmatched_values`, and the clusters' issues,
+meanwhile: a value applied later that was sealed with the key shows there,
+as a value no key in the cluster decrypts. After 30 days the key cannot
+come back.
 
 ## Troubleshooting
 
@@ -455,6 +534,21 @@ Deployment could not be read. It refuses to restore keys, so the control
 plane sends it none, and its cluster cannot catch up on keys the others
 hold. Set the key order where the agent can read it: the controller's
 arguments, or a plain environment variable.
+
+**A key cannot be deleted.** The fleet page's reason (`delete_blocked`)
+says which: values still sealed with it, named by cluster; a cluster
+whose agent lacks `cleanup`, in its values or its registry entry; a count
+that failed, whose error is in the agent's issues and `key.count_failed`
+(often RBAC: its chart predates `cleanup`, or the SealedSecrets CRD is
+missing); or a count that predates the revocation or is over an hour old,
+which the next count fixes. An agent refuses a removal when a value is
+sealed with the key by its own count (`key.remove_refused`), and is asked
+again 10 minutes later.
+
+**An agent's issues say values "match none of its keys".** Its controller
+cannot decrypt those values: they were sealed with a key the cluster does
+not hold, such as a key deleted from it, or for another env or cluster. A
+deleted key within its 30 days can be reinstated.
 
 **"no agent is available to seal".** No agent is healthy, has `seal` and
 holds the env key. The fleet's `healthy` and `issues` say which part is
