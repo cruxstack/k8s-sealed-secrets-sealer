@@ -10,6 +10,7 @@ import {
   keyStatuses,
   missingKeys,
   pendingDocs,
+  resealedDocs,
   revokedDocs,
   type PendingDocs,
 } from "./keys";
@@ -339,5 +340,54 @@ describe("revoked keys", () => {
       revokedDocs(changes(f, { token: ["blue"] }, true), f.path).get("token")
         ?.size,
     ).toBe(1);
+  });
+});
+
+describe("resealed keys", () => {
+  it("marks a key whose pending value is the file's own, resealed", () => {
+    const f = file(
+      doc("use1-blue", ["token", "url"]),
+      doc("use2-blue", ["token"]),
+    );
+    const moved = changes(f, { token: ["use1-blue", "use2-blue"] }).map(
+      (c) => ({ ...c, kind: "reseal" as const }),
+    );
+    const sealed = changes(f, { url: ["use1-blue"] });
+    const all = [...moved, ...sealed];
+    const keys = keyStatuses(
+      f,
+      pendingDocs(all, f.path),
+      NO_PENDING,
+      resealedDocs(all, f.path),
+    );
+    expect(keys.find((k) => k.key === "token")).toMatchObject({
+      state: "replaced",
+      resealed: true,
+    });
+    // a newly sealed value is not a reseal
+    expect(keys.find((k) => k.key === "url")).toMatchObject({
+      pending: 1,
+      resealed: false,
+    });
+  });
+
+  it("is not a reseal once a seal takes over some of its documents", () => {
+    const f = file(doc("use1-blue", ["token"]), doc("use2-blue", ["token"]));
+    const moved = changes(f, { token: ["use1-blue"] }).map((c) => ({
+      ...c,
+      kind: "reseal" as const,
+    }));
+    const sealed = changes(f, { token: ["use2-blue"] }).map((c) => ({
+      ...c,
+      id: "sealed",
+    }));
+    const all = [...moved, ...sealed];
+    const [token] = keyStatuses(
+      f,
+      pendingDocs(all, f.path),
+      NO_PENDING,
+      resealedDocs(all, f.path),
+    );
+    expect(token).toMatchObject({ pending: 2, resealed: false });
   });
 });

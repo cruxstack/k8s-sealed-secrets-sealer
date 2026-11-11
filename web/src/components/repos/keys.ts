@@ -85,6 +85,20 @@ export function revokedDocs(
   );
 }
 
+/**
+ * The pending documents per key, for one file, whose value "Reseal all"
+ * moved onto the env key: the file's own value, not a new one.
+ */
+export function resealedDocs(
+  changes: readonly PendingChange[],
+  path: string,
+): PendingDocs {
+  return pendingDocs(
+    changes.filter((c) => c.kind === "reseal"),
+    path,
+  );
+}
+
 /** Whether a value for key waits in the session for the document. */
 export function isPending(
   pending: PendingDocs,
@@ -159,6 +173,11 @@ export interface KeyStatus {
   pending: number;
   /** How many of those were sealed with a key since revoked. */
   revoked: number;
+  /**
+   * Whether every value pending for it is the file's own, resealed onto
+   * the env key, rather than a new one.
+   */
+  resealed: boolean;
   /** How many documents need it: those whose hints don't leave it out. */
   needed: number;
   /** The documents that lack it, as `docId` names them. */
@@ -198,12 +217,14 @@ function regionState(states: DocKeyState[]): RegionKeyState {
 /**
  * Every key of a file worth showing: the keys its hints expect, in their
  * order, then the rest it holds or has pending, by name. `revoked` names
- * the pending documents sealed with a revoked key; they are also pending.
+ * the pending documents sealed with a revoked key, and `resealed` those
+ * whose value was resealed; both are also pending.
  */
 export function keyStatuses(
   file: RepositoryFile,
   pending: PendingDocs,
   revoked: PendingDocs = NO_PENDING,
+  resealed: PendingDocs = NO_PENDING,
 ): KeyStatus[] {
   const docs = file.documents ?? [];
   const { expected } = fileHints(file);
@@ -218,6 +239,7 @@ export function keyStatuses(
     const holders = docs.filter((d) => d.keys.includes(key)).length;
     const stale = count("revoked");
     const waiting = count("pending") + stale;
+    const moved = docs.filter((d) => isPending(resealed, key, d)).length;
     const lacking = docs
       .filter((_, i) => states[i] === "lacking")
       .map((d) => docId(d));
@@ -240,6 +262,7 @@ export function keyStatuses(
       holders,
       pending: waiting,
       revoked: stale,
+      resealed: waiting > 0 && moved === waiting,
       needed: states.filter((s) => s !== "unneeded").length,
       lacking,
       regions: regions.map((region) => {

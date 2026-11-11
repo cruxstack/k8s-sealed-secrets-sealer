@@ -49,6 +49,7 @@ export function keyDetail(k: KeyStatus, docs: number): string {
         return "Expected, not set yet";
       case "new":
       case "replaced": {
+        if (k.resealed) return "Resealed, in your pending changes";
         const what = k.state === "new" ? "New" : "New value";
         return pendingIn.length < needed.length
           ? `${what} pending for ${regionList(pendingIn)}`
@@ -74,7 +75,9 @@ export function keyDetail(k: KeyStatus, docs: number): string {
     case "new":
       return "New, in your pending changes";
     case "replaced":
-      return "New value in your pending changes";
+      return k.resealed
+        ? "Resealed, in your pending changes"
+        : "New value in your pending changes";
     case "revoked":
       return "Sealed with a revoked key; seal it again";
   }

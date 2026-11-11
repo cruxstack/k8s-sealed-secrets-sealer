@@ -31,7 +31,7 @@ import {
 import { RegionTag } from "@/components/ui/region-tag";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { CardHeading } from "@/components/ui/section-heading";
-import { safeHttpUrl } from "@/lib/utils";
+import { safeHttpUrl, shortFingerprint } from "@/lib/utils";
 import { regionList } from "./keys";
 
 function plural(n: number, one: string, many: string) {
@@ -50,6 +50,37 @@ function filesOf(changes: PendingChange[]): [string, PendingChange[]][] {
   return [...files];
 }
 
+/** Whether a change is the file's own value, resealed onto the env key. */
+function isReseal(c: PendingChange): boolean {
+  return c.kind === "reseal";
+}
+
+/** "from SHA256:AAAAaaaa…", "… and 1 more": the keys a reseal came off. */
+function FromKeys({ change }: { change: PendingChange }) {
+  const from = change.resealed_from ?? [];
+  if (from.length === 0) return <span>from an older key</span>;
+  return (
+    <span title={`Resealed from ${from.join(", ")}`}>
+      from <code className="font-mono">{shortFingerprint(from[0]!, 8)}</code>
+      {from.length > 1 && ` and ${from.length - 1} more`}
+    </span>
+  );
+}
+
+/** A resealed change's marker: the same value, on the env key now. */
+function ResealedBadge({ change }: { change: PendingChange }) {
+  const from = change.resealed_from ?? [];
+  return (
+    <Badge
+      variant="secondary"
+      className="shrink-0"
+      title={`The file's own value, resealed onto the env key from ${from.length > 0 ? from.join(", ") : "an older key"}. Resealing doesn't rotate it.`}
+    >
+      Resealed
+    </Badge>
+  );
+}
+
 /** A change's key in monospace, then its regions as tags. */
 function KeyChip({ change }: { change: PendingChange }) {
   return (
@@ -60,8 +91,20 @@ function KeyChip({ change }: { change: PendingChange }) {
       {change.regions?.map((r) => (
         <RegionTag key={r} region={r} />
       ))}
+      {isReseal(change) && <ResealedBadge change={change} />}
     </span>
   );
+}
+
+/** "2 sealed values and 3 resealed values": what a pull request writes. */
+function valuesText(changes: PendingChange[]): string {
+  const resealed = changes.filter(isReseal).length;
+  const sealed = changes.length - resealed;
+  if (resealed === 0) return plural(sealed, "sealed value", "sealed values");
+  const moved = plural(resealed, "resealed value", "resealed values");
+  return sealed === 0
+    ? moved
+    : `${plural(sealed, "sealed value", "sealed values")} and ${moved}`;
 }
 
 function ChangeItem({
@@ -94,6 +137,7 @@ function ChangeItem({
               title={`Sealed for ${r} only`}
             />
           ))}
+          {isReseal(change) && <ResealedBadge change={change} />}
           {change.key_revoked && (
             <Badge
               variant="warning"
@@ -118,11 +162,16 @@ function ChangeItem({
             {change.regions?.length ? ` in ${regionList(change.regions)}` : ""}
           </span>{" "}
           ·{" "}
+          {isReseal(change) && (
+            <>
+              <FromKeys change={change} /> ·{" "}
+            </>
+          )}
           <RelativeTime
             iso={change.sealed_at}
             past
             describe={(at) =>
-              `Sealed by ${agent} with ${change.fingerprint}, ${at}`
+              `${isReseal(change) ? "Resealed" : "Sealed"} by ${agent} with ${change.fingerprint}, ${at}`
             }
           />
         </p>
@@ -349,8 +398,8 @@ function SessionChanges({
               One commit on a new branch from{" "}
               <code className="font-mono">{session.branch}</code> at{" "}
               <code className="font-mono">{session.commit.slice(0, 7)}</code>{" "}
-              writes {plural(changes.length, "sealed value", "sealed values")}{" "}
-              into {plural(files.length, "file", "files")}, changing only{" "}
+              writes {valuesText(changes)} into{" "}
+              {plural(files.length, "file", "files")}, changing only{" "}
               <code className="font-mono">spec.encryptedData</code>. The GitHub
               App opens the pull request into{" "}
               <code className="font-mono">{session.branch}</code> and names you

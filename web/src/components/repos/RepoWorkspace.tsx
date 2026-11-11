@@ -18,6 +18,7 @@ import { FileList, fileStatus } from "./FileList";
 import { FilePanel } from "./FilePanel";
 import { OpenedDialog, PendingChanges } from "./PendingChanges";
 import { AccessBadge } from "./RepoList";
+import { useFileReseal } from "./ResealFile";
 
 /** The file to show when none is chosen: the first one values fit in. */
 function defaultFile(files: RepositoryFile[]): RepositoryFile | undefined {
@@ -168,8 +169,11 @@ export function RepoWorkspace({
   selected: string | undefined;
   onSelect: (path: string) => void;
 }) {
-  const env = useEnv()?.name ?? "";
+  const envAccess = useEnv();
+  const env = envAccess?.name ?? "";
   const { data: status } = useQuery(statusQueryOptions);
+  // "Reseal all" runs a file at a time, whichever file is shown
+  const resealer = useFileReseal(owner, repo);
   const sessionQuery = useQuery(sessionQueryOptions(owner, repo));
   const session = sessionQuery.data ?? null;
   const { data, error, isPending } = useQuery({
@@ -347,6 +351,8 @@ export function RepoWorkspace({
                     onBusyChange={setSealBusy}
                     focusForm={picked}
                     round={round}
+                    sealingStatus={status}
+                    resealer={envAccess?.admin ? resealer : undefined}
                   />
                 )}
               </div>
