@@ -110,6 +110,11 @@ keyRenewPeriod: 720h
 # requests (each about every 15 ticks). From 1s to 10m.
 tickInterval: 1m
 
+# How long key sync holds off work a key command just did (restoring keys,
+# removing deleted ones, turning renewal on) until the agent's inventory
+# shows it, from 10s to 10m. Keep it above the agents' check-in interval.
+keyCommandSettle: 2m
+
 # The KMS transit key values are encrypted under on their way to an agent.
 # The control plane's IAM role needs only kms:GenerateDataKey on it: it can
 # never decrypt. Each agent's role may decrypt only with its own agent_id in

@@ -11,9 +11,13 @@ export SEALER_GITHUB_PORT="${SEALER_GITHUB_PORT:-4204}"
 source .atmos/scripts/lib/dev.sh
 
 port_forward_pids=()
+cluster_pid=""
 cleanup() {
   local status=$?
   for pid in "${port_forward_pids[@]}"; do kill "$pid" 2>/dev/null; done
+  # a build that failed while the cluster was still coming up: let it
+  # finish, so it can be deleted
+  [[ -n "$cluster_pid" ]] && wait "$cluster_pid" 2>/dev/null
   [[ -n "${work:-}" ]] && rm -rf "$work"
   if [[ $status -ne 0 ]]; then
     echo "--- e2e failed; recent pod state ---" >&2
@@ -69,10 +73,19 @@ login_status() {
 
 work="$(mktemp -d)"
 
-ensure_cluster
+# the cluster comes up while the charts, the UI and the binaries are made
+ensure_cluster >"${work}/cluster.log" 2>&1 &
+cluster_pid=$!
 pull_charts
 build_web
 build_binaries
+if ! wait "$cluster_pid"; then
+  cluster_pid=""
+  /bin/cat "${work}/cluster.log" >&2
+  die "could not create the cluster ${SEALER_CLUSTER}"
+fi
+cluster_pid=""
+/bin/cat "${work}/cluster.log" >&2
 echo "+ tilt ci --context ${KUBE_CONTEXT} --port ${SEALER_TILT_PORT}" >&2
 tilt ci --context "$KUBE_CONTEXT" --port "$SEALER_TILT_PORT" --timeout "${E2E_TIMEOUT:-10m}"
 
@@ -216,11 +229,11 @@ check "sign-out requires the csrf token and ends the session"
 # --- fleet: every agent checks in with its controller's full key set ---
 fleet=""
 expected="$(stack_clusters | wc -l | tr -d ' ')"
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   fleet="$(api GET /api/v1/envs/dev/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
   healthy="$(jq '[.agents[] | select(.healthy)] | length' <<<"$fleet" 2>/dev/null || echo 0)"
   [[ "$healthy" == "$expected" ]] && break
-  sleep 2
+  sleep 1
 done
 [[ "$healthy" == "$expected" ]] || die "only ${healthy}/${expected} agents are healthy: ${fleet}"
 check "all ${expected} agents check in and are healthy"
@@ -239,10 +252,10 @@ synced() {
     and ([.agents[] | select(.controller.key_renew_period != "0s")] | length) == 1
   ' <<<"$1" >/dev/null 2>&1
 }
-for _ in $(seq 1 120); do
+for _ in $(seq 1 240); do
   fleet="$(api GET /api/v1/envs/dev/admin/fleet "$LOCAL_ADMIN_TOKEN" | cut -d' ' -f2-)"
   synced "$fleet" && break
-  sleep 2
+  sleep 1
 done
 synced "$fleet" || die "keys did not converge: $(jq -c '{keys_in_sync, env_key: .env_key.fingerprint, agents: [.agents[] | {id, healthy, keys: [.keys[].fingerprint], missing_keys, active: .controller.active_fingerprint, renew: .controller.key_renew_period}]}' <<<"$fleet")"
 env_key="$(jq -r .env_key.fingerprint <<<"$fleet")"
@@ -311,11 +324,11 @@ while read -r name; do
     | kubeseal --cert "${work}/env-key.pem" --scope strict --format yaml \
     | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
   got=""
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     got="$(kubectl --context "$KUBE_CONTEXT" -n "$apps_ns" get secret e2e-roundtrip \
       -o jsonpath='{.data.value}' 2>/dev/null | base64 -d 2>/dev/null || true)"
     [[ -n "$got" ]] && break
-    sleep 2
+    sleep 1
   done
   [[ "$got" == "$value" ]] || die "controller ${name} did not unseal into ${apps_ns}"
   check "controller ${name} unseals a value sealed with the env key into ${apps_ns}"
@@ -458,11 +471,11 @@ kubectl --context "$KUBE_CONTEXT" create --dry-run=client -o json -f "${work}/af
   | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
 for name in $(stack_clusters); do
   got=""
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     got="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" get secret billing \
       -o jsonpath='{.data.api-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
     [[ -n "$got" ]] && break
-    sleep 2
+    sleep 1
   done
   [[ "$got" == "$value" ]] || die "controller ${name} did not unseal the pull request's billing secret"
   case "$name" in
@@ -501,10 +514,10 @@ counted() {
       and ([.clusters[] | select(.values == 3 and .sealed_secrets == 2)] | length) == $n)
   ' <<<"$1" >/dev/null 2>&1
 }
-for _ in $(seq 1 45); do
+for _ in $(seq 1 90); do
   fleet="$(fleet_now)"
   counted "$fleet" && break
-  sleep 2
+  sleep 1
 done
 counted "$fleet" || die "the clusters did not count the env key's values: $(jq -c --arg fp "$env_key" '{usage: [.agents[] | {id, key_usage}], references: (.keys[] | select(.fingerprint == $fp) | .references)}' <<<"$fleet")"
 check "every cluster counts its SealedSecrets: the env key seals 3 values in 2 SealedSecrets in each"
@@ -557,12 +570,12 @@ out="$(as_alice POST "${key_path}/delete")"
 [[ "${out%% *}" == 409 && "$(jq -r .error <<<"${out#* }")" == "Waiting for "* ]] || die "delete right after revoking: ${out}"
 check "a revoked key cannot be deleted until every cluster counted it since"
 
-# each agent counts every 30 seconds and checks in every 5
+# each agent counts and checks in every 5 seconds
 started=$SECONDS
-for _ in $(seq 1 40); do
+for _ in $(seq 1 120); do
   out="$(as_alice POST "${key_path}/delete")"
   [[ "${out%% *}" == 409 ]] || break
-  sleep 3
+  sleep 1
 done
 [[ "${out%% *}" == 200 ]] || die "delete after the clusters counted: ${out}"
 jq -e '.status == "deleted" and .status_by == "alice" and (.purge_at | type) == "string"' <<<"${out#* }" >/dev/null \
@@ -571,14 +584,14 @@ check "once every cluster counted it since the revocation, alice deletes it ($((
 
 started=$SECONDS
 removed=""
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   fleet="$(fleet_now)"
   if jq -e --arg fp "$unused" '.keys[] | select(.fingerprint == $fp) | .status == "deleted" and (.holders | length) == 0' \
     <<<"$fleet" >/dev/null 2>&1 && key_in_every_cluster "$unused" no; then
     removed=yes
     break
   fi
-  sleep 2
+  sleep 1
 done
 [[ -n "$removed" ]] || die "the deleted key was not removed from every cluster: $(jq -c --arg fp "$unused" '.keys[] | select(.fingerprint == $fp)' <<<"$fleet")"
 [[ "$(log_events sealer-system sealer-control-plane key.removed | wc -l | tr -d ' ')" == "$expected" ]] \
@@ -588,10 +601,10 @@ check "every agent removes the deleted key from its cluster's key Secrets, and t
 out="$(as_alice POST "${key_path}/reinstate")"
 [[ "${out%% *}" == 200 && "$(jq -r .status <<<"${out#* }")" == active ]] || die "reinstate: ${out}"
 started=$SECONDS
-for _ in $(seq 1 90); do
+for _ in $(seq 1 180); do
   fleet="$(fleet_now)"
   synced "$fleet" && key_in_every_cluster "$unused" yes && break
-  sleep 2
+  sleep 1
 done
 synced "$fleet" && key_in_every_cluster "$unused" yes \
   || die "the reinstated key did not come back to every cluster: $(jq -c --arg fp "$unused" '.keys[] | select(.fingerprint == $fp)' <<<"$fleet")"
@@ -602,8 +615,8 @@ check "reinstated, the key is restored to every cluster from escrow, and the env
 # without being decrypted. alice reseals a file in a session; a schedule
 # reseals the repository and opens one pull request; a second run skips the
 # repository while that pull request is open; closed in GitHub, the tick
-# sees it so. The control plane ticks every 5 seconds here, and checks an
-# open reseal pull request about every 75. ---
+# sees it so. The control plane ticks every second here, and checks an open
+# reseal pull request about every 15. ---
 mock="http://localhost:${SEALER_GITHUB_PORT}"
 fleet="$(fleet_now)"
 # an older key every cluster holds: one of the keys the clusters made
@@ -705,11 +718,11 @@ kubectl --context "$KUBE_CONTEXT" create --dry-run=client -o json -f "${work}/re
   | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
 for name in $(stack_clusters); do
   got=""
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     got="$(kubectl --context "$KUBE_CONTEXT" -n "${name}-apps" get secret reseal \
       -o jsonpath='{.data.old-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
     [[ -n "$got" ]] && break
-    sleep 2
+    sleep 1
   done
   [[ "$got" == "${old_prefix}-${name}" ]] || die "controller ${name} did not unseal the resealed old-token"
 done
@@ -723,10 +736,10 @@ moved() {
     and ([.keys[] | select(.fingerprint == $old) | .references.values][0] // 0) == $old_before
   ' <<<"$1" >/dev/null 2>&1
 }
-for _ in $(seq 1 45); do
+for _ in $(seq 1 90); do
   fleet="$(fleet_now)"
   moved "$fleet" && break
-  sleep 2
+  sleep 1
 done
 moved "$fleet" || die "the clusters do not count the resealed value under the env key: $(jq -c --arg env "$env_key" --arg old "$old_key" '[.keys[] | select(.fingerprint == $env or .fingerprint == $old) | {fingerprint, references}]' <<<"$fleet")"
 check "applied, every controller unseals the resealed value, and counts it under the env key, none under ${old_key} ($((SECONDS - started))s)"
@@ -744,11 +757,11 @@ run_now() {
   out="$(as_alice POST "/api/v1/envs/dev/reseal/schedules/${schedule}/run")"
   [[ "${out%% *}" == 202 ]] || { echo "run now: ${out}" >&2; return 1; }
   run="$(jq -r .id <<<"${out#* }")"
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 180); do
     out="$(as_alice GET "/api/v1/envs/dev/reseal/runs/${run}")"
     status="$(jq -r .status <<<"${out#* }")"
     [[ "$status" == queued || "$status" == running ]] || break
-    sleep 2
+    sleep 1
   done
   printf '%s' "${out#* }"
 }
@@ -782,13 +795,13 @@ check "a second run skips example-org/apps while its reseal pull request is open
 curl -sSf -o /dev/null -X POST "${mock}/_mock/repos/example-org/apps/pulls/${run_pr}/close" || die "could not close #${run_pr} in the mock"
 started=$SECONDS
 closed=""
-for _ in $(seq 1 75); do
+for _ in $(seq 1 150); do
   prs="$(as_alice GET '/api/v1/envs/dev/reseal/pull-requests?state=closed' | cut -d' ' -f2-)"
   if jq -e --argjson pr "$run_pr" '[.pull_requests[] | select(.number == $pr and .state == "closed")] | length == 1' <<<"$prs" >/dev/null 2>&1; then
     closed=yes
     break
   fi
-  sleep 2
+  sleep 1
 done
 [[ -n "$closed" ]] || die "the tick did not see #${run_pr} closed: ${prs}"
 check "closed in GitHub, the tick marks the reseal pull request closed ($((SECONDS - started))s)"

@@ -63,8 +63,10 @@ namespace; the e2e suite checks that no agent can reach another cluster's
 controller. Agents have the `cleanup` capability, whose ClusterRole lets
 each read every simulated cluster's SealedSecrets; each counts only those
 in the namespaces its controller watches, read from the controller's
-arguments, every 30 seconds. They have `reseal` too, and the control plane
-ticks every 5 seconds, so reseal runs move on quickly.
+arguments, every 5 seconds. They have `reseal` too, and the control plane
+ticks every second, so reseal runs move on quickly. Key sync holds off a key
+command's work for 15 seconds after it succeeds, not 2 minutes, so a key can
+be restored again soon after the clusters' keys first converge.
 
 The AWS services are local stand-ins: DynamoDB Local and
 [local-kms](https://github.com/nsmithuk/local-kms), seeded with a `transit`
@@ -323,6 +325,11 @@ CI builds the release files on every pull request, so packaging problems show
 up before a merge. The Lambda zips are reproducible: the same commit and
 version give the same bytes.
 
+Each CI job restores its own caches (Atmos's tools, Node, and the Go, lint
+and npm caches) from the latest run on `main`
+(`.github/actions/setup`). Only runs on `main` save them, so a pull request
+reads `main`'s caches and writes none. The release job uses no cache.
+
 ## Configuration
 
 The binaries read `APP_` environment variables, all in `internal/config`.
@@ -371,6 +378,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_DISCOVERY_FILE_GLOBS`         | control plane | `*sealed*.yaml,*sealed*.yml`       |
 | `APP_KEY_RENEW_PERIOD`             | control plane | `720h`                             |
 | `APP_TICK_INTERVAL`                | control plane | `1m` (1s to 10m)                   |
+| `APP_KEY_COMMAND_SETTLE`           | control plane | `2m` (10s to 10m)                  |
 | `APP_KMS_TRANSIT_KEY_ID`           | both          | required (agent: with `seal`)      |
 | `APP_KMS_ESCROW_KEY_ID`            | agent         | required with `keys`               |
 | `APP_KMS_REGION`                   | both          | a key ARN's region, else the SDK's |
@@ -383,7 +391,7 @@ restart; a registry written inline in `APP_REGISTRY` needs one.
 | `APP_AWS_STS_REGION`               | agent         | the AWS SDK's region               |
 | `APP_CAPABILITIES`                 | agent         | `seal` (`none` for none)           |
 | `APP_CHECKIN_INTERVAL`             | agent         | `15s` (5s to 5m)                   |
-| `APP_KEY_USAGE_INTERVAL`           | agent         | `5m` (30s to 30m), with `cleanup`  |
+| `APP_KEY_USAGE_INTERVAL`           | agent         | `5m` (5s to 30m), with `cleanup`   |
 | `APP_MEMORY_LIMIT`                 | agent         | none; the chart's memory limit     |
 | `APP_CONTROLLER_NAMESPACE`         | agent         | required                           |
 | `APP_CONTROLLER_NAME`              | agent         | `sealed-secrets-controller`        |

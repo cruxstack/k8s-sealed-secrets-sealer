@@ -42,7 +42,7 @@ spec:
           readinessProbe:
             tcpSocket:
               port: http
-            periodSeconds: 5
+            periodSeconds: 2
           volumeMounts:
             - name: seed
               mountPath: /init
@@ -111,7 +111,7 @@ spec:
           readinessProbe:
             tcpSocket:
               port: http
-            periodSeconds: 5
+            periodSeconds: 2
           resources:
             requests:
               cpu: 20m

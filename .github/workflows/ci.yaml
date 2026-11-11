@@ -20,6 +20,11 @@ env:
 # installs the pinned toolchain (Go, linters, k3d, Tilt, Helm) itself and
 # checks each download's build provenance with `gh attestation verify`, which
 # needs a token (the job's read-only GITHUB_TOKEN is enough).
+#
+# The setup action restores each job's tools and Go, lint and npm caches from
+# the latest run on main, and only runs on main save them again: a pull
+# request reads main's caches and writes none, so it cannot change what
+# another run builds with.
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -28,12 +33,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup Atmos
-        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup
         with:
           atmos-version: ${{ env.ATMOS_VERSION }}
-          install-wrapper: false
-          checksum-validation: enforce
+          cache: check
       - name: Static Checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,6 +51,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos release artifacts --version 0.0.0
+      - name: Save Caches
+        if: github.event_name != 'pull_request' && steps.setup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.setup.outputs.cache-paths }}
+          key: ${{ steps.setup.outputs.cache-key }}
 
   test:
     runs-on: ubuntu-latest
@@ -54,12 +65,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup Atmos
-        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup
         with:
           atmos-version: ${{ env.ATMOS_VERSION }}
-          install-wrapper: false
-          checksum-validation: enforce
+          cache: test
       - name: Unit Tests
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,6 +83,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos web test
+      - name: Save Caches
+        if: github.event_name != 'pull_request' && steps.setup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.setup.outputs.cache-paths }}
+          key: ${{ steps.setup.outputs.cache-key }}
 
   e2e:
     runs-on: ubuntu-latest
@@ -81,16 +98,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup Atmos
-        uses: cloudposse/github-action-setup-atmos@ad511faf93143d80f9f73ebdbc00dbdcea6d6bb0 # v3.7.0
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup
         with:
           atmos-version: ${{ env.ATMOS_VERSION }}
-          install-wrapper: false
-          checksum-validation: enforce
+          cache: e2e
       - name: End-to-End Tests (k3d)
         env:
           GH_TOKEN: ${{ github.token }}
         run: atmos test e2e
+      - name: Save Caches
+        if: github.event_name != 'pull_request' && steps.setup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.setup.outputs.cache-paths }}
+          key: ${{ steps.setup.outputs.cache-key }}
 
   image:
     runs-on: ubuntu-latest
@@ -104,5 +127,8 @@ jobs:
           persist-credentials: false
       - name: Setup Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # the runner is thrown away after the job
+          cleanup: false
       - name: Build Container Image
         run: docker buildx build --platform linux/amd64,linux/arm64 --target "${{ matrix.target }}" --build-arg VERSION=ci .

@@ -690,7 +690,7 @@ agents:
 		},
 	}
 	self, _ := reg.Agent("a")
-	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
+	plan := planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now, DefaultKeyCommandSettle)
 	// a adds its copy where it has none and the key has room; not of
 	// revoked or future-dated keys
 	if !slices.Equal(plan.EscrowNeeded, []string{theirs.Fingerprint}) {
@@ -713,7 +713,7 @@ agents:
 		many = append(many, ref(fmt.Sprintf("SHA256:first-%02d", i), time.Hour))
 	}
 	states["a"] = st("a", many...)
-	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now)
+	plan = planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["a"], nil, false, nil, keys, now, DefaultKeyCommandSettle)
 	if len(plan.EscrowNeeded) != maxCopiesPerCheckIn+5 || !slices.Contains(plan.EscrowNeeded, "SHA256:first-04") {
 		t.Errorf("escrow needed = %d keys %v, want %d copies and the 5 first copies", len(plan.EscrowNeeded), plan.EscrowNeeded, maxCopiesPerCheckIn)
 	}
@@ -754,9 +754,13 @@ agents:
 	fresh := store.KeyRef{Fingerprint: "SHA256:fresh", NotBefore: now, NotAfter: now.AddDate(1, 0, 0)}
 	states := map[string]store.AgentState{"a": st("a", held...), "b": st("b", fresh)}
 	self, _ := reg.Agent("b")
+	planSettling := func(settle time.Duration, commands ...store.CommandRecord) []string {
+		t.Helper()
+		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], nil, false, commands, keys, now, settle).Restore
+	}
 	plan := func(commands ...store.CommandRecord) []string {
 		t.Helper()
-		return planKeySync(fleet.Compute("dev", reg, states, keys, now), self, states["b"], nil, false, commands, keys, now).Restore
+		return planSettling(DefaultKeyCommandSettle, commands...)
 	}
 
 	first := plan()
@@ -777,8 +781,12 @@ agents:
 	if got := plan(cmd); len(got) != 0 {
 		t.Fatalf("restore while one settles = %d keys", len(got))
 	}
+	// a shorter KeyCommandSettle lets the next go out sooner
+	if got := planSettling(30*time.Second, cmd); len(got) == 0 {
+		t.Fatal("no restore once the last settled, with a 30s settle")
+	}
 	// once it has settled, the next goes out
-	finished = now.Add(-settleAfterSuccess - time.Second)
+	finished = now.Add(-DefaultKeyCommandSettle - time.Second)
 	if got := plan(cmd); len(got) == 0 {
 		t.Fatal("no restore once the last settled")
 	}

@@ -258,7 +258,7 @@ func TestKeySync_EscrowRestoreAndRenewal(t *testing.T) {
 		t.Fatalf("restore re-queued before it settled: %+v", cmds)
 	}
 	// once settled, a key still missing is restored again
-	sh.advance(settleAfterSuccess + time.Second)
+	sh.advance(DefaultKeyCommandSettle + time.Second)
 	sh.checkIn("a", "720h0m0s", ka, kb)
 	sh.checkIn("b", "0s", kb)
 	if cmds := sh.poll("b"); len(cmds) != 1 || cmds[0].Type != protocol.CommandKeysRestore {
@@ -499,7 +499,7 @@ agents:
 	}
 	plan := func(self string, states map[string]store.AgentState, cmds []store.CommandRecord) bool {
 		a, _ := reg.Agent(self)
-		return planKeySync(fleet.Compute("dev", reg, states, fleet.Keys{}, now), a, states[self], nil, false, cmds, fleet.Keys{}, now).EnableRenewal
+		return planKeySync(fleet.Compute("dev", reg, states, fleet.Keys{}, now), a, states[self], nil, false, cmds, fleet.Keys{}, now, DefaultKeyCommandSettle).EnableRenewal
 	}
 
 	off := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "0s", 0)}
@@ -510,7 +510,7 @@ agents:
 	// checks in before their states are stored, and each could see itself
 	// as the lowest
 	a, _ := reg.Agent("a")
-	if planKeySync(fleet.Compute("dev", reg, off, fleet.Keys{}, now), a, off["a"], nil, true, nil, fleet.Keys{}, now).EnableRenewal {
+	if planKeySync(fleet.Compute("dev", reg, off, fleet.Keys{}, now), a, off["a"], nil, true, nil, fleet.Keys{}, now, DefaultKeyCommandSettle).EnableRenewal {
 		t.Error("renewal was asked on a's first check-in")
 	}
 	on := map[string]store.AgentState{"a": st("a", "0s", 0), "b": st("b", "720h0m0s", 0)}
@@ -537,5 +537,19 @@ agents:
 	failed[0].FinishedAt = &longAgo
 	if !plan("a", off, failed) {
 		t.Error("renewal not retried after the hold")
+	}
+}
+
+// TestNew_KeyCommandSettle covers the settle a server holds key work off for:
+// the default when unset, and never more than key sync reads back.
+func TestNew_KeyCommandSettle(t *testing.T) {
+	for _, tc := range []struct{ in, want time.Duration }{
+		{0, DefaultKeyCommandSettle},
+		{15 * time.Second, 15 * time.Second},
+		{time.Hour, MaxKeyCommandSettle},
+	} {
+		if got := New(Options{KeyCommandSettle: tc.in}).keyCommandSettle; got != tc.want {
+			t.Errorf("KeyCommandSettle %s: settle = %s, want %s", tc.in, got, tc.want)
+		}
 	}
 }

@@ -52,8 +52,12 @@ aws:
   region: us-east-1
 
 # faster than the 1m default, so reseal runs move on quickly here; each open
-# reseal pull request is checked about every 15 ticks (75s)
-tickInterval: 5s
+# reseal pull request is checked about every 15 ticks (15s)
+tickInterval: 1s
+
+# shorter than the 2m default, so a key restored or removed here can be
+# restored or removed again soon: three of the agents' 5s check-ins
+keyCommandSettle: 15s
 
 log:
   level: debug

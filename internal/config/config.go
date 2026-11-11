@@ -136,6 +136,10 @@ type ControlPlane struct {
 	// container's ticker, or on Lambda, the schedule that invokes it. It is
 	// shared by every env.
 	TickInterval time.Duration
+	// KeyCommandSettle is how long key sync holds off work a key command
+	// just did (a restore, a removal, turning renewal on), until the
+	// agent's inventory shows it.
+	KeyCommandSettle time.Duration
 
 	// KMSTransitKeyID is the KMS key (ID, ARN or alias) values are encrypted
 	// under on their way to an agent. The control plane only generates data
@@ -290,6 +294,9 @@ func loadControlPlane(lookup lookupFunc) (*ControlPlane, error) {
 	}
 	cfg.KeyRenewPeriod = r.duration("APP_KEY_RENEW_PERIOD", 720*time.Hour, time.Hour, 365*24*time.Hour)
 	cfg.TickInterval = r.duration("APP_TICK_INTERVAL", time.Minute, time.Second, 10*time.Minute)
+	// at least two check-ins at the fastest interval, and no more than key
+	// sync reads back (controlplane.MaxKeyCommandSettle)
+	cfg.KeyCommandSettle = r.duration("APP_KEY_COMMAND_SETTLE", 2*time.Minute, 10*time.Second, 10*time.Minute)
 	cfg.KMSTransitKeyID = r.required(r.str("APP_KMS_TRANSIT_KEY_ID", ""), "APP_KMS_TRANSIT_KEY_ID")
 	cfg.KMSRegion = r.str("APP_KMS_REGION", "")
 	// local emulators only; the endpoint carries no credentials
@@ -321,8 +328,10 @@ func loadAgent(lookup lookupFunc) (*Agent, error) {
 		AllowInsecureControlPlane: r.boolean("APP_ALLOW_INSECURE_CONTROL_PLANE", false),
 		TokenFile:                 r.str("APP_IDENTITY_TOKEN_FILE", DefaultTokenFile),
 		CheckInInterval:           r.duration("APP_CHECKIN_INTERVAL", 15*time.Second, protocol.MinCheckInInterval, protocol.MaxCheckInInterval),
-		// under the hour a count is used for, with room for a late one
-		KeyUsageInterval: r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, 30*time.Second, 30*time.Minute),
+		// under the hour a count is used for, with room for a late one; a
+		// count rereads only what changed, so the fastest check-in interval
+		// is not too often
+		KeyUsageInterval: r.duration("APP_KEY_USAGE_INTERVAL", 5*time.Minute, protocol.MinCheckInInterval, 30*time.Minute),
 		MemoryLimit:      r.integer("APP_MEMORY_LIMIT", 0),
 	}
 	cfg.ControllerDeployment = r.dnsSubdomain("APP_CONTROLLER_DEPLOYMENT", cfg.ControllerName)

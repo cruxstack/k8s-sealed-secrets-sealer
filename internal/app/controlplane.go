@@ -233,8 +233,9 @@ func newEnv(ctx context.Context, awsCfg aws.Config, cfg *config.ControlPlane, us
 		TransitKeyID: cfg.KMSTransitKeyID,
 		HSTS:         strings.HasPrefix(cfg.PublicURL, "https://"),
 
-		KeyRenewPeriod: cfg.KeyRenewPeriod,
-		TickInterval:   cfg.TickInterval,
+		KeyRenewPeriod:   cfg.KeyRenewPeriod,
+		TickInterval:     cfg.TickInterval,
+		KeyCommandSettle: cfg.KeyCommandSettle,
 
 		AdminTokenKeyChanges: cfg.AdminTokenKeyChanges,
 	}), nil

@@ -21,9 +21,6 @@ import (
 const (
 	// keyCommandTTL is how long a key command waits to be leased and run.
 	keyCommandTTL = 10 * time.Minute
-	// settleAfterSuccess holds off re-issuing work a command just did,
-	// until the agent's next inventory shows it.
-	settleAfterSuccess = 2 * time.Minute
 	// retryAfterFailure holds off re-issuing work a command failed to do.
 	retryAfterFailure = 5 * time.Minute
 	// removeRetryAfterFailure holds off removing deleted keys again after
@@ -32,9 +29,9 @@ const (
 	removeRetryAfterFailure = 10 * time.Minute
 	// keyCommandLookback is how far back key sync reads an agent's
 	// commands: a key command finishes within keyCommandTTL and holds off
-	// its work for up to removeRetryAfterFailure after, and a minute covers
-	// clocks that differ between instances.
-	keyCommandLookback = keyCommandTTL + max(settleAfterSuccess, retryAfterFailure, removeRetryAfterFailure) + time.Minute
+	// its work for up to removeRetryAfterFailure (or MaxKeyCommandSettle)
+	// after, and a minute covers clocks that differ between instances.
+	keyCommandLookback = keyCommandTTL + max(MaxKeyCommandSettle, retryAfterFailure, removeRetryAfterFailure) + time.Minute
 	// maxCopiesPerCheckIn bounds the further copies of already escrowed
 	// keys one check-in asks an agent for; keys with no copy are not held
 	// back.
@@ -77,21 +74,24 @@ type keySyncPlan struct {
 // state.Keys): the key limit leaves unusable keys, deleted ones among them,
 // out of state.Keys first.
 //
+// A command that succeeded holds off the work it did for settle (the
+// control plane's KeyCommandSettle), until the agent's inventory shows it.
+//
 // Every decision is about the checking-in agent only, and each agent checks
 // in serially, so concurrent check-ins from different agents cannot queue
 // the same command twice.
-func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, reported []store.KeyRef, firstCheckIn bool, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
-	plan := planEscrowAndRestore(f, self, state, commands, keys, now)
-	plan = planRenewal(plan, f, self, state, firstCheckIn, commands, now)
+func planKeySync(f fleet.Fleet, self *registry.Agent, state store.AgentState, reported []store.KeyRef, firstCheckIn bool, commands []store.CommandRecord, keys fleet.Keys, now time.Time, settle time.Duration) keySyncPlan {
+	plan := planEscrowAndRestore(f, self, state, commands, keys, now, settle)
+	plan = planRenewal(plan, f, self, state, firstCheckIn, commands, now, settle)
 	if reported == nil {
 		reported = state.Keys
 	}
-	return planRemoval(plan, self, state, reported, commands, keys, now)
+	return planRemoval(plan, self, state, reported, commands, keys, now, settle)
 }
 
 // planEscrowAndRestore decides which of the agent's keys it should escrow
 // and which escrowed keys it should restore.
-func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.AgentState, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
+func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.AgentState, commands []store.CommandRecord, keys fleet.Keys, now time.Time, settle time.Duration) keySyncPlan {
 	var plan keySyncPlan
 	if !canRun(self, state, protocol.CommandKeysRestore) {
 		// without the keys capability the agent can neither upload nor
@@ -122,7 +122,7 @@ func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.Agent
 	// the agent restores only when it knows its controller orders keys by
 	// NotBefore; and it runs one restore at a time, each ending in a
 	// controller restart, so a long one goes out a command at a time
-	if me != nil && me.InScope && me.CanRestore() && !restoreRecent(commands, now) {
+	if me != nil && me.InScope && me.CanRestore() && !restoreRecent(commands, now, settle) {
 		held := heldPresent(commands, keys.Reinstated, now)
 		for _, fp := range me.MissingKeys {
 			if len(keys.Escrow[fp]) > 0 && !held[fp] {
@@ -149,10 +149,10 @@ func planEscrowAndRestore(f fleet.Fleet, self *registry.Agent, state store.Agent
 // whether they were never removed or came back (a cluster that was down,
 // or a key Secret made again). Like restores, removals go one command at a
 // time, each ending in a controller restart: none while the last is open,
-// or for settleAfterSuccess after it succeeded, or removeRetryAfterFailure
-// after it failed or was refused.
-func planRemoval(plan keySyncPlan, self *registry.Agent, state store.AgentState, reported []store.KeyRef, commands []store.CommandRecord, keys fleet.Keys, now time.Time) keySyncPlan {
-	if !canRun(self, state, protocol.CommandKeysDelete) || removalRecent(commands, now) {
+// or for settle after it succeeded, or removeRetryAfterFailure after it
+// failed or was refused.
+func planRemoval(plan keySyncPlan, self *registry.Agent, state store.AgentState, reported []store.KeyRef, commands []store.CommandRecord, keys fleet.Keys, now time.Time, settle time.Duration) keySyncPlan {
+	if !canRun(self, state, protocol.CommandKeysDelete) || removalRecent(commands, now, settle) {
 		return plan
 	}
 	for _, k := range reported {
@@ -164,8 +164,8 @@ func planRemoval(plan keySyncPlan, self *registry.Agent, state store.AgentState,
 }
 
 // removalRecent reports whether a keys.delete.v1 is still open, or
-// finished too recently for another.
-func removalRecent(commands []store.CommandRecord, now time.Time) bool {
+// finished too recently for another: within settle after it succeeded.
+func removalRecent(commands []store.CommandRecord, now time.Time, settle time.Duration) bool {
 	return slices.ContainsFunc(commands, func(c store.CommandRecord) bool {
 		if c.Type != protocol.CommandKeysDelete {
 			return false
@@ -179,7 +179,7 @@ func removalRecent(commands []store.CommandRecord, now time.Time) bool {
 		}
 		hold := removeRetryAfterFailure
 		if c.Status == store.CommandSucceeded {
-			hold = settleAfterSuccess
+			hold = settle
 		}
 		return now.Sub(*c.FinishedAt) < hold
 	})
@@ -192,7 +192,7 @@ func removalRecent(commands []store.CommandRecord, now time.Time) bool {
 // its first: agents that start together check in at once, each before the
 // others' states are stored, so on a first check-in each could see itself as
 // the lowest. By their next check-in they see each other.
-func planRenewal(plan keySyncPlan, f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, now time.Time) keySyncPlan {
+func planRenewal(plan keySyncPlan, f fleet.Fleet, self *registry.Agent, state store.AgentState, firstCheckIn bool, commands []store.CommandRecord, now time.Time, settle time.Duration) keySyncPlan {
 	if firstCheckIn {
 		return plan
 	}
@@ -215,7 +215,7 @@ func planRenewal(plan keySyncPlan, f fleet.Fleet, self *registry.Agent, state st
 		return plan
 	}
 	for _, c := range commands {
-		if c.Type == protocol.CommandRenewalEnable && recent(c, now) {
+		if c.Type == protocol.CommandRenewalEnable && recent(c, now, settle) {
 			return plan
 		}
 	}
@@ -244,8 +244,8 @@ func canRun(self *registry.Agent, state store.AgentState, commandType string) bo
 }
 
 // recent reports whether a command is still open or finished too recently
-// for its work to be issued again.
-func recent(c store.CommandRecord, now time.Time) bool {
+// for its work to be issued again: within settle after it succeeded.
+func recent(c store.CommandRecord, now time.Time, settle time.Duration) bool {
 	if c.Open(now) {
 		return true
 	}
@@ -255,7 +255,7 @@ func recent(c store.CommandRecord, now time.Time) bool {
 	}
 	hold := retryAfterFailure
 	if c.Status == store.CommandSucceeded {
-		hold = settleAfterSuccess
+		hold = settle
 	}
 	return now.Sub(*c.FinishedAt) < hold
 }
@@ -279,10 +279,10 @@ func heldPresent(commands []store.CommandRecord, reinstated map[string]store.Rei
 
 // restoreRecent reports whether a restore command is still open, or
 // finished too recently for another: until the agent's inventory shows
-// what it restored, or until a failed one is due a retry.
-func restoreRecent(commands []store.CommandRecord, now time.Time) bool {
+// what it restored (settle), or until a failed one is due a retry.
+func restoreRecent(commands []store.CommandRecord, now time.Time, settle time.Duration) bool {
 	return slices.ContainsFunc(commands, func(c store.CommandRecord) bool {
-		return c.Type == protocol.CommandKeysRestore && recent(c, now)
+		return c.Type == protocol.CommandKeysRestore && recent(c, now, settle)
 	})
 }
 
@@ -406,14 +406,14 @@ func (s *Server) syncKeys(ctx context.Context, self *registry.Agent, state store
 		return nil, err
 	}
 
-	plan := planKeySync(f, self, state, reported, !seen, commands, keys, now)
+	plan := planKeySync(f, self, state, reported, !seen, commands, keys, now, s.keyCommandSettle)
 	if len(plan.Restore) > 0 {
 		// a restore that found keys already present holds them off longer
 		// than every check-in reads back; read that far only now
 		if commands, err = s.store.CommandsSince(ctx, self.ID, time.Now().Add(-presentLookback)); err != nil {
 			return nil, err
 		}
-		plan = planKeySync(f, self, state, reported, !seen, commands, keys, now)
+		plan = planKeySync(f, self, state, reported, !seen, commands, keys, now, s.keyCommandSettle)
 	}
 	if len(plan.Restore) > 0 {
 		if err := s.queue(ctx, self, protocol.CommandKeysRestore, protocol.KeysRestorePayload{Fingerprints: plan.Restore}, now); err != nil {

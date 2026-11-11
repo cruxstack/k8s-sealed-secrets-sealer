@@ -90,10 +90,14 @@ def add(objs):
 
 # ------------------------------------------------------------------- build ---
 
+# Both builds write only their own output, so they run alongside the
+# deploys that do not need them (the controllers, the emulators) rather than
+# holding them up.
 local_resource(
     "web",
     cmd="bash .atmos/scripts/dev/web.sh",
     deps=["web/src", "web/index.html", "web/public", "web/package.json", "web/package-lock.json", "web/vite.config.ts"],
+    allow_parallel=True,
     labels=[LABEL_BUILD],
 )
 
@@ -103,6 +107,7 @@ local_resource(
     deps=["cmd", "internal", "go.mod", "go.sum"],
     # the control plane embeds the UI build (internal/webui/dist/app)
     resource_deps=["web"],
+    allow_parallel=True,
     labels=[LABEL_BUILD],
 )
 
