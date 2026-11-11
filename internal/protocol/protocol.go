@@ -62,6 +62,12 @@ const (
 	// MethodAWSSTS logs in with a signed sts:GetCallerIdentity request,
 	// proving the agent's IAM role without sending its credentials.
 	MethodAWSSTS = "aws-sts"
+	// MethodRenew renews a session that has not expired yet, sent as the
+	// request's bearer token, without the agent's identity: an agent logs
+	// in with its identity only when it starts or its session lapsed.
+	// Control planes that predate it answer 400, and the agent then logs
+	// in with its identity.
+	MethodRenew = "renew"
 )
 
 // AWS login: the only request an agent may sign, and the signed header that
@@ -113,7 +119,7 @@ func HealthWindow(interval time.Duration) time.Duration {
 }
 
 // SessionRequest asks for an agent session token. Token is set for
-// MethodK8sOIDC and AWS for MethodAWSSTS.
+// MethodK8sOIDC and AWS for MethodAWSSTS; MethodRenew sets neither.
 type SessionRequest struct {
 	Method string         `json:"method"`
 	Token  string         `json:"token,omitempty"`

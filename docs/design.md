@@ -203,10 +203,18 @@ plane:
    the record outlives the signature's validity window.
 
 Anyone can send a request that passes the first two steps, so calls to STS
-are limited per env and process: a burst of 100, then one a second. That
-lets a whole fleet log in at once after a restart, while each agent logs in
-only every 14 minutes. Past the limit a login gets 429, logged as
-`agent.login_throttled`, and the agent tries again later.
+are limited per env and process. Each source address (an IPv6 address by
+its /64) may make 20, then one every 5 seconds, so one source cannot use up
+the calls; a login that succeeds gives its source's call back, so agents
+behind one NAT gateway do not use up theirs. Overall there is a burst of
+100, then one a second, which lets a whole fleet log in at once after a
+restart. Agents renew their sessions without STS (below), so they call it
+when they start or their session lapsed, and twice a day. Past a limit a
+login gets 429, logged as `agent.login_throttled`, and the agent tries
+again later. The address is the one the control plane sees: on Lambda, API
+Gateway's source IP, which is CloudFront's when CloudFront is in front. A
+private address, such as a load balancer's in front of a container, is one
+every agent would share, so it has only the overall limit.
 
 STS reports an assumed role without the role's path, so a role is matched by
 partition, account and name, which IAM keeps unique per account. A registry
@@ -230,17 +238,37 @@ unknown key. This mode is used locally and by anyone running outside AWS.
 [docs/deployment.md](deployment.md) shows the registry for both modes.
 
 **Registry changes.** A registry in a file or an SSM parameter is read
-again about once a minute, on a request rather than a timer (a Lambda
-instance is frozen between requests). A change takes effect for logins,
-sessions and the fleet at once, so removing an agent revokes it within
-about a minute, without a restart. A registry that cannot be read or is
-invalid is ignored: the one in force stays, and `registry.reload_failed` is
-logged. A registry given inline in an environment variable changes only
-with a restart.
+again about once a minute, with the JWKS and CA files it names: a change
+to any of them is a change of the registry. The read starts on a request
+rather than a timer (a Lambda instance is frozen between requests) and
+runs beside it, never in a request's time, which stays the handler's own;
+requests use the registry in force until the read is done, within 5
+seconds. On Lambda, a read still running when its request ends is frozen
+with the instance and goes on with its next request; one thawed after its
+time ran out is started again. A change takes effect for logins, sessions
+and the fleet at once, so removing an agent revokes it within about a
+minute, without a restart. A registry that cannot be read or is invalid is
+ignored: the one in force stays, and `registry.reload_failed` is logged. A
+registry given inline in an environment variable changes only with a
+restart.
 
 In both modes a successful login returns a short-lived agent session token
-(15 minutes), scoped to the agent API and bound to the agent ID. Every other
-agent call carries it.
+(15 minutes), scoped to the agent API and bound to the agent as the
+registry has it: its ID, its identity and its capabilities, as a hash.
+Every other agent call carries it, and is refused once the registry no
+longer has the agent that way, so a registry change that gives an ID
+another identity or more capabilities ends its sessions. A minute before
+its session ends, the agent renews it with itself
+(`POST /agent/v1/session` with method `renew` and the session as its bearer
+token): no identity is sent and nothing is asked of STS or an issuer. A
+session also carries when the agent last logged in with its identity, and
+renewal carries that over; once it is 12 hours old, renewal is refused. So
+a session taken from an agent lasts 12 hours at most, and each agent proves
+its identity twice a day: for aws-sts two STS calls, far inside the limits
+above, and few moments for someone emptying them to catch it at. The agent
+logs in with its identity when it starts, when its session lapsed, or when
+the control plane refuses to renew it, as one that predates renewal does.
+If that login is throttled, it goes on with the session while it lasts.
 
 ```mermaid
 sequenceDiagram
@@ -268,6 +296,10 @@ sequenceDiagram
     A->>CP: POST /agent/v1/checkin (session token, key set)
     CP-->>A: 200
   end
+  loop every 14 minutes
+    A->>CP: POST /agent/v1/session (renew, session token)
+    CP-->>A: new agent session token (15 minutes)
+  end
 ```
 
 ## 5. Command protocol
@@ -276,7 +308,7 @@ The control plane never connects to an agent. Agents call:
 
 | Call                                   | Purpose                             |
 | -------------------------------------- | ----------------------------------- |
-| `POST /agent/v1/session`               | Log in (section 4).                 |
+| `POST /agent/v1/session`               | Log in, or renew (section 4).       |
 | `POST /agent/v1/checkin`               | Report state on an interval.        |
 | `GET  /agent/v1/commands?wait=20`      | Long-poll for queued commands.      |
 | `POST /agent/v1/commands/{id}/result`  | Report a command's outcome.         |
@@ -389,6 +421,8 @@ cluster. Across versions:
   new protocol version, capability or `key_order_priority` value is
   refused, a command type the control plane does not know is never sent,
   and a control plane before v0.6.4 refuses any field it does not know.
+  A control plane that predates session renewal answers `400` to it, and
+  the agent logs in with its identity instead, as it did before.
 
 ## 6. Seal flow
 
@@ -1182,9 +1216,9 @@ fingerprint), never values or ciphertexts:
 |              | from the agent                                               |
 | Repositories | `repo.permission_mismatch`                                   |
 | Rate limits  | `request.rate_limited`                                       |
-| Agents       | `agent.login`, `agent.login_rejected`,                       |
-|              | `agent.login_throttled`, `agent.checkin_rejected`,           |
-|              | `agent.capability_ignored`,                                  |
+| Agents       | `agent.login`, `agent.session_renewed`,                      |
+|              | `agent.login_rejected`, `agent.login_throttled`,             |
+|              | `agent.checkin_rejected`, `agent.capability_ignored`,        |
 |              | `command.leased`, `command.finished`; `command.started`,     |
 |              | `command.succeeded`, `command.failed`, `command.expired`     |
 |              | from the agent                                               |

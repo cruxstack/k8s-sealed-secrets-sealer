@@ -18,7 +18,9 @@ import (
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 )
 
-// sessionRefreshBefore renews a session this long before it expires.
+// sessionRefreshBefore renews a session this long before it expires. A
+// session is renewed with itself (protocol.MethodRenew); the agent logs in
+// with its identity only when it has no session that has not expired.
 const sessionRefreshBefore = time.Minute
 
 // maxResponseBytes bounds a control plane response. It is above the 6 MB a
@@ -216,12 +218,13 @@ func (c *Client) call(ctx context.Context, method, path string, header http.Head
 	}
 }
 
-// ensureSession returns a session that is not about to expire, logging in
-// when there is none. Logins happen one at a time: the check-in and command
-// loops start together, and two AWS logins signed in the same second are
-// the same request, which the control plane accepts only once.
+// ensureSession returns a session that is not about to expire: the one it
+// has, that one renewed, or a new one when it has none or cannot renew it.
+// Logins happen one at a time: the check-in and command loops start
+// together, and two AWS logins signed in the same second are the same
+// request, which the control plane accepts only once.
 func (c *Client) ensureSession(ctx context.Context) (string, error) {
-	if s, ok := c.currentSession(); ok {
+	if s, ok := c.currentSession(sessionRefreshBefore); ok {
 		return s, nil
 	}
 	select {
@@ -231,8 +234,31 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 	}
 	defer func() { <-c.login }()
 	// another caller may have logged in meanwhile
-	if s, ok := c.currentSession(); ok {
+	if s, ok := c.currentSession(sessionRefreshBefore); ok {
 		return s, nil
+	}
+
+	// a session that has not expired yet is renewed with itself, so the
+	// agent calls STS (for aws-sts) only when it starts, its session
+	// lapsed, or the control plane wants a login again (twice a day):
+	// anyone can make the control plane spend its STS calls
+	old, live := c.currentSession(0)
+	if live {
+		s, err := c.renew(ctx, old)
+		switch {
+		case err == nil:
+			return s, nil
+		case ctx.Err() != nil:
+			return "", err
+		case retryable(err):
+			// the control plane is busy or out of reach; the session
+			// still works, and the next call renews it
+			c.logger.WarnContext(ctx, "failed to renew the agent session; using it while it lasts", "error", err)
+			return old, nil
+		}
+		// refused, as when the agent last logged in too long ago, or a
+		// control plane that predates renewal: log in
+		c.logger.DebugContext(ctx, "could not renew the agent session; logging in", "error", err)
 	}
 
 	login, err := c.identity.LoginRequest(ctx)
@@ -241,26 +267,52 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 	}
 	var resp protocol.SessionResponse
 	if err := c.do(ctx, http.MethodPost, "/agent/v1/session", "", nil, login, &resp); err != nil {
+		if live && retryable(err) && ctx.Err() == nil {
+			// logins are throttled or the control plane is failing; the
+			// session it would not renew still works for a while
+			c.logger.WarnContext(ctx, "failed to log in to the control plane; using the agent session while it lasts", "error", err)
+			return old, nil
+		}
 		return "", fmt.Errorf("failed to log in to the control plane: %w", err)
 	}
-	if resp.Token == "" {
-		return "", errors.New("failed to log in to the control plane: empty session")
+	if err := c.useSession(resp); err != nil {
+		return "", fmt.Errorf("failed to log in to the control plane: %w", err)
 	}
-	if c.env != "" && resp.Env != c.env {
-		return "", fmt.Errorf("failed to log in to the control plane: it serves env %q, this agent belongs to %q", resp.Env, c.env)
-	}
-	c.mu.Lock()
-	c.session, c.expires, c.agentID = resp.Token, resp.ExpiresAt, resp.AgentID
-	c.mu.Unlock()
 	return resp.Token, nil
 }
 
-// currentSession returns the session unless it is about to expire, in the
-// control plane's time, which set its expiry.
-func (c *Client) currentSession() (string, bool) {
+// renew exchanges a session that has not expired for a new one.
+func (c *Client) renew(ctx context.Context, session string) (string, error) {
+	var resp protocol.SessionResponse
+	if err := c.do(ctx, http.MethodPost, "/agent/v1/session", session, nil, protocol.SessionRequest{Method: protocol.MethodRenew}, &resp); err != nil {
+		return "", fmt.Errorf("failed to renew the agent session: %w", err)
+	}
+	if err := c.useSession(resp); err != nil {
+		return "", fmt.Errorf("failed to renew the agent session: %w", err)
+	}
+	return resp.Token, nil
+}
+
+// useSession keeps a session the control plane issued.
+func (c *Client) useSession(resp protocol.SessionResponse) error {
+	if resp.Token == "" {
+		return errors.New("empty session")
+	}
+	if c.env != "" && resp.Env != c.env {
+		return fmt.Errorf("it serves env %q, this agent belongs to %q", resp.Env, c.env)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.session == "" || !c.now().Add(c.skew).Before(c.expires.Add(-sessionRefreshBefore)) {
+	c.session, c.expires, c.agentID = resp.Token, resp.ExpiresAt, resp.AgentID
+	return nil
+}
+
+// currentSession returns the session unless it expires within margin, in
+// the control plane's time, which set its expiry.
+func (c *Client) currentSession(margin time.Duration) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == "" || !c.now().Add(c.skew).Before(c.expires.Add(-margin)) {
 		return "", false
 	}
 	return c.session, true

@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/agentauth"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/config"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/protocol"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/testutil/testcerts"
 )
 
 const issuers = `issuers: [{name: blue, url: "https://oidc.example.com/blue", jwksURL: "https://oidc.example.com/blue/keys"}]
@@ -82,6 +84,53 @@ func TestEnvRegistry_ReloadsAFile(t *testing.T) {
 	}
 	if reg, _, err := r.reload(ctx); reg != nil || err == nil || !strings.Contains(err.Error(), "failed to read agent registry") {
 		t.Fatalf("missing registry = %v, %v", reg, err)
+	}
+}
+
+// The registry's JWKS and CA files live beside it (the chart's ConfigMap)
+// and change without it: a change to one is a change of the registry.
+func TestEnvRegistry_ReloadsTheFilesItReferences(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.yaml")
+	jwks := filepath.Join(dir, "green-jwks.json")
+	ca := filepath.Join(dir, "blue-ca.pem")
+	writeFile(t, jwks, `{"keys": [{"kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0", "use": "sig", "kid": "one"}]}`)
+	writeFile(t, ca, string(testcerts.SelfSigned(t, testcerts.ECDSA(t), time.Now())))
+	writeFile(t, path, `issuers:
+  - {name: blue, url: "https://oidc.example.com/blue", jwksURL: "https://oidc.example.com/blue/keys", caFile: blue-ca.pem}
+  - {name: green, url: "https://oidc.example.com/green", jwksFile: green-jwks.json}
+agents:
+`+agentLine("green", `{k8s: {issuer: green, subject: "system:serviceaccount:sealer:green"}}`))
+	r := newTestEnvRegistry("dev", &config.ControlPlane{RegistryFile: path}, newEnvRegistries())
+	ctx := context.Background()
+	if _, _, err := r.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if reg, _, err := r.reload(ctx); reg != nil || err != nil {
+		t.Fatalf("nothing changed = %v, %v; want nil, nil", reg, err)
+	}
+
+	// the issuer's keys rotate
+	writeFile(t, jwks, `{"keys": [{"kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0", "use": "sig", "kid": "two"}]}`)
+	if reg, logins, err := r.reload(ctx); reg == nil || logins == nil || err != nil {
+		t.Fatalf("a JWKS file changed = %v, %v; want the registry again", reg, err)
+	}
+	if reg, _, err := r.reload(ctx); reg != nil || err != nil {
+		t.Fatalf("nothing changed since = %v, %v; want nil, nil", reg, err)
+	}
+
+	// a CA bundle changes
+	writeFile(t, ca, string(testcerts.SelfSigned(t, testcerts.ECDSA(t), time.Now())))
+	if reg, _, err := r.reload(ctx); reg == nil || err != nil {
+		t.Fatalf("a CA file changed = %v, %v; want the registry again", reg, err)
+	}
+
+	// a file that cannot be read leaves the registry in force
+	if err := os.Remove(jwks); err != nil {
+		t.Fatal(err)
+	}
+	if reg, _, err := r.reload(ctx); reg != nil || err == nil || !strings.Contains(err.Error(), "issuer green") {
+		t.Fatalf("a JWKS file missing = %v, %v", reg, err)
 	}
 }
 

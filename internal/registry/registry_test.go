@@ -239,3 +239,51 @@ agents:
 		t.Errorf("a registry shares %d identities with itself, want 3", len(got))
 	}
 }
+
+// A session carries its agent's binding, so a registry change that rebinds
+// an ID must change it, and one that leaves the agent alone must not.
+func TestBinding(t *testing.T) {
+	binding := func(agents string) string {
+		t.Helper()
+		r, err := Parse([]byte(`
+issuers:
+  - {name: blue, url: "https://oidc.example.com/blue", jwksFile: k.json}
+  - {name: green, url: "https://oidc.example.com/green", jwksFile: k.json}
+agents:
+  - {id: other, cluster: other, region: use1, identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/other"}}}
+`+agents), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, _ := r.Agent("use1-blue")
+		return r.Binding(a)
+	}
+	const agent = `  - {id: use1-blue, cluster: blue, region: use1, capabilities: [seal, keys], identity: {k8s: {issuer: blue, subject: "system:serviceaccount:sealer:agent"}}}`
+	base := binding(agent)
+	same := map[string]string{
+		"capabilities reordered": strings.Replace(agent, "[seal, keys]", "[keys, seal]", 1),
+		"another region":         strings.Replace(agent, "region: use1", "region: use2", 1),
+	}
+	for name, a := range same {
+		if got := binding(a); got != base {
+			t.Errorf("%s: binding changed", name)
+		}
+	}
+	changed := map[string]string{
+		"another subject":       strings.Replace(agent, "sealer:agent", "sealer:other", 1),
+		"another issuer":        strings.Replace(agent, "issuer: blue", "issuer: green", 1),
+		"another capability":    strings.Replace(agent, "[seal, keys]", "[seal, keys, renewal]", 1),
+		"a capability less":     strings.Replace(agent, "[seal, keys]", "[seal]", 1),
+		"an IAM role instead":   `  - {id: use1-blue, cluster: blue, region: use1, capabilities: [seal, keys], identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/blue"}}}`,
+		"the role's ID pinned":  `  - {id: use1-blue, cluster: blue, region: use1, capabilities: [seal, keys], identity: {aws: {roleArn: "arn:aws:iam::111111111111:role/blue", roleId: AROA1234567890ABCDEFG}}}`,
+		"a role in another acc": `  - {id: use1-blue, cluster: blue, region: use1, capabilities: [seal, keys], identity: {aws: {roleArn: "arn:aws:iam::222222222222:role/blue"}}}`,
+	}
+	seen := map[string]string{base: "the agent"}
+	for name, a := range changed {
+		got := binding(a)
+		if other, dup := seen[got]; dup {
+			t.Errorf("%s: binding is the same as for %s", name, other)
+		}
+		seen[got] = name
+	}
+}

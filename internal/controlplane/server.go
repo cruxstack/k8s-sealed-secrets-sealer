@@ -95,7 +95,7 @@ const (
 // reads its registry again, and registryReloadTimeout bounds each read.
 const (
 	RegistryReloadInterval = time.Minute
-	registryReloadTimeout  = 10 * time.Second
+	registryReloadTimeout  = 5 * time.Second
 )
 
 // Server is the control plane's HTTP handler. The same handler runs behind
@@ -124,7 +124,10 @@ type Server struct {
 	// replaced together when the registry is read again
 	agents         atomic.Pointer[agentAccess]
 	reloadRegistry func(context.Context) (*registry.Registry, map[string]LoginVerifier, error)
-	reloadMu       sync.Mutex
+	// reloadMu is held while the registry is read again, by the goroutine
+	// reading it; reloading counts those goroutines, for tests
+	reloadMu  sync.Mutex
+	reloading sync.WaitGroup
 	// nextReload is when the registry is next read, in Unix nanoseconds
 	nextReload atomic.Int64
 
@@ -197,38 +200,54 @@ type agentAccess struct {
 // and uses that throughout.
 func (s *Server) currentRegistry() *registry.Registry { return s.agents.Load().reg }
 
-// readingRegistry reads the registry again, at most once a
-// RegistryReloadInterval, before passing a request on. It runs on requests
-// rather than a timer because a Lambda instance is frozen between them:
-// however long one slept, a removed agent is refused within about a minute.
-// Requests arriving while one reads it use the registry in force.
+// readingRegistry starts reading the registry again, at most once a
+// RegistryReloadInterval, as requests come in. It runs on requests rather
+// than a timer because a Lambda instance is frozen between them: however
+// long one slept, the first request after a minute starts the read, and a
+// removed agent is refused once it is done. The read runs beside the
+// requests, never in their time, so it cannot push a poll or a pull request
+// past its time limit; they use the registry in force until the read is
+// done. On Lambda, a read still running when its request ends is frozen with
+// the instance and goes on with its next request.
 func (s *Server) readingRegistry(next http.Handler) http.Handler {
 	if s.reloadRegistry == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.now().UnixNano() >= s.nextReload.Load() && s.reloadMu.TryLock() {
-			s.reloadRegistryNow(r.Context())
-			s.reloadMu.Unlock()
+			s.reloading.Add(1)
+			ctx := context.WithoutCancel(r.Context())
+			go func() {
+				defer s.reloading.Done()
+				defer s.reloadMu.Unlock()
+				s.reloadRegistryNow(ctx)
+			}()
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
 // reloadRegistryNow reads the registry again unless another request just
-// did. It must hold reloadMu.
+// started it. It must hold reloadMu.
 func (s *Server) reloadRegistryNow(ctx context.Context) {
-	now := s.now()
-	if now.UnixNano() < s.nextReload.Load() {
+	started := s.now()
+	if started.UnixNano() < s.nextReload.Load() {
 		return
 	}
 	// a failed read waits as long, so a broken source is not read on every
 	// request
-	s.nextReload.Store(now.Add(RegistryReloadInterval).UnixNano())
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registryReloadTimeout)
+	s.nextReload.Store(started.Add(RegistryReloadInterval).UnixNano())
+	ctx, cancel := context.WithTimeout(ctx, registryReloadTimeout)
 	defer cancel()
 	reg, logins, err := s.reloadRegistry(ctx)
 	switch {
+	case err != nil && s.now().Sub(started) > 2*registryReloadTimeout:
+		// far longer than a read may take: the instance was frozen in the
+		// middle of it, and its time ran out meanwhile. The next request
+		// reads it again.
+		s.nextReload.Store(started.UnixNano())
+		s.logger.InfoContext(ctx, "the agent registry's read was interrupted; reading it again",
+			"env", s.env, "error", err)
 	case err != nil:
 		s.logger.ErrorContext(ctx, "failed to read the agent registry again; keeping the one in force",
 			"event", "registry.reload_failed", "env", s.env, "error", err)

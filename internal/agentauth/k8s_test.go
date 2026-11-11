@@ -251,6 +251,34 @@ func TestK8sVerifier_RefetchesJWKSAtMostEvery30s(t *testing.T) {
 	}
 }
 
+// A CA bundle replaced at the same path is a new trust root: the key set
+// fetched under the old one is not kept for it.
+func TestK8sVerifier_ReadsACABundleChangedInPlace(t *testing.T) {
+	key := testRSA(t)
+	j := newJWKSServer(t, jwksJSON(t, key, "k1"))
+	ctx := context.Background()
+	v := j.verifier(t, nil, nil)
+	if _, err := v.Verify(ctx, sign(t, key, "k1", goodSpec())); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	// the same bundle again keeps the key set
+	same := j.verifier(t, nil, v)
+	if _, err := same.Verify(ctx, sign(t, key, "k1", goodSpec())); err != nil || j.fetches.Load() != 1 {
+		t.Fatalf("Verify with the same bundle = %v, fetches = %d", err, j.fetches.Load())
+	}
+
+	// a bundle that does not trust the issuer's server: the keys are
+	// fetched again under it, and that fails
+	if err := os.WriteFile(j.caPath, testcerts.SelfSigned(t, testRSA(t), time.Now().Add(-time.Hour)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := j.verifier(t, nil, same)
+	if _, err := next.Verify(ctx, sign(t, key, "k1", goodSpec())); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("Verify under a bundle that does not trust the issuer = %v, want ErrUnauthorized", err)
+	}
+}
+
 func testRSA(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
 	return testcerts.RSA(t, 2048)

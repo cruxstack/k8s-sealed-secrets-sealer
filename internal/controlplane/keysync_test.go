@@ -72,11 +72,7 @@ agents:
 	})
 	sh.harness = &harness{t: t, h: sh.srv.Handler(), store: mem, logs: logs}
 	for _, id := range []string{"a", "b", "c"} {
-		token, _, err := sessions.Issue(id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sh.sessions[id] = token
+		sh.sessions[id] = agentSession(t, sessions, reg, id)
 	}
 	return sh
 }

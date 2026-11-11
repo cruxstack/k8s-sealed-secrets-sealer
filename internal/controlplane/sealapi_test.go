@@ -58,6 +58,8 @@ type sealHarness struct {
 
 	mu  sync.Mutex
 	now time.Time
+	// reload, when set, reads the registry again; nil leaves it unchanged
+	reload func(context.Context) (*registry.Registry, map[string]LoginVerifier, error)
 }
 
 // newSealHarness serves the fixture repositories, with files added to
@@ -137,13 +139,18 @@ agents:
 		TransitKeyID: "transit",
 		PollInterval: 10 * time.Millisecond,
 		Now:          sh.clock,
+		ReloadRegistry: func(ctx context.Context) (*registry.Registry, map[string]LoginVerifier, error) {
+			sh.mu.Lock()
+			reload := sh.reload
+			sh.mu.Unlock()
+			if reload == nil {
+				return nil, nil, nil
+			}
+			return reload(ctx)
+		},
 	}).Handler()
 	for _, a := range reg.Agents {
-		token, _, err := agentSessions.Issue(a.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sh.agents[a.ID] = token
+		sh.agents[a.ID] = agentSession(t, agentSessions, reg, a.ID)
 		sh.checkIn(a.ID, sh.key.Key)
 	}
 	return sh

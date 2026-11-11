@@ -22,23 +22,45 @@ func newSessions(t *testing.T, now func() time.Time) *Sessions {
 
 func TestSessions_RoundTrip(t *testing.T) {
 	s := newSessions(t, nil)
-	token, exp, err := s.Issue("use1-blue")
+	loggedIn := time.Now().Add(-time.Hour).Truncate(time.Second)
+	token, exp, err := s.Issue("use1-blue", "binding", loggedIn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d := time.Until(exp); d < SessionTTL-time.Minute || d > SessionTTL {
 		t.Errorf("expires in %s", d)
 	}
-	id, err := s.Verify(token)
-	if err != nil || id != "use1-blue" {
-		t.Fatalf("Verify = %q, %v", id, err)
+	sess, err := s.Verify(token)
+	if err != nil || sess.AgentID != "use1-blue" || sess.Binding != "binding" || !sess.LoggedInAt.Equal(loggedIn) {
+		t.Fatalf("Verify = %+v, %v", sess, err)
+	}
+}
+
+// A session is renewed for RenewalLimit after its agent last logged in
+// with its identity, and not after.
+func TestSessions_Renewable(t *testing.T) {
+	now := time.Now()
+	s := newSessions(t, func() time.Time { return now })
+	for name, tc := range map[string]struct {
+		loggedIn time.Time
+		want     bool
+	}{
+		"just logged in":   {now, true},
+		"within the limit": {now.Add(-RenewalLimit + time.Minute), true},
+		"at the limit":     {now.Add(-RenewalLimit), false},
+		"past the limit":   {now.Add(-RenewalLimit - time.Hour), false},
+		"no login time":    {time.Time{}, false},
+	} {
+		if got := s.Renewable(Session{AgentID: "a", LoggedInAt: tc.loggedIn}); got != tc.want {
+			t.Errorf("%s: Renewable = %v, want %v", name, got, tc.want)
+		}
 	}
 }
 
 func TestSessions_Rejects(t *testing.T) {
 	base := time.Now()
 	s := newSessions(t, func() time.Time { return base })
-	good, _, err := s.Issue("use1-blue")
+	good, _, err := s.Issue("use1-blue", "binding", base)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/userauth"
 )
@@ -392,6 +393,38 @@ func TestPullRequest_FitsTheRequestTimeLimit(t *testing.T) {
 	// unlocked, well before
 	if budget := pullRequestTimeout + pullRequestFinish; budget > 25*time.Second {
 		t.Fatalf("a pull request may take %s", budget)
+	}
+
+	// reading the registry again takes none of that time: a read that does
+	// not finish, as when SSM is slow, does not hold the pull request up
+	sh := newSealHarness(t)
+	sess := sh.openSession()
+	sh.sealNow(sess.ID, billing, "api-token", "v")
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	sh.mu.Lock()
+	sh.reload = func(ctx context.Context) (*registry.Registry, map[string]LoginVerifier, error) {
+		close(reading)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil, ctx.Err()
+	}
+	sh.mu.Unlock()
+	sh.advance(RegistryReloadInterval)
+	start := time.Now()
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+	select {
+	case <-reading:
+	default:
+		t.Fatal("the pull request did not start reading the registry")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the pull request took %s, waiting on the registry", took)
 	}
 }
 
