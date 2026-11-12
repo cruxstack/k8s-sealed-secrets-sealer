@@ -66,16 +66,23 @@ does not apply (Delete always, unless the control plane says the key may go); a
 deleted key's row has Reinstate alone. Each confirms in a dialog that says what
 it does and does not do: revoking and deleting with a destructive confirm,
 reinstating because the key goes back into every cluster and may become the env
-key. A revoked key's row is muted, and so is the deleted keys table. The agents
-table shows each agent's region and version under its name, and its latest
-count: values and SealedSecrets, when, the namespaces when not all, and values
-no key decrypts in the warning color. An agent's issues are sentences, in a
-warning note in a row under the agent's that spans the table, so the table fits
-a laptop's width without scrolling sideways. A notice under the env key warns
-when a cluster's keys reach half or 80% of the key limit, or go past it. With no
-env key, the banner says why and what happens next: keys out of sync (and
-whether any agent has checked in), or a new key needed when every key the
-clusters share is revoked or not valid yet.
+key. A revoked key's row is muted, and so is the deleted keys table.
+
+The agents table keeps each agent to one line, so it fits a laptop's width
+without scrolling sideways: its name and region, its health with its last
+check-in, its keys, its active key, and its latest count (values and
+SealedSecrets, and values no key decrypts in the warning color). Its name
+opens its details in a row under it: its cluster, version and capabilities,
+when and in which namespaces it counted, and its issues as sentences. An
+issue its health badge already says (never or not recently checked in) is
+left out; the others are a count beside the health, in the warning color,
+that opens the details too.
+
+A notice under the env key warns when a cluster's keys reach half or 80% of
+the key limit, or go past it. With no env key, the banner says why and what
+happens next: keys out of sync (and whether any agent has checked in), or a
+new key needed when every key the clusters share is revoked or not valid
+yet.
 
 Resealing (`/{env}/reseal`) is for the env's admins too, beside Fleet in
 the account menu and the palette, and in the navigation from a laptop's
@@ -280,12 +287,19 @@ the right (filters, refresh status, export). Keep a toolbar to one row on a
 desktop width; if a section needs more than three controls, it needs a
 different design.
 
+A choice between views of a list (a file's keys: All, To seal, Pending) is
+one joined group of buttons, as tall as the filter beside it, each with its
+count. The chosen one (`aria-pressed`) has the selected colors and its own
+primary edge, drawn on the group's outline rather than inset in it.
+
 ## Row details
 
-Rows are dense summaries. Detail that does not fit a cell goes in a row under it
-that spans the table (an agent's issues, as sentences), or in a detail view
-reached from the row. A table never gets a column of sentences: it squeezes them
-a word a line and widens the table past a laptop's width. A row that opens
+Rows are dense summaries, one line each where a table can manage it (the
+agents). Detail that does not fit a cell goes in a row under it that spans
+the table, closed at first and opened from the row (an agent's details, from
+its name, with a chevron and `aria-expanded`), or in a detail view reached
+from the row. A table never gets a column of sentences: it squeezes them a
+word a line and widens the table past a laptop's width. A row that opens
 something shows it on hover and has a visible affordance; a row that opens
 nothing does not look pressable.
 
