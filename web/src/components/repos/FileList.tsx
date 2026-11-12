@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState, type KeyboardEvent } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import type { PendingChange, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,51 +27,31 @@ const STATUS: Record<FileStatus, { label: string; dot: string }> = {
 };
 
 /**
- * A path with its directory muted and its file name strong. It wraps only
- * after a slash, so a folder's name is never split.
- */
-export function FilePath({ path }: { path: string }) {
-  const slash = path.lastIndexOf("/");
-  const folders = path.slice(0, slash + 1).split(/(?<=\/)/);
-  return (
-    <span className="font-mono [overflow-wrap:anywhere]">
-      {slash >= 0 && (
-        <span className="text-muted-foreground">
-          {folders.map((f, i) => (
-            <Fragment key={i}>
-              {f}
-              <wbr />
-            </Fragment>
-          ))}
-        </span>
-      )}
-      <span className="font-medium text-foreground">
-        {path.slice(slash + 1)}
-      </span>
-    </span>
-  );
-}
-
-/**
  * A path on one line, as a list shows it: the file name whole, and as much
  * of its directory as fits before it, cut at the start ("…/billing/"),
  * since the folders nearest a file tell it from the others. The whole
- * path is its title. `quiet` mutes the file name too, for a path under a
+ * path is its title, unless `hover` is false for a path that shows it in a
+ * tooltip of its own. `quiet` mutes the file name too, for a path under a
  * file's title.
  */
 export function PathLine({
   path,
   quiet = false,
+  hover = true,
   className,
 }: {
   path: string;
   quiet?: boolean;
+  hover?: boolean;
   className?: string;
 }) {
   const slash = path.lastIndexOf("/");
   const dir = path.slice(0, slash + 1);
   return (
-    <span className={cn("flex min-w-0 font-mono", className)} title={path}>
+    <span
+      className={cn("flex min-w-0 font-mono", className)}
+      title={hover ? path : undefined}
+    >
       {/* read as one path, without the marks and the cut */}
       <span className="sr-only">{path}</span>
       {dir && (
@@ -272,7 +252,7 @@ export function FileList({
                       )}
                       {description && (
                         <span
-                          className="mt-0.5 block truncate text-xs text-foreground"
+                          className="mt-0.5 block truncate text-xs text-muted-foreground italic"
                           title={description}
                         >
                           {description}

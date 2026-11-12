@@ -195,19 +195,25 @@ in a pull request, the line goes. With nothing pending, the cart says what
 will gather there and shows no footer.
 
 Show hints where the decision is made. A file's title names it in the list
-and in its header, over its path; its description sits under them, its docs
-are a link in its header, and expected keys it lacks are dashed amber: in
-the list as a count and in the key rows. A file's badges in the list always
-sit on their own row, under its summary. Hints warn and never block: a key
-the file does not expect gets an amber note, and the value can still be
-sealed.
+and in its header, over its path; its description sits under them in muted
+italics, so it reads apart from both. Its docs are a link in its header, and
+expected keys it lacks are dashed amber: in the list as a count and in the
+key rows. A file's badges in the list always sit on their own row, under its
+summary. Hints warn and never block: a key the file does not expect gets an
+amber note, and the value can still be sealed.
 
 A path in a list (the files, the cart, a recent repository's card) takes one
 line and never wraps: the file name whole, and as much of its directory as
 fits before it, cut at the start with an ellipsis, since the folders nearest
 a file tell it from the others (`PathLine`). The whole path is its `title`
-and what a screen reader reads. A header has room for a path and wraps it
-only after a slash (`FilePath`).
+and what a screen reader reads.
+
+A file's header keeps its title and path to one line each as well, and
+doesn't repeat what its sections say (the documents table counts the
+SealedSecrets). Either one, when cut, shows whole in a tooltip on hover,
+keyboard focus and a tap (`OneLine`), and takes keyboard focus only while
+it is cut. The description is prose: it runs under the actions, across the
+header's whole width, and wraps at its edge.
 
 ## Keyboard
 
