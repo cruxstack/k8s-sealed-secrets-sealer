@@ -12,7 +12,7 @@ export function NotFound() {
       <EmptyState
         page
         icon={MapPinOff}
-        title="Page not found"
+        title="Page Not Found"
         action={
           <Button asChild variant="outline" size="sm">
             <Link to="/">Go to Secrets</Link>

@@ -97,9 +97,9 @@ export function ResealView({
         <Alert
           variant="warning"
           role="status"
-          heading={`Couldn't check whether values can be resealed in ${env}`}
+          heading={`Couldn't Check Whether Values Can Be Resealed in ${env}`}
         >
-          {sentence(extractApiError(statusError))} Run now waits until it can
+          {sentence(extractApiError(statusError))} Run Now waits until it can
           check; this page asks again every 30 seconds.
         </Alert>
       )}
@@ -108,9 +108,9 @@ export function ResealView({
         <Alert
           variant="warning"
           role="status"
-          heading={`Values can't be resealed in ${env} right now`}
+          heading={`Values Can't Be Resealed in ${env} Right Now`}
         >
-          {resealBlocked(status)} Run now, and Reseal all in a repository, are
+          {resealBlocked(status)} Run Now, and Reseal All in a repository, are
           unavailable until they can.
         </Alert>
       )}

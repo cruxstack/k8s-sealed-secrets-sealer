@@ -72,7 +72,7 @@ function LoginPage() {
         <Button asChild className="w-full" size="lg">
           <a href={loginHref}>
             <GitHubMark className="mr-2 h-5 w-5" />
-            Sign in with GitHub
+            Sign In With GitHub
           </a>
         </Button>
       </div>

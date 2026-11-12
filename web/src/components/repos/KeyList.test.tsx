@@ -76,7 +76,7 @@ describe("KeyList", () => {
     fireEvent.change(filter, { target: { value: "webhook-secret" } });
     expect(screen.getByText("No key matches “webhook-secret”.")).toBeVisible();
     fireEvent.click(
-      screen.getByRole("button", { name: "Seal webhook-secret as a new key" }),
+      screen.getByRole("button", { name: "Seal webhook-secret as a New Key" }),
     );
     expect(onPick).toHaveBeenLastCalledWith("webhook-secret");
     fireEvent.keyDown(filter, { key: "Enter" });
@@ -85,12 +85,12 @@ describe("KeyList", () => {
     // a name that cannot be a key is not offered
     fireEvent.change(filter, { target: { value: "bad/key" } });
     expect(
-      screen.queryByRole("button", { name: /as a new key/ }),
+      screen.queryByRole("button", { name: /as a New Key/ }),
     ).not.toBeInTheDocument();
     fireEvent.click(
       within(screen.getByText(/No key matches/).parentElement!).getByRole(
         "button",
-        { name: "Clear filter" },
+        { name: "Clear Filter" },
       ),
     );
     expect(filter).toHaveValue("");
@@ -108,7 +108,7 @@ describe("KeyList", () => {
       within(views)
         .getAllByRole("button")
         .map((b) => b.textContent),
-    ).toEqual(["All 14", "To seal 2", "Pending 1"]);
+    ).toEqual(["All 14", "To Seal 2", "Pending 1"]);
     expect(
       within(views).getByRole("button", { name: "All 14" }),
     ).toHaveAttribute("aria-pressed", "true");
@@ -123,9 +123,9 @@ describe("KeyList", () => {
       "border-primary",
       "bg-selected",
     );
-    fireEvent.click(within(views).getByRole("button", { name: "To seal 2" }));
+    fireEvent.click(within(views).getByRole("button", { name: "To Seal 2" }));
     expect(
-      within(views).getByRole("button", { name: "To seal 2" }),
+      within(views).getByRole("button", { name: "To Seal 2" }),
     ).toHaveClass("z-10", "border-primary");
     expect(
       within(views).getByRole("button", { name: "All 14" }),

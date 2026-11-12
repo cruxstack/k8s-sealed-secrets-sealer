@@ -21,7 +21,7 @@ export function fileStatus(file: RepositoryFile): FileStatus {
 
 const STATUS: Record<FileStatus, { label: string; dot: string }> = {
   ready: { label: "Ready", dot: "bg-success" },
-  blocked: { label: "Can't seal", dot: "bg-warning" },
+  blocked: { label: "Can't Seal", dot: "bg-warning" },
   unreadable: { label: "Unreadable", dot: "bg-destructive" },
 };
 
@@ -103,7 +103,7 @@ function summary(file: RepositoryFile): string {
   const regions = [...new Set(docs.map((d) => d.region).filter(Boolean))];
   const count = docs.length === 1 ? "1 document" : `${docs.length} documents`;
   const where = regions.length > 0 ? ` · ${regions.join(", ")}` : "";
-  return status === "blocked" ? `${count} · Can't seal` : `${count}${where}`;
+  return status === "blocked" ? `${count} · Can't Seal` : `${count}${where}`;
 }
 
 /**
@@ -190,7 +190,7 @@ export function FileList({
         <div className="space-y-2 px-4 py-6 text-center text-sm text-muted-foreground">
           <p>No file matches “{filter.trim()}”.</p>
           <Button variant="outline" size="sm" onClick={() => setFilter("")}>
-            Clear filter
+            Clear Filter
           </Button>
         </div>
       ) : (
@@ -272,7 +272,7 @@ export function FileList({
                               variant="warning"
                               title="Sealed with a key an admin has since revoked: seal again, or remove it"
                             >
-                              Seal again
+                              Seal Again
                               <span className="sr-only">
                                 {stale === 1
                                   ? " 1 pending change"
@@ -288,7 +288,7 @@ export function FileList({
                                   ? "pending change"
                                   : "pending changes"}
                               </span>
-                              <span aria-hidden="true">pending</span>
+                              <span aria-hidden="true">Pending</span>
                             </Badge>
                           )}
                           {missing.length > 0 && (
@@ -297,7 +297,7 @@ export function FileList({
                               className="border-dashed border-warning/60 text-warning"
                               title={`Expected but not set: ${missing.join(", ")}`}
                             >
-                              {missing.length} missing
+                              {missing.length} Missing
                               <span className="sr-only">
                                 {missing.length === 1 ? " key" : " keys"}
                               </span>

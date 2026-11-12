@@ -126,10 +126,10 @@ const RESEALED: PendingChange = {
   fingerprint: KEY_B.fingerprint,
 };
 
-/** The billing file's panel, once its "Reseal all" is there. */
+/** The billing file's panel, once its "Reseal All" is there. */
 async function panel() {
   const region = await screen.findByRole("region", { name: BILLING });
-  await within(region).findByRole("button", { name: /Reseal all/ });
+  await within(region).findByRole("button", { name: /Reseal All/ });
   return region;
 }
 
@@ -140,7 +140,7 @@ function availability(button: HTMLElement): string {
   return document.getElementById(id)?.textContent ?? "no reason";
 }
 
-describe("Reseal all", () => {
+describe("Reseal All", () => {
   const originalAdapter = apiClient.defaults.adapter;
   beforeEach(() => {
     sealPolling.intervalMs = 5;
@@ -177,13 +177,13 @@ describe("Reseal all", () => {
     });
     renderAt(PAGE, api);
     const file = await panel();
-    const button = within(file).getByRole("button", { name: /Reseal all/ });
+    const button = within(file).getByRole("button", { name: /Reseal All/ });
     expect(availability(button)).toBe("enabled");
     fireEvent.click(button);
 
     // what it does and doesn't do, before it starts
     const ask = await screen.findByRole("dialog", {
-      name: "Reseal all values in this file?",
+      name: "Reseal All Values in This File?",
     });
     expect(ask).toHaveTextContent(
       `${BILLING} holds 3 values in 2 documents for the dev env.`,
@@ -199,7 +199,7 @@ describe("Reseal all", () => {
       "Values already on the env key don't change.",
     );
     expect(ask).toHaveTextContent("It doesn't rotate values.");
-    fireEvent.click(within(ask).getByRole("button", { name: "Reseal all" }));
+    fireEvent.click(within(ask).getByRole("button", { name: "Reseal All" }));
 
     // its progress, then what it did
     const progress = await screen.findByRole("progressbar", {
@@ -208,7 +208,7 @@ describe("Reseal all", () => {
     expect(progress).toHaveAttribute("aria-valuemax", "2");
     await screen.findByText("Resealing in dev-use1-blue: 1 of 2 values…");
     const done = await screen.findByRole("dialog", {
-      name: "Resealed 1 value",
+      name: "Resealed 1 Value",
     });
     const summary = within(done).getByRole("list", { name: "Reseal summary" });
     expect(
@@ -256,10 +256,10 @@ describe("Reseal all", () => {
     // and the pull request says what it writes, counting values as its
     // title does: one per document a key was resealed in
     fireEvent.click(
-      within(pending).getByRole("button", { name: "Open pull request" }),
+      within(pending).getByRole("button", { name: "Open Pull Request" }),
     );
     expect(
-      await screen.findByRole("dialog", { name: "Open a pull request?" }),
+      await screen.findByRole("dialog", { name: "Open a Pull Request?" }),
     ).toHaveTextContent(
       "writes 1 sealed value and 2 resealed values into 1 file",
     );
@@ -273,14 +273,14 @@ describe("Reseal all", () => {
     });
     renderAt(PAGE, api);
     fireEvent.click(
-      within(await panel()).getByRole("button", { name: /Reseal all/ }),
+      within(await panel()).getByRole("button", { name: /Reseal All/ }),
     );
     const ask = await screen.findByRole("dialog");
     expect(ask).toHaveTextContent(
       "Values with a pending change in your session are left alone.",
     );
-    fireEvent.click(within(ask).getByRole("button", { name: "Reseal all" }));
-    await screen.findByRole("dialog", { name: "Resealed 1 value" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Reseal All" }));
+    await screen.findByRole("dialog", { name: "Resealed 1 Value" });
     expect(
       api.calls.filter((c) => c.method === "POST").map((c) => c.url),
     ).toEqual([`${APPS}/session`, `${APPS}/session/${SESSION.id}/reseals`]);
@@ -310,15 +310,15 @@ describe("Reseal all", () => {
     });
     renderAt(PAGE, api);
     fireEvent.click(
-      within(await panel()).getByRole("button", { name: /Reseal all/ }),
+      within(await panel()).getByRole("button", { name: /Reseal All/ }),
     );
     fireEvent.click(
       within(await screen.findByRole("dialog")).getByRole("button", {
-        name: "Reseal all",
+        name: "Reseal All",
       }),
     );
     const done = await screen.findByRole("dialog", {
-      name: "No value was resealed",
+      name: "No Value Was Resealed",
     });
     expect(within(done).getByText("1 failed")).toHaveClass("text-destructive");
     const failures = within(done).getByRole("list", {
@@ -351,15 +351,15 @@ describe("Reseal all", () => {
       }),
     );
     fireEvent.click(
-      within(await panel()).getByRole("button", { name: /Reseal all/ }),
+      within(await panel()).getByRole("button", { name: /Reseal All/ }),
     );
     fireEvent.click(
       within(await screen.findByRole("dialog")).getByRole("button", {
-        name: "Reseal all",
+        name: "Reseal All",
       }),
     );
     const done = await screen.findByRole("dialog", {
-      name: "Resealing timed out",
+      name: "Resealing Timed Out",
     });
     expect(within(done).getByRole("alert")).toHaveTextContent(
       "No agent answered in time.",
@@ -380,15 +380,15 @@ describe("Reseal all", () => {
       }),
     );
     fireEvent.click(
-      within(await panel()).getByRole("button", { name: /Reseal all/ }),
+      within(await panel()).getByRole("button", { name: /Reseal All/ }),
     );
     const ask = await screen.findByRole("dialog");
-    fireEvent.click(within(ask).getByRole("button", { name: "Reseal all" }));
+    fireEvent.click(within(ask).getByRole("button", { name: "Reseal All" }));
     expect(await within(ask).findByRole("alert")).toHaveTextContent(
       "Could not reseal the file: 3 keys need resealing, and the session takes 50 changes: remove some first.",
     );
     expect(
-      within(ask).getByRole("button", { name: "Reseal all" }),
+      within(ask).getByRole("button", { name: "Reseal All" }),
     ).toBeVisible();
   });
 
@@ -409,10 +409,10 @@ describe("Reseal all", () => {
       }),
     );
     const file = await panel();
-    fireEvent.click(within(file).getByRole("button", { name: /Reseal all/ }));
+    fireEvent.click(within(file).getByRole("button", { name: /Reseal All/ }));
     fireEvent.click(
       within(await screen.findByRole("dialog")).getByRole("button", {
-        name: "Reseal all",
+        name: "Reseal All",
       }),
     );
     const running = await screen.findByRole("dialog", { name: "Resealing…" });
@@ -425,10 +425,10 @@ describe("Reseal all", () => {
     expect(
       within(file).getByRole("button", { name: "Resealing…" }),
     ).toBeVisible();
-    expect(await screen.findByText("Resealed 1 value")).toBeVisible();
+    expect(await screen.findByText("Resealed 1 Value")).toBeVisible();
     await waitFor(() =>
       expect(
-        within(file).getByRole("button", { name: "Reseal all" }),
+        within(file).getByRole("button", { name: "Reseal All" }),
       ).toBeVisible(),
     );
   });
@@ -446,7 +446,7 @@ describe("Reseal all", () => {
     );
     expect(
       availability(
-        within(await panel()).getByRole("button", { name: /Reseal all/ }),
+        within(await panel()).getByRole("button", { name: /Reseal All/ }),
       ),
     ).toBe("Resealing needs write access to this repository on GitHub.");
   });
@@ -468,11 +468,11 @@ describe("Reseal all", () => {
     const file = await panel();
     await waitFor(() =>
       expect(
-        availability(within(file).getByRole("button", { name: /Reseal all/ })),
+        availability(within(file).getByRole("button", { name: /Reseal All/ })),
       ).toBe("No agent with the reseal capability holds the env key."),
     );
     // a tap shows why, and does nothing else
-    fireEvent.click(within(file).getByRole("button", { name: /Reseal all/ }));
+    fireEvent.click(within(file).getByRole("button", { name: /Reseal All/ }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -498,7 +498,7 @@ describe("Reseal all", () => {
     );
     const file = await panel();
     const button = () =>
-      within(file).getByRole("button", { name: /Reseal all/ });
+      within(file).getByRole("button", { name: /Reseal All/ });
     await waitFor(() =>
       expect(availability(button())).toBe(
         "This file has no sealed values for the dev env.",
@@ -528,7 +528,7 @@ describe("Reseal all", () => {
     fireEvent.click(within(form).getByRole("button", { name: "Seal" }));
     await waitFor(() =>
       expect(
-        availability(within(file).getByRole("button", { name: /Reseal all/ })),
+        availability(within(file).getByRole("button", { name: /Reseal All/ })),
       ).toBe("Wait for the seal in progress to finish."),
     );
   });
@@ -541,7 +541,7 @@ describe("Reseal all", () => {
     const file = await screen.findByRole("region", { name: BILLING });
     await within(file).findByRole("form");
     expect(
-      within(file).queryByRole("button", { name: /Reseal all/ }),
+      within(file).queryByRole("button", { name: /Reseal All/ }),
     ).not.toBeInTheDocument();
   });
 });
@@ -581,13 +581,13 @@ function httpError(
   } as never);
 }
 
-/** Starts "Reseal all" on the billing file. */
+/** Starts "Reseal All" on the billing file. */
 async function startReseal() {
   const file = await panel();
-  fireEvent.click(within(file).getByRole("button", { name: /Reseal all/ }));
+  fireEvent.click(within(file).getByRole("button", { name: /Reseal All/ }));
   fireEvent.click(
     within(await screen.findByRole("dialog")).getByRole("button", {
-      name: "Reseal all",
+      name: "Reseal All",
     }),
   );
   return file;
@@ -628,7 +628,7 @@ describe("Reseal all, when something goes wrong", () => {
     });
     await startReseal();
     expect(
-      await screen.findByRole("dialog", { name: "Resealed 1 value" }),
+      await screen.findByRole("dialog", { name: "Resealed 1 Value" }),
     ).toBeVisible();
     expect(reseals(api)).toHaveLength(1);
   });
@@ -670,7 +670,7 @@ describe("Reseal all, when something goes wrong", () => {
     ).toBeVisible();
     await screen.findByRole(
       "dialog",
-      { name: "Resealed 1 value" },
+      { name: "Resealed 1 Value" },
       {
         timeout: 3000,
       },
@@ -694,7 +694,7 @@ describe("Reseal all, when something goes wrong", () => {
     });
     await startReseal();
     const ask = await screen.findByRole("dialog", {
-      name: "Reseal all values in this file?",
+      name: "Reseal All Values in This File?",
     });
     expect(within(ask).getByRole("alert")).toHaveTextContent(
       "Lost track of the reseal: You need write access to example-org/apps. If it finishes, its changes join your pending changes.",
@@ -714,7 +714,7 @@ describe("Reseal all, when something goes wrong", () => {
     renderAt(PAGE, api);
     await startReseal();
     const ask = await screen.findByRole("dialog", {
-      name: "Reseal all values in this file?",
+      name: "Reseal All Values in This File?",
     });
     expect(await within(ask).findByRole("alert")).toHaveTextContent(
       "Your session ended: it expired, or its changes were discarded or sent in a pull request. Reseal the file again to start a new one.",
@@ -723,7 +723,7 @@ describe("Reseal all, when something goes wrong", () => {
     expect(
       screen.getByRole("region", { name: /pending changes/i, hidden: true }),
     ).toHaveTextContent(/Nothing sealed yet/);
-    fireEvent.click(within(ask).getByRole("button", { name: "Reseal all" }));
+    fireEvent.click(within(ask).getByRole("button", { name: "Reseal All" }));
     await waitFor(() => expect(reseals(api)).toHaveLength(2));
     expect(
       api.calls.filter((c) => c.method === "POST").map((c) => c.url),
@@ -753,7 +753,7 @@ describe("Reseal all, when something goes wrong", () => {
     fireEvent.click(within(running).getByText("Close", { selector: "button" }));
     const pending = screen.getByRole("region", { name: /pending changes/i });
     const open = within(pending).getByRole("button", {
-      name: "Open pull request",
+      name: "Open Pull Request",
     });
     expect(open).toBeDisabled();
     expect(open).toHaveAccessibleDescription(
@@ -793,7 +793,7 @@ describe("Reseal all, when something goes wrong", () => {
     // the other repository's file at the same path is not resealing
     const file = await panel();
     expect(
-      within(file).getByRole("button", { name: "Reseal all" }),
+      within(file).getByRole("button", { name: "Reseal All" }),
     ).toBeVisible();
     expect(
       within(file).queryByRole("button", { name: /Resealing/ }),
@@ -816,7 +816,7 @@ describe("Reseal all, when something goes wrong", () => {
     const file = await panel();
     await waitFor(() =>
       expect(
-        availability(within(file).getByRole("button", { name: /Reseal all/ })),
+        availability(within(file).getByRole("button", { name: /Reseal All/ })),
       ).toBe(
         "Couldn't check whether values can be resealed: The control plane is starting. Trying again.",
       ),

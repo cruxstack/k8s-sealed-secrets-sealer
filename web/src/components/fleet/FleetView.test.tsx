@@ -169,7 +169,7 @@ describe("FleetView", () => {
     });
     expect(within(banner).getByText("dev")).toBeInTheDocument();
     expect(
-      within(banner).getByRole("heading", { name: "Keys in sync" }),
+      within(banner).getByRole("heading", { name: "Keys in Sync" }),
     ).toBeInTheDocument();
     // when it became valid, as a relative time with the date in its title
     const valid = banner.querySelector("time");
@@ -201,8 +201,8 @@ describe("FleetView", () => {
       "Health",
       "Keys",
       "Missing",
-      "Active key",
-      "Sealed values",
+      "Active Key",
+      "Sealed Values",
     ]);
     const name = within(row("use1-blue")).getByRole("button", {
       name: "use1-blue",
@@ -252,7 +252,7 @@ describe("FleetView", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/keys out of sync/i);
     // sealing is unavailable: destructive, as in the header and workspace
-    expect(within(alert).getByText("Sealing unavailable")).toHaveClass(
+    expect(within(alert).getByText("Sealing Unavailable")).toHaveClass(
       "text-destructive",
     );
     // it points at the column that says what each cluster lacks
@@ -312,7 +312,7 @@ describe("FleetView", () => {
     // health, which opens them in the agent's details, without the one the
     // badge already says
     const count = within(row("use1-green")).getByRole("button", {
-      name: "1 issue",
+      name: "1 Issue",
     });
     expect(count).toHaveClass("text-warning");
     fireEvent.click(count);
@@ -329,7 +329,7 @@ describe("FleetView", () => {
     ).not.toBeInTheDocument();
     const never = row("use2-blue");
     // red, as the conventions say: an agent that never checked in can't seal
-    expect(within(never).getByText("Never checked in")).toHaveClass(
+    expect(within(never).getByText("Never Checked In")).toHaveClass(
       "text-destructive",
     );
     // the badge says it all
@@ -410,7 +410,7 @@ describe("FleetView", () => {
     expect(screen.getByText("3 keys, 1 revoked")).toBeInTheDocument();
 
     const env = keyRow(KEY_B.fingerprint);
-    expect(within(env).getByText("Env key")).toBeInTheDocument();
+    expect(within(env).getByText("Env Key")).toBeInTheDocument();
     expect(within(env).getByText("2 of 2")).toBeInTheDocument();
     expect(within(env).getByText("2")).toHaveAttribute(
       "title",
@@ -460,7 +460,7 @@ describe("FleetView", () => {
     );
     await screen.findByRole("heading", { name: "Keys" });
     const row = keyRow(planted.fingerprint);
-    expect(within(row).getByText("Future-dated")).toBeInTheDocument();
+    expect(within(row).getByText("Future-Dated")).toBeInTheDocument();
     expect(within(row).getByText("0")).toHaveClass("text-warning");
   });
 
@@ -473,7 +473,7 @@ describe("FleetView", () => {
       }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Revoke this key?",
+      name: "Revoke This Key?",
     });
     // what it does, and what it does not
     expect(dialog).toHaveTextContent(/it is the env key/i);
@@ -486,10 +486,10 @@ describe("FleetView", () => {
     // nothing is sent until it is confirmed
     expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke key" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke Key" }));
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: "Revoke this key?" }),
+        screen.queryByRole("dialog", { name: "Revoke This Key?" }),
       ).not.toBeInTheDocument(),
     );
     const posts = api.calls.filter((c) => c.method === "POST");
@@ -518,7 +518,7 @@ describe("FleetView", () => {
     );
     const dialog = await screen.findByRole("dialog");
     expect(dialog).not.toHaveTextContent(/it is the env key/i);
-    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke key" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke Key" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not revoke the key: only admins can do this",
     );
@@ -533,7 +533,7 @@ describe("FleetView", () => {
       }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Reinstate this key?",
+      name: "Reinstate This Key?",
     });
     // what reinstating does: restores it, and may make it the env key
     expect(dialog).toHaveTextContent(/restored to every cluster/i);
@@ -541,7 +541,7 @@ describe("FleetView", () => {
     // nothing is sent until it is confirmed
     expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Reinstate key" }),
+      within(dialog).getByRole("button", { name: "Reinstate Key" }),
     );
     await waitFor(() =>
       expect(api.calls.filter((c) => c.method === "POST")).toEqual([
@@ -565,8 +565,8 @@ describe("FleetView", () => {
       name: "Env key",
     });
     const alert = within(banner).getByRole("alert");
-    expect(alert).toHaveTextContent("New key needed");
-    expect(alert).toHaveTextContent("Sealing unavailable");
+    expect(alert).toHaveTextContent("New Key Needed");
+    expect(alert).toHaveTextContent("Sealing Unavailable");
     expect(alert).toHaveTextContent(/revoked or not valid yet/);
     expect(alert).not.toHaveTextContent(/keys out of sync/i);
   });
@@ -900,7 +900,7 @@ describe("FleetView key references and deletion", () => {
       name: "Sealing keys in this env",
     });
     expect(within(keys).queryByTitle(KEY_A.fingerprint)).toBeNull();
-    const section = screen.getByRole("region", { name: "Deleted keys" });
+    const section = screen.getByRole("region", { name: "Deleted Keys" });
     expect(within(section).getByText("1 key")).toBeInTheDocument();
     const deleted = within(section).getByRole("table", {
       name: "Deleted sealing keys in this env",
@@ -911,7 +911,7 @@ describe("FleetView key references and deletion", () => {
         .map((h) => h.textContent),
     ).toEqual([
       "Key",
-      "Valid from",
+      "Valid From",
       "Deleted",
       "Escrow",
       "Clusters",
@@ -924,7 +924,7 @@ describe("FleetView key references and deletion", () => {
     renderFleet(countedFleet(revokedKey()));
     expect(await screen.findByText("2 keys, 1 revoked")).toBeInTheDocument();
     expect(
-      screen.queryByRole("region", { name: "Deleted keys" }),
+      screen.queryByRole("region", { name: "Deleted Keys" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1002,7 +1002,7 @@ describe("FleetView key references and deletion", () => {
     fireEvent.click(within(row).getByRole("button", { name: /delete key/i }));
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Delete this key?",
+      name: "Delete This Key?",
     });
     // what it does
     expect(dialog).toHaveTextContent(
@@ -1032,12 +1032,12 @@ describe("FleetView key references and deletion", () => {
     // nothing is sent until it is confirmed
     expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
 
-    const confirm = within(dialog).getByRole("button", { name: "Delete key" });
+    const confirm = within(dialog).getByRole("button", { name: "Delete Key" });
     expect(confirm).toHaveClass("bg-destructive");
     fireEvent.click(confirm);
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: "Delete this key?" }),
+        screen.queryByRole("dialog", { name: "Delete This Key?" }),
       ).not.toBeInTheDocument(),
     );
     expect(api.calls.filter((c) => c.method === "POST")).toEqual([
@@ -1076,7 +1076,7 @@ describe("FleetView key references and deletion", () => {
       }),
     );
     const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Delete key" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete Key" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not delete the key: use2-blue has not counted references since the key was revoked.",
     );
@@ -1116,7 +1116,7 @@ describe("FleetView key references and deletion", () => {
     const api = renderFleet(
       countedFleet(deletedKey({ holders: ["use2-blue"] })),
     );
-    await screen.findByRole("heading", { name: "Deleted keys" });
+    await screen.findByRole("heading", { name: "Deleted Keys" });
     const row = keyRow(KEY_C.fingerprint);
     expect(row.closest("table")).toHaveAccessibleName(
       "Deleted sealing keys in this env",
@@ -1143,7 +1143,7 @@ describe("FleetView key references and deletion", () => {
       within(row).getByRole("button", { name: /reinstate key/i }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Reinstate this deleted key?",
+      name: "Reinstate This Deleted Key?",
     });
     expect(dialog).toHaveTextContent(
       /key sync restores it from escrow to every cluster; each controller restarts once to load it/,
@@ -1152,7 +1152,7 @@ describe("FleetView key references and deletion", () => {
     expect(dialog).toHaveTextContent(/may become the env key/i);
     expect(dialog).toHaveTextContent(/only if it was deleted by mistake/);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Reinstate key" }),
+      within(dialog).getByRole("button", { name: "Reinstate Key" }),
     );
     await waitFor(() =>
       expect(api.calls.filter((c) => c.method === "POST")).toEqual([
@@ -1171,7 +1171,7 @@ describe("FleetView key references and deletion", () => {
 
   it("shows a deleted key no cluster holds, waiting for its escrow purge", async () => {
     renderFleet(countedFleet(deletedKey()));
-    await screen.findByRole("heading", { name: "Deleted keys" });
+    await screen.findByRole("heading", { name: "Deleted Keys" });
     const row = keyRow(KEY_C.fingerprint);
     expect(row).toHaveTextContent("purged in 29d");
     expect(row).not.toHaveTextContent(/removing/);
@@ -1218,7 +1218,7 @@ describe("FleetView key references and deletion", () => {
     );
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Reinstate key" }),
+      within(dialog).getByRole("button", { name: "Reinstate Key" }),
     );
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not reinstate the key: Its escrowed copies were purged; it cannot be reinstated.",

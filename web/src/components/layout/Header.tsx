@@ -216,7 +216,7 @@ function EnvSwitcher({ env, envs }: { env: EnvAccess; envs: EnvAccess[] }) {
             <span className="font-medium">{e.name}</span>
             {e.admin && (
               <span className="ml-auto text-xs text-muted-foreground">
-                admin
+                Admin
               </span>
             )}
           </DropdownMenuItem>
@@ -337,7 +337,7 @@ export function Header() {
                         <Server className="mr-2 h-4 w-4" aria-hidden="true" />
                         Fleet
                         <span className="ml-auto text-xs text-muted-foreground">
-                          admin
+                          Admin
                         </span>
                       </Link>
                     </DropdownMenuItem>
@@ -349,7 +349,7 @@ export function Header() {
                         />
                         Reseal
                         <span className="ml-auto text-xs text-muted-foreground">
-                          admin
+                          Admin
                         </span>
                       </Link>
                     </DropdownMenuItem>
@@ -361,7 +361,7 @@ export function Header() {
                   disabled={logout.isPending}
                 >
                   <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
-                  Sign out
+                  Sign Out
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

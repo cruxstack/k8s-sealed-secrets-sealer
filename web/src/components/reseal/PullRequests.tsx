@@ -78,10 +78,10 @@ function countText(filter: PullRequestFilter, n: number): string {
 }
 
 const EMPTY: Record<PullRequestFilter, string> = {
-  open: "No open reseal pull requests",
-  merged: "No merged reseal pull requests",
-  closed: "No closed reseal pull requests",
-  all: "No reseal pull requests",
+  open: "No Open Reseal Pull Requests",
+  merged: "No Merged Reseal Pull Requests",
+  closed: "No Closed Reseal Pull Requests",
+  all: "No Reseal Pull Requests",
 };
 
 /**
@@ -292,7 +292,7 @@ export function PullRequestSection({
     <section aria-labelledby="reseal-prs-heading" className="space-y-3">
       <SectionHeading
         id="reseal-prs-heading"
-        title="Reseal pull requests"
+        title="Reseal Pull Requests"
         count={data ? countText(filter, prs.length) : undefined}
         aside={
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -311,7 +311,7 @@ export function PullRequestSection({
         <Alert
           variant="destructive"
           role="alert"
-          heading="Could not load the reseal pull requests"
+          heading="Could Not Load the Reseal Pull Requests"
         >
           {sentence(extractApiError(error))}
         </Alert>
@@ -329,10 +329,10 @@ export function PullRequestSection({
             <TableHeader>
               <tr>
                 <TableHead>Repository</TableHead>
-                <TableHead>Pull request</TableHead>
+                <TableHead>Pull Request</TableHead>
                 <TableHead>Source</TableHead>
                 <TableHead className="text-right">Values</TableHead>
-                <TableHead>From keys</TableHead>
+                <TableHead>From Keys</TableHead>
                 <TableHead>Opened</TableHead>
                 <TableHead>State</TableHead>
                 <TableHead>Checked</TableHead>

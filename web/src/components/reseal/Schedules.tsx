@@ -90,7 +90,7 @@ function ScheduleActions({
   return (
     <span className="inline-flex items-center gap-1">
       <IconButton
-        label="Run now"
+        label="Run Now"
         reason={busy === "run" ? "Starting a run…" : runReason}
         aria-label={`Run ${name} now`}
         className="text-muted-foreground"
@@ -269,7 +269,7 @@ function DeleteScheduleDialog({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Delete this schedule?</DialogTitle>
+        <DialogTitle>Delete This Schedule?</DialogTitle>
         <DialogDescription>
           <span className="font-medium text-foreground">{schedule.name}</span>{" "}
           stops running. To stop it for a while instead, pause it.
@@ -289,7 +289,7 @@ function DeleteScheduleDialog({
       <Confirm
         request={request}
         failed="delete the schedule"
-        label="Delete schedule"
+        label="Delete Schedule"
         destructive
         onConfirm={onConfirm}
       />
@@ -408,7 +408,7 @@ export function ScheduleSection({
       onClick={() => setEditing({})}
     >
       <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" />
-      New schedule
+      New Schedule
     </ReasonButton>
   );
 
@@ -449,12 +449,12 @@ export function ScheduleSection({
         <Alert
           variant="destructive"
           role="alert"
-          heading="Could not load the schedules"
+          heading="Could Not Load the Schedules"
         >
           {sentence(extractApiError(error))}
         </Alert>
       ) : schedules.length === 0 ? (
-        <EmptyState icon={CalendarClock} title="No schedules">
+        <EmptyState icon={CalendarClock} title="No Schedules">
           A schedule reseals every value in its repositories, and in every
           repository of its orgs, every so many days, with a pull request per
           repository. Create one to keep values on the env key.
@@ -467,8 +467,8 @@ export function ScheduleSection({
               <TableHead>Name</TableHead>
               <TableHead>Scope</TableHead>
               <TableHead>Every</TableHead>
-              <TableHead>Next run</TableHead>
-              <TableHead>Last run</TableHead>
+              <TableHead>Next Run</TableHead>
+              <TableHead>Last Run</TableHead>
               <TableHead className="w-px text-right">Actions</TableHead>
             </tr>
           </TableHeader>

@@ -148,7 +148,7 @@ describe("auth routing", () => {
     renderApp("/fleet");
 
     expect(
-      await screen.findByRole("heading", { name: "The fleet is for admins" }),
+      await screen.findByRole("heading", { name: "The Fleet Is for Admins" }),
     ).toBeInTheDocument();
     expect(api.calls.map((c) => c.url)).not.toContain("/fleet");
   });
@@ -161,7 +161,7 @@ describe("auth routing", () => {
       await screen.findByRole("heading", { name: "Agents" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("The fleet is for admins"),
+      screen.queryByText("The Fleet Is for Admins"),
     ).not.toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute(
@@ -178,7 +178,7 @@ describe("auth routing", () => {
     renderApp("/dev/no-such-page");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Page not found" }),
+      await screen.findByRole("heading", { level: 1, name: "Page Not Found" }),
     ).toBeInTheDocument();
     expect(screen.getByText("/dev/no-such-page")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Go to Secrets" })).toHaveAttribute(
@@ -195,7 +195,7 @@ describe("auth routing", () => {
     apiClient.defaults.adapter = fakeApi({ me: ME }).adapter;
     renderApp("/dev/secrets/example-org/apps/extra/parts");
     expect(
-      await screen.findByRole("heading", { level: 1, name: "Page not found" }),
+      await screen.findByRole("heading", { level: 1, name: "Page Not Found" }),
     ).toBeInTheDocument();
   });
 
@@ -227,7 +227,7 @@ describe("auth routing", () => {
     renderApp("/prod/secrets/example-org/apps");
     expect(
       await screen.findByRole("heading", {
-        name: "You can't use the prod env",
+        name: "You Can't Use the prod Env",
       }),
     ).toBeInTheDocument();
     // the way forward is a button-styled link

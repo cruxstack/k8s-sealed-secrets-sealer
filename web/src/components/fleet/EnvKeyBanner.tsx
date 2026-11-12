@@ -55,10 +55,10 @@ export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
           <div className="space-y-0.5">
             <h2 className="text-lg font-semibold">
               {inSync
-                ? "Keys in sync"
+                ? "Keys in Sync"
                 : fleet.no_usable_key
-                  ? "New key needed"
-                  : "Keys out of sync"}
+                  ? "New Key Needed"
+                  : "Keys Out of Sync"}
             </h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               {inSync ? (
@@ -84,21 +84,21 @@ export function EnvKeyBanner({ fleet }: { fleet: Fleet }) {
 
         {inSync && key ? (
           <dl className="grid shrink-0 grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 text-sm">
-            <dt className="text-muted-foreground">Env key</dt>
+            <dt className="text-muted-foreground">Env Key</dt>
             <dd className="flex items-center gap-1">
               <code className="font-mono" title={key.fingerprint}>
                 {shortFingerprint(key.fingerprint)}
               </code>
               <CopyButton value={key.fingerprint} label="env key fingerprint" />
             </dd>
-            <dt className="text-muted-foreground">Valid from</dt>
+            <dt className="text-muted-foreground">Valid From</dt>
             <dd>
               <RelativeTime iso={key.not_before} />
             </dd>
           </dl>
         ) : (
           <Badge variant="destructive" className="shrink-0 self-start text-xs">
-            Sealing unavailable
+            Sealing Unavailable
           </Badge>
         )}
       </CardContent>

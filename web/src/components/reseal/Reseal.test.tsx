@@ -106,7 +106,7 @@ describe("reseal page access", () => {
     expect(
       await screen.findByRole("heading", {
         level: 1,
-        name: "Resealing is for admins",
+        name: "Resealing Is for Admins",
       }),
     ).toBeInTheDocument();
     expect(
@@ -144,9 +144,9 @@ describe("reseal page access", () => {
     const headings = screen
       .getAllByRole("heading", { level: 2 })
       .map((h) => h.textContent);
-    expect(headings).toEqual(["Reseal pull requests", "Schedules", "Runs"]);
+    expect(headings).toEqual(["Reseal Pull Requests", "Schedules", "Runs"]);
     expect(
-      screen.queryByText(/can't be resealed in dev/),
+      screen.queryByText(/Can't Be Resealed in dev/),
     ).not.toBeInTheDocument();
   });
 
@@ -162,7 +162,7 @@ describe("reseal page access", () => {
       },
     );
     const alert = (
-      await screen.findByText("Values can't be resealed in dev right now")
+      await screen.findByText("Values Can't Be Resealed in dev Right Now")
     ).closest("[role=status]") as HTMLElement;
     expect(alert).toHaveTextContent(/No agent has the reseal capability\./);
     // Run now says the same where it is grayed out
@@ -210,7 +210,7 @@ describe("reseal pull requests", () => {
 
   it("lists the open ones by default, oldest first, with what each moves", async () => {
     const { api } = await renderReseal({ pullRequests: ALL });
-    const table = await within(section("Reseal pull requests")).findByRole(
+    const table = await within(section("Reseal Pull Requests")).findByRole(
       "table",
       { name: "Reseal pull requests" },
     );
@@ -223,7 +223,7 @@ describe("reseal pull requests", () => {
         .map((h) => h.textContent),
     ).toEqual(["example-org/platform", "example-org/apps"]);
     expect(
-      within(section("Reseal pull requests")).getByText("2 open"),
+      within(section("Reseal Pull Requests")).getByText("2 open"),
     ).toBeVisible();
 
     const old = rowOf(table, "example-org/platform");
@@ -262,7 +262,7 @@ describe("reseal pull requests", () => {
 
   it("shows merged, closed and all with the filter", async () => {
     const { api } = await renderReseal({ pullRequests: ALL });
-    const prs = section("Reseal pull requests");
+    const prs = section("Reseal Pull Requests");
     await within(prs).findByRole("table");
     const filter = within(prs).getByRole("group", {
       name: "Pull requests to show",
@@ -297,7 +297,7 @@ describe("reseal pull requests", () => {
 
   it("counts those in repositories the viewer can't read", async () => {
     await renderReseal({ pullRequests: [OPEN_NEW], hidden: 2 });
-    const prs = section("Reseal pull requests");
+    const prs = section("Reseal Pull Requests");
     await within(prs).findByRole("table");
     expect(
       within(prs).getByText("2 more are in repositories you can't read."),
@@ -306,9 +306,9 @@ describe("reseal pull requests", () => {
 
   it("says when there are none, and when some are hidden", async () => {
     await renderReseal({ pullRequests: [MERGED], hidden: 1 });
-    const prs = section("Reseal pull requests");
+    const prs = section("Reseal Pull Requests");
     expect(
-      await within(prs).findByText("No open reseal pull requests"),
+      await within(prs).findByText("No Open Reseal Pull Requests"),
     ).toBeVisible();
     expect(prs).toHaveTextContent(
       "1 is in a repository you can't read, so it isn't listed.",
@@ -409,10 +409,10 @@ describe("reseal schedules", () => {
   it("creates a schedule, with chips for its repositories and orgs", async () => {
     const { api } = await renderReseal({ schedules: [] });
     expect(
-      await within(section("Schedules")).findByText("No schedules"),
+      await within(section("Schedules")).findByText("No Schedules"),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog", { name: "New schedule" });
+    fireEvent.click(screen.getByRole("button", { name: "New Schedule" }));
+    const dialog = await screen.findByRole("dialog", { name: "New Schedule" });
     const name = within(dialog).getByLabelText("Name");
     const repos = within(dialog).getByLabelText("Repositories");
     const orgs = within(dialog).getByLabelText("Orgs");
@@ -482,9 +482,9 @@ describe("reseal schedules", () => {
 
   it("says what is wrong before sending, and sends nothing", async () => {
     const { api } = await renderReseal({ schedules: [] });
-    await screen.findByText("No schedules");
-    fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog", { name: "New schedule" });
+    await screen.findByText("No Schedules");
+    fireEvent.click(screen.getByRole("button", { name: "New Schedule" }));
+    const dialog = await screen.findByRole("dialog", { name: "New Schedule" });
     const repos = within(dialog).getByLabelText("Repositories");
     // a repository that is not owner/name stays typed, with why
     fireEvent.change(repos, { target: { value: "apps" } });
@@ -500,7 +500,7 @@ describe("reseal schedules", () => {
     });
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Create schedule" }),
+      within(dialog).getByRole("button", { name: "Create Schedule" }),
     );
     expect(within(dialog).getByText("Name the schedule.")).toBeVisible();
     expect(
@@ -533,9 +533,9 @@ describe("reseal schedules", () => {
         error: "an env has at most 50 schedules",
       },
     });
-    await screen.findByText("No schedules");
-    fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog", { name: "New schedule" });
+    await screen.findByText("No Schedules");
+    fireEvent.click(screen.getByRole("button", { name: "New Schedule" }));
+    const dialog = await screen.findByRole("dialog", { name: "New Schedule" });
     fireEvent.change(within(dialog).getByLabelText("Name"), {
       target: { value: "Platform" },
     });
@@ -543,7 +543,7 @@ describe("reseal schedules", () => {
       target: { value: "example-org" },
     });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Create schedule" }),
+      within(dialog).getByRole("button", { name: "Create Schedule" }),
     );
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not create the schedule: An env has at most 50 schedules.",
@@ -562,14 +562,14 @@ describe("reseal schedules", () => {
       },
     });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Apps" }));
-    const dialog = await screen.findByRole("dialog", { name: "Edit schedule" });
+    const dialog = await screen.findByRole("dialog", { name: "Edit Schedule" });
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Remove example-org/apps" }),
     );
     const repos = within(dialog).getByLabelText("Repositories");
     fireEvent.change(repos, { target: { value: "example-org/gone" } });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Save changes" }),
+      within(dialog).getByRole("button", { name: "Save Changes" }),
     );
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not save the schedule: Repository example-org/gone is not one the GitHub App can reach.",
@@ -579,7 +579,7 @@ describe("reseal schedules", () => {
   it("edits a schedule, sending only what changed", async () => {
     const { api } = await renderReseal({ schedules: [APPS] });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Apps" }));
-    const dialog = await screen.findByRole("dialog", { name: "Edit schedule" });
+    const dialog = await screen.findByRole("dialog", { name: "Edit Schedule" });
     expect(within(dialog).getByLabelText("Name")).toHaveValue("Apps");
     expect(within(dialog).getByLabelText("Every")).toHaveValue(75);
     // its next run stays while its interval does
@@ -590,7 +590,7 @@ describe("reseal schedules", () => {
     expect(dialog).toHaveTextContent("90 days ≈ 3 months");
     expect(dialog).toHaveTextContent(/Next run in 90 days, on /);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Save changes" }),
+      within(dialog).getByRole("button", { name: "Save Changes" }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -628,12 +628,12 @@ describe("reseal schedules", () => {
     });
     fireEvent.click(await screen.findByRole("button", { name: "Delete Apps" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Delete this schedule?",
+      name: "Delete This Schedule?",
     });
     expect(dialog).toHaveTextContent("Its run in progress is cancelled.");
     expect(dialog).toHaveTextContent(/Pull requests its runs opened stay open/);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Delete schedule" }),
+      within(dialog).getByRole("button", { name: "Delete Schedule" }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -642,7 +642,7 @@ describe("reseal schedules", () => {
       "/reseal/schedules/sch-apps",
     );
     expect(
-      await within(section("Schedules")).findByText("No schedules"),
+      await within(section("Schedules")).findByText("No Schedules"),
     ).toBeVisible();
     // its run shows as cancelled
     expect(
@@ -671,7 +671,7 @@ describe("reseal schedules", () => {
     // the run shows under Runs, by whom
     const runs = section("Runs");
     const row = await within(runs).findByRole("rowheader", { name: "Apps" });
-    expect(row.closest("tr")).toHaveTextContent(/QueuedRun nowby octocat/);
+    expect(row.closest("tr")).toHaveTextContent(/QueuedRun Nowby octocat/);
   });
 
   it("says why a run could not start", async () => {
@@ -700,7 +700,7 @@ describe("reseal schedules", () => {
     });
     await schedulesTable();
     expect(
-      availability(screen.getByRole("button", { name: "New schedule" })),
+      availability(screen.getByRole("button", { name: "New Schedule" })),
     ).toBe("An env has at most 50 schedules. Delete one first.");
   });
 });
@@ -764,7 +764,7 @@ describe("reseal runs", () => {
     ]);
 
     const running = runRow("run-6");
-    expect(running).toHaveTextContent("Run nowby bob");
+    expect(running).toHaveTextContent("Run Nowby bob");
     // started 90s before the fixtures were made; the page reads the clock
     // when it renders, a few seconds later on a slow runner
     expect(running).toHaveTextContent(/1m \d+s so far/);
@@ -807,12 +807,12 @@ describe("reseal runs", () => {
       }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Cancel this run?",
+      name: "Cancel This Run?",
     });
     expect(dialog).toHaveTextContent(
       "Pull requests it already opened stay open.",
     );
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel run" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel Run" }));
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -889,7 +889,7 @@ describe("reseal runs", () => {
       name: "Repositories in the run of Apps",
     });
     const opened = rowOf(repos, "example-org/apps");
-    expect(within(opened).getByText("PR opened")).toBeVisible();
+    expect(within(opened).getByText("PR Opened")).toBeVisible();
     expect(within(opened).getByRole("link", { name: /#12/ })).toHaveAttribute(
       "href",
       "https://github.com/example-org/apps/pull/12",
@@ -981,7 +981,7 @@ describe("reseal runs", () => {
   it("says when there are no runs", async () => {
     await renderReseal({ runs: [] });
     expect(
-      await within(section("Runs")).findByText("No runs yet"),
+      await within(section("Runs")).findByText("No Runs Yet"),
     ).toBeVisible();
   });
 });
@@ -1088,7 +1088,7 @@ describe("reseal page, after review", () => {
     );
     expect(
       await screen.findByText(
-        "Couldn't check whether values can be resealed in dev",
+        "Couldn't Check Whether Values Can Be Resealed in dev",
       ),
     ).toBeVisible();
     await waitFor(() =>
@@ -1150,8 +1150,8 @@ describe("reseal page, after review", () => {
     );
     fireEvent.click(
       within(
-        await screen.findByRole("dialog", { name: "Cancel this run?" }),
-      ).getByRole("button", { name: "Cancel run" }),
+        await screen.findByRole("dialog", { name: "Cancel This Run?" }),
+      ).getByRole("button", { name: "Cancel Run" }),
     );
     await screen.findByText("Cancelled the run of Apps");
     expect(
@@ -1176,8 +1176,8 @@ describe("reseal page, after review", () => {
       ],
       pullRequests: [],
     });
-    const prs = section("Reseal pull requests");
-    await within(prs).findByText("No open reseal pull requests");
+    const prs = section("Reseal Pull Requests");
+    await within(prs).findByText("No Open Reseal Pull Requests");
     expect(
       within(section("Runs")).getByText("Refreshes every 10 seconds"),
     ).toBeVisible();

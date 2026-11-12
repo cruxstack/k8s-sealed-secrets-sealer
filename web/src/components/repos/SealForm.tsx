@@ -340,7 +340,7 @@ export function SealForm({
       className="space-y-4 border-t border-border bg-muted/25 p-4"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h3 className="text-sm font-semibold">Seal a value</h3>
+        <h3 className="text-sm font-semibold">Seal a Value</h3>
         <p className="text-xs text-muted-foreground">
           {targets.length === 1
             ? `Sealed for the document${where} below`
@@ -443,7 +443,7 @@ export function SealForm({
                 disabled={busy}
                 onClick={() => setChosen(choices)}
               >
-                All regions
+                All Regions
               </Button>
             )}
           </div>

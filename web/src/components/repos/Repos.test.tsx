@@ -70,7 +70,7 @@ describe("repositories", () => {
     const platform = screen
       .getByRole("rowheader", { name: "example-org/platform" })
       .closest("tr") as HTMLElement;
-    expect(within(platform).getByText("Read only")).toBeInTheDocument();
+    expect(within(platform).getByText("Read Only")).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getByRole("link", { name: "Secrets" })).toHaveAttribute(
@@ -108,7 +108,7 @@ describe("repositories", () => {
       }),
     );
     const recent = await screen.findByRole("region", {
-      name: "Recent repositories",
+      name: "Recent Repositories",
     });
     // pending changes first, then the latest seals
     await waitFor(() =>
@@ -117,7 +117,7 @@ describe("repositories", () => {
       ),
     );
     const [apps] = within(recent).getAllByRole("link");
-    expect(apps).toHaveTextContent("2 pending changes");
+    expect(apps).toHaveTextContent("2 Pending Changes");
     expect(apps).toHaveAttribute("href", "/dev/secrets/example-org/apps");
     const platform = within(recent).getAllByRole("link")[1] as HTMLElement;
     expect(platform).toHaveTextContent("example-org/platform");
@@ -140,7 +140,7 @@ describe("repositories", () => {
     );
     await screen.findByRole("rowheader", { name: "example-org/apps" });
     expect(
-      screen.queryByRole("region", { name: "Recent repositories" }),
+      screen.queryByRole("region", { name: "Recent Repositories" }),
     ).not.toBeInTheDocument();
   });
 
@@ -209,12 +209,12 @@ describe("repositories", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       /some repositories may be missing/i,
     );
-    expect(screen.queryByText("No repositories")).not.toBeInTheDocument();
+    expect(screen.queryByText("No Repositories")).not.toBeInTheDocument();
   });
 
   it("explains an empty list and shows errors", async () => {
     renderAt("/secrets", fakeApi({ me: ME, repos: [] }));
-    expect(await screen.findByText("No repositories")).toBeInTheDocument();
+    expect(await screen.findByText("No Repositories")).toBeInTheDocument();
   });
 
   it("shows the server's message when GitHub fails", async () => {
@@ -240,7 +240,7 @@ describe("repositories", () => {
       "deploy/billing/sealed-secret.yaml2 documents · use1, use2",
     );
     expect(buttons[1]).toHaveAccessibleName(
-      "deploy/legacy/sealed-secret.yaml1 document · Can't seal",
+      "deploy/legacy/sealed-secret.yaml1 document · Can't Seal",
     );
     expect(buttons[2]).toHaveAccessibleName(
       "deploy/broken/sealed-secret.yamlUnreadable",
@@ -350,7 +350,7 @@ describe("repositories", () => {
     ).toBeInTheDocument();
     // one in the field, which replaces its shortcut hint, and one with the
     // empty result
-    const clear = screen.getAllByRole("button", { name: "Clear filter" });
+    const clear = screen.getAllByRole("button", { name: "Clear Filter" });
     expect(clear).toHaveLength(2);
     fireEvent.click(clear[1] as HTMLElement);
     expect(filter).toHaveValue("");

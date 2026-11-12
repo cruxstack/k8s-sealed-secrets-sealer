@@ -177,10 +177,10 @@ function Palette({ onDone }: { onDone: () => void }) {
                   hint={
                     <>
                       {count ? (
-                        <Badge variant="info">{count} pending</Badge>
+                        <Badge variant="info">{count} Pending</Badge>
                       ) : null}
                       {r.access === "read" && (
-                        <Badge variant="secondary">Read only</Badge>
+                        <Badge variant="secondary">Read Only</Badge>
                       )}
                     </>
                   }
@@ -203,7 +203,7 @@ function Palette({ onDone }: { onDone: () => void }) {
           </CommandGroup>
         )}
         {env && (
-          <CommandGroup heading="Go to">
+          <CommandGroup heading="Go To">
             <Item
               icon={KeyRound}
               label="Secrets"
@@ -223,7 +223,7 @@ function Palette({ onDone }: { onDone: () => void }) {
               <Item
                 icon={Server}
                 label="Fleet"
-                hint="admin"
+                hint="Admin"
                 value="page:fleet"
                 keywords={["fleet", "agents", "clusters", "keys", "admin"]}
                 onSelect={() =>
@@ -241,7 +241,7 @@ function Palette({ onDone }: { onDone: () => void }) {
               <Item
                 icon={RotateCcwKey}
                 label="Reseal"
-                hint="admin"
+                hint="Admin"
                 value="page:reseal"
                 keywords={[
                   "reseal",
@@ -293,7 +293,7 @@ function Palette({ onDone }: { onDone: () => void }) {
           <Item
             icon={dark ? Sun : Moon}
             label={
-              dark ? "Switch to the light theme" : "Switch to the dark theme"
+              dark ? "Switch to the Light Theme" : "Switch to the Dark Theme"
             }
             value="action:theme"
             keywords={["theme", "dark", "light", "mode"]}
@@ -301,7 +301,7 @@ function Palette({ onDone }: { onDone: () => void }) {
           />
           <Item
             icon={LogOut}
-            label="Sign out"
+            label="Sign Out"
             value="action:sign-out"
             keywords={["sign out", "log out", "logout"]}
             onSelect={() => run(() => logout.mutate())}

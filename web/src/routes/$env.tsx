@@ -35,7 +35,7 @@ function NoAccess({ env }: { env: string }) {
       <EmptyState
         page
         icon={ShieldAlert}
-        title={`You can't use the ${env} env`}
+        title={`You Can't Use the ${env} Env`}
         action={
           envs.length > 0
             ? envs.map((e) => (

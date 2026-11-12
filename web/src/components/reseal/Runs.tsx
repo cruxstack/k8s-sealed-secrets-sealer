@@ -306,7 +306,7 @@ function RunDetail({ id }: { id: string }) {
               <TableHead className="py-2">Status</TableHead>
               <TableHead className="py-2 text-right">Files</TableHead>
               <TableHead className="py-2">Values</TableHead>
-              <TableHead className="py-2">Pull request</TableHead>
+              <TableHead className="py-2">Pull Request</TableHead>
               <TableHead className="py-2">Reason</TableHead>
             </tr>
           </TableHeader>
@@ -382,7 +382,7 @@ function RunRow({
         <TableCell className="whitespace-nowrap">
           {run.trigger === "manual" ? (
             <span className="flex flex-col">
-              <span>Run now</span>
+              <span>Run Now</span>
               <span className="text-xs text-muted-foreground">
                 by {run.requested_by}
               </span>
@@ -464,7 +464,7 @@ function CancelRunDialog({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Cancel this run?</DialogTitle>
+        <DialogTitle>Cancel This Run?</DialogTitle>
         <DialogDescription>
           The run of{" "}
           <span className="font-medium text-foreground">
@@ -493,8 +493,8 @@ function CancelRunDialog({
       <Confirm
         request={request}
         failed="cancel the run"
-        label="Cancel run"
-        dismiss="Keep running"
+        label="Cancel Run"
+        dismiss="Keep Running"
         destructive
         onConfirm={onConfirm}
       />
@@ -521,7 +521,7 @@ function ScheduleFilter({
       id: value,
       name:
         runs.find((r) => r.schedule_id === value)?.schedule_name ??
-        "Deleted schedule",
+        "Deleted Schedule",
     });
   }
   return (
@@ -533,7 +533,7 @@ function ScheduleFilter({
         onChange={(e) => onChange(e.target.value || undefined)}
         className="h-8 max-w-48 rounded-md border border-input bg-card px-2 text-xs text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       >
-        <option value="">All schedules</option>
+        <option value="">All Schedules</option>
         {options.map((o) => (
           <option key={o.id} value={o.id}>
             {o.name}
@@ -653,16 +653,16 @@ export function RunSection({
         <Alert
           variant="destructive"
           role="alert"
-          heading="Could not load the runs"
+          heading="Could Not Load the Runs"
         >
           {sentence(extractApiError(error))}
         </Alert>
       ) : runs.length === 0 ? (
         <EmptyState
           icon={History}
-          title={scheduleId ? "No runs of this schedule yet" : "No runs yet"}
+          title={scheduleId ? "No Runs of This Schedule Yet" : "No Runs Yet"}
         >
-          A schedule runs when it comes due, or when you start one with Run now.
+          A schedule runs when it comes due, or when you start one with Run Now.
         </EmptyState>
       ) : (
         <Table className="[&_td]:align-middle [&_th]:align-middle">

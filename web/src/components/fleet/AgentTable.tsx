@@ -22,7 +22,7 @@ export function agentHealth(agent: FleetAgent): {
 } {
   // an agent that never checked in cannot seal: a failure, not a warning
   if (!agent.checked_in)
-    return { label: "Never checked in", variant: "destructive" };
+    return { label: "Never Checked In", variant: "destructive" };
   if (!agent.healthy) return { label: "Unhealthy", variant: "destructive" };
   return { label: "Healthy", variant: "success" };
 }
@@ -213,7 +213,7 @@ function AgentRow({
               onClick={toggle}
               aria-expanded={open}
               aria-controls={open ? detailId : undefined}
-              title={open ? "Hide details" : "Show details"}
+              title={open ? "Hide Details" : "Show Details"}
               className="group inline-flex items-center gap-1 rounded-sm font-mono text-sm font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               <ChevronRight
@@ -252,7 +252,7 @@ function AgentRow({
                   className="h-3 w-3 shrink-0"
                   aria-hidden="true"
                 />
-                {plural(issues.length, "issue")}
+                {plural(issues.length, "Issue")}
               </button>
             )}
           </span>
@@ -357,7 +357,7 @@ function AgentRow({
                   <Dash />
                 )}
               </dd>
-              <dt className="text-muted-foreground">Sealed values</dt>
+              <dt className="text-muted-foreground">Sealed Values</dt>
               <dd>
                 <CountDetail agent={agent} now={now} />
               </dd>
@@ -411,8 +411,8 @@ export function AgentTable({
           <TableHead>Health</TableHead>
           <TableHead className="text-right">Keys</TableHead>
           <TableHead className="text-right">Missing</TableHead>
-          <TableHead>Active key</TableHead>
-          <TableHead>Sealed values</TableHead>
+          <TableHead>Active Key</TableHead>
+          <TableHead>Sealed Values</TableHead>
         </tr>
       </TableHeader>
       <tbody>

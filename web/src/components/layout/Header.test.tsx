@@ -108,7 +108,7 @@ describe("Header", () => {
     // the icon-only theme toggle says what it does
     expect(
       screen.getByRole("button", { name: "Toggle theme" }),
-    ).toHaveAttribute("title", "Switch to the dark theme");
+    ).toHaveAttribute("title", "Switch to the Dark Theme");
 
     fireEvent.keyDown(trigger, { key: "Enter" });
     await screen.findByRole("menuitem", { name: /sign out/i });
@@ -174,7 +174,7 @@ describe("Header", () => {
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((i) => i.textContent)).toEqual([
       "dev",
-      "prodadmin",
+      "prodAdmin",
       "Fleet",
     ]);
     expect(screen.getByRole("menuitem", { name: /^prod/ })).toHaveAttribute(
