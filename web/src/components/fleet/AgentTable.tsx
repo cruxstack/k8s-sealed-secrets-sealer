@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { sentence, shortFingerprint, timeAgo } from "@/lib/utils";
+import { cn, sentence, shortFingerprint, timeAgo } from "@/lib/utils";
 import { countsReferences, plural } from "./references";
 
 /** Health of one agent, as shown in the table. */
@@ -102,7 +102,6 @@ function KeyUsageCell({ agent, now }: { agent: FleetAgent; now: Date }) {
   const namespaces = usage.namespaces ?? [];
   return (
     // one count per line, wrapping past 8rem, so the column stays narrow
-    // beside the issues and never spills into them
     <div className="max-w-32 space-y-0.5">
       <p className="whitespace-nowrap tabular-nums">
         {plural(usage.values, "value")}
@@ -138,6 +137,9 @@ function KeyUsageCell({ agent, now }: { agent: FleetAgent; now: Date }) {
   );
 }
 
+/** The agent table's columns, for the row of issues under an agent. */
+const COLUMNS = 7;
+
 function AgentRow({
   agent,
   envKey,
@@ -160,139 +162,167 @@ function AgentRow({
   const cluster = agent.cluster !== agent.id ? agent.cluster : "";
 
   return (
-    <TableRow className="align-top">
-      <th
-        scope="row"
-        className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
+    <>
+      <TableRow
+        // the issues under it belong to this row
+        className={cn("align-top", issues.length > 0 && "border-b-0")}
       >
-        {agent.id}
-        {cluster && (
-          <>
-            {" "}
-            <span className="block font-sans text-xs font-normal text-muted-foreground">
-              {cluster}
-            </span>
-          </>
-        )}
-      </th>
-      <TableCell className="whitespace-nowrap">
-        {agent.region ? <RegionTag region={agent.region} /> : <Dash />}
-      </TableCell>
-      <TableCell className="whitespace-nowrap">
-        {/* the time under the badge, as a key's status shows it, so the
-            table fits a laptop with the sealed values column */}
-        <span className="flex flex-col items-start gap-0.5">
-          <Badge variant={health.variant}>{health.label}</Badge>
-          {agent.last_checkin && (
-            <RelativeTime
-              className="text-xs text-muted-foreground"
-              iso={agent.last_checkin}
-              now={now}
-              past
-              describe={(at) => `Last check-in ${at}`}
-            />
+        {/* the agent's region and version sit under its name, so the
+            table fits a laptop without scrolling sideways */}
+        <th
+          scope="row"
+          className="px-4 py-3 text-left font-mono text-sm font-medium whitespace-nowrap"
+        >
+          {agent.id}
+          {cluster && (
+            <>
+              {" "}
+              <span className="block font-sans text-xs font-normal text-muted-foreground">
+                {cluster}
+              </span>
+            </>
           )}
-        </span>
-      </TableCell>
-      <TableCell className="pt-3.5 font-mono text-xs">
-        {agent.agent_version ?? <Dash />}
-      </TableCell>
-      <TableCell>
-        {capabilities.length > 0 ? (
-          <ul className="flex flex-wrap gap-1" aria-label="Capabilities">
-            {capabilities.map((c) => (
-              <li key={c}>
-                <Badge variant="outline">{c}</Badge>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <Dash />
-        )}
-      </TableCell>
-      <TableCell className="text-right tabular-nums">
-        {agent.checked_in ? (
-          <>
-            <KeyCount agent={agent} keyLimit={keyLimit} />
-            {!agent.keys_complete && (
-              <span className="ml-1 text-xs text-muted-foreground">
-                (active only)
-              </span>
-            )}
-          </>
-        ) : (
-          <Dash />
-        )}
-      </TableCell>
-      <TableCell className="text-right whitespace-nowrap tabular-nums">
-        {agent.joining && (
-          <Badge
-            variant="warning"
-            className="mr-2"
-            title={
-              agent.joined_at
-                ? `Joined ${timeAgo(agent.joined_at, now)}; left out of the env key for up to 30 minutes while it restores the env's keys`
-                : undefined
-            }
-          >
-            Joining
-          </Badge>
-        )}
-        {agent.in_scope ? (
-          missing.length > 0 ? (
-            <span
-              className="font-semibold text-warning"
-              title={missing.join("\n")}
-            >
-              {missing.length}
+          {(agent.region || agent.agent_version) && (
+            <span className="mt-1 flex items-center gap-2 font-sans text-xs font-normal text-muted-foreground">
+              {agent.region && <RegionTag region={agent.region} />}
+              {agent.agent_version && (
+                <span title="Agent version">
+                  <span className="sr-only">version </span>
+                  <span className="font-mono">{agent.agent_version}</span>
+                </span>
+              )}
             </span>
-          ) : (
-            "0"
-          )
-        ) : (
-          <Dash />
-        )}
-      </TableCell>
-      <TableCell>
-        {active ? (
-          <span className="flex items-center gap-1.5 whitespace-nowrap">
-            <code className="font-mono text-xs" title={active}>
-              {shortFingerprint(active)}
-            </code>
-            {active === envKey && (
-              <span title="The env key: values are sealed with it">
-                <Check
-                  className="h-3.5 w-3.5 text-success"
-                  aria-hidden="true"
-                />
-                <span className="sr-only">env key</span>
-              </span>
+          )}
+        </th>
+        <TableCell className="whitespace-nowrap">
+          {/* the time under the badge, as a key's status shows it */}
+          <span className="flex flex-col items-start gap-0.5">
+            <Badge variant={health.variant}>{health.label}</Badge>
+            {agent.last_checkin && (
+              <RelativeTime
+                className="text-xs text-muted-foreground"
+                iso={agent.last_checkin}
+                now={now}
+                past
+                describe={(at) => `Last check-in ${at}`}
+              />
             )}
           </span>
-        ) : (
-          <Dash />
-        )}
-      </TableCell>
-      <TableCell>
-        <KeyUsageCell agent={agent} now={now} />
-      </TableCell>
-      {/* issues are sentences: never squeezed to a word a line */}
-      <TableCell className="min-w-40 text-xs">
-        {issues.length > 0 ? (
-          <ul className="list-disc space-y-1 pl-4">
-            {issues.map((issue) => (
-              <li key={issue}>{issue}</li>
-            ))}
-          </ul>
-        ) : (
-          <Dash />
-        )}
-      </TableCell>
-    </TableRow>
+        </TableCell>
+        <TableCell className="text-right whitespace-nowrap tabular-nums">
+          {agent.checked_in ? (
+            <>
+              <KeyCount agent={agent} keyLimit={keyLimit} />
+              {!agent.keys_complete && (
+                <span className="block text-xs text-muted-foreground">
+                  (active only)
+                </span>
+              )}
+            </>
+          ) : (
+            <Dash />
+          )}
+        </TableCell>
+        <TableCell className="text-right whitespace-nowrap tabular-nums">
+          {agent.joining && (
+            <Badge
+              variant="warning"
+              className="mr-2"
+              title={
+                agent.joined_at
+                  ? `Joined ${timeAgo(agent.joined_at, now)}; left out of the env key for up to 30 minutes while it restores the env's keys`
+                  : undefined
+              }
+            >
+              Joining
+            </Badge>
+          )}
+          {agent.in_scope ? (
+            missing.length > 0 ? (
+              <span
+                className="font-semibold text-warning"
+                title={missing.join("\n")}
+              >
+                {missing.length}
+              </span>
+            ) : (
+              "0"
+            )
+          ) : (
+            <Dash />
+          )}
+        </TableCell>
+        <TableCell>
+          {active ? (
+            <span className="flex items-center gap-1.5 whitespace-nowrap">
+              <code className="font-mono text-xs" title={active}>
+                {shortFingerprint(active)}
+              </code>
+              {active === envKey && (
+                <span title="The env key: values are sealed with it">
+                  <Check
+                    className="h-3.5 w-3.5 text-success"
+                    aria-hidden="true"
+                  />
+                  <span className="sr-only">env key</span>
+                </span>
+              )}
+            </span>
+          ) : (
+            <Dash />
+          )}
+        </TableCell>
+        <TableCell>
+          <KeyUsageCell agent={agent} now={now} />
+        </TableCell>
+        <TableCell>
+          {capabilities.length > 0 ? (
+            // two or three a line, so the column stays narrow
+            <ul
+              className="flex max-w-48 min-w-28 flex-wrap gap-1"
+              aria-label="Capabilities"
+            >
+              {capabilities.map((c) => (
+                <li key={c}>
+                  <Badge variant="outline">{c}</Badge>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Dash />
+          )}
+        </TableCell>
+      </TableRow>
+      {issues.length > 0 && (
+        // issues are sentences: they take the table's width in a row under
+        // the agent's, rather than a column that squeezes them a word a line
+        <TableRow>
+          <td colSpan={COLUMNS} className="px-4 pt-0 pb-3">
+            <div className="sticky left-4 flex w-fit max-w-[calc(100vw-4rem)] items-start gap-2 rounded-lg bg-warning-subtle px-3 py-2 text-xs text-warning sm:max-w-3xl">
+              <TriangleAlert
+                className="mt-px h-3.5 w-3.5 shrink-0"
+                aria-hidden="true"
+              />
+              <ul
+                className="space-y-0.5 text-foreground"
+                aria-label={`Issues of ${agent.id}`}
+              >
+                {issues.map((issue) => (
+                  <li key={issue}>{sentence(issue)}</li>
+                ))}
+              </ul>
+            </div>
+          </td>
+        </TableRow>
+      )}
+    </>
   );
 }
 
-/** One row per registered agent. */
+/**
+ * One row per registered agent, with its issues in a row under it that
+ * spans the table.
+ */
 export function AgentTable({
   agents,
   envKey,
@@ -312,15 +342,12 @@ export function AgentTable({
       <TableHeader>
         <tr>
           <TableHead>Agent</TableHead>
-          <TableHead>Region</TableHead>
           <TableHead>Health</TableHead>
-          <TableHead>Version</TableHead>
-          <TableHead>Capabilities</TableHead>
           <TableHead className="text-right">Keys</TableHead>
           <TableHead className="text-right">Missing</TableHead>
           <TableHead>Active key</TableHead>
           <TableHead>Sealed values</TableHead>
-          <TableHead>Issues</TableHead>
+          <TableHead>Capabilities</TableHead>
         </tr>
       </TableHeader>
       <tbody>

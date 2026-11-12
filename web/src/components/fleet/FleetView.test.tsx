@@ -92,10 +92,16 @@ function keyedFleet(overrides: Partial<Fleet> = {}): Fleet {
   };
 }
 
-/** A key's row in the keys table; its header is the short fingerprint. */
+/**
+ * A key's row in the keys table or the deleted keys table; its header is
+ * the short fingerprint.
+ */
 function keyRow(fingerprint: string) {
-  const table = screen.getByRole("table", { name: /sealing keys/i });
-  return within(table).getByTitle(fingerprint).closest("tr") as HTMLElement;
+  const [cell] = screen
+    .getAllByRole("table", { name: /sealing keys/i })
+    .flatMap((t) => within(t).queryAllByTitle(fingerprint));
+  if (!cell) throw new Error(`no key row for ${fingerprint}`);
+  return cell.closest("tr") as HTMLElement;
 }
 
 /**
@@ -174,10 +180,27 @@ describe("FleetView", () => {
     expect(screen.getByText("2 of 2 healthy")).toBeInTheDocument();
     // the agents whose active key is the env key say so
     expect(within(row("use1-blue")).getByText("env key")).toBeInTheDocument();
-    // the cluster shows under the agent when it is named differently
+    // the cluster shows under the agent when it is named differently, then
+    // its region and version, so the table needs no columns for them
     expect(
-      screen.getByRole("rowheader", { name: "use1-blue blue" }),
+      screen.getByRole("rowheader", {
+        // jsdom has no layout to put the lines apart
+        name: /^use1-blue blue\s?use1\s?version\s?v0\.1\.0$/,
+      }),
     ).toBeInTheDocument();
+    expect(
+      within(agentTable)
+        .getAllByRole("columnheader")
+        .map((h) => h.textContent),
+    ).toEqual([
+      "Agent",
+      "Health",
+      "Keys",
+      "Missing",
+      "Active key",
+      "Sealed values",
+      "Capabilities",
+    ]);
   });
 
   it("warns when keys are out of sync and shows missing keys per agent", async () => {
@@ -261,15 +284,24 @@ describe("FleetView", () => {
       within(row("use1-green")).getByText("Unhealthy"),
     ).toBeInTheDocument();
     expect(within(row("use1-green")).getByText("10m ago")).toBeInTheDocument();
+    // issues are sentences, in a row under the agent's that spans the table
+    const issues = screen.getByRole("list", { name: "Issues of use1-green" });
+    expect(issues).toHaveTextContent("Has not checked in recently.");
+    expect((issues.closest("tr") as HTMLElement).previousElementSibling).toBe(
+      row("use1-green"),
+    );
+    expect(issues.closest("td")).toHaveAttribute("colspan", "7");
     expect(
-      within(row("use1-green")).getByText("has not checked in recently"),
-    ).toBeInTheDocument();
+      screen.queryByRole("list", { name: "Issues of use1-blue" }),
+    ).not.toBeInTheDocument();
     const never = row("use2-blue");
     // red, as the conventions say: an agent that never checked in can't seal
     expect(within(never).getByText("Never checked in")).toHaveClass(
       "text-destructive",
     );
-    expect(within(never).getByText("has never checked in")).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "Issues of use2-blue" }),
+    ).toHaveTextContent("Has never checked in.");
     // registered capabilities still show for an agent that never checked in
     expect(within(never).getByText("seal")).toBeInTheDocument();
     // capabilities are sorted, and the region is a tag
@@ -823,14 +855,43 @@ describe("FleetView key references and deletion", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("counts deleted keys in the section heading", async () => {
+  it("lists deleted keys in a table of their own, without references", async () => {
     renderFleet(countedFleet(revokedKey(), deletedKey({ ...KEY_A })));
+    // the keys in use, and the deleted ones apart
+    expect(await screen.findByText("2 keys, 1 revoked")).toBeInTheDocument();
+    const keys = screen.getByRole("table", {
+      name: "Sealing keys in this env",
+    });
+    expect(within(keys).queryByTitle(KEY_A.fingerprint)).toBeNull();
+    const section = screen.getByRole("region", { name: "Deleted keys" });
+    expect(within(section).getByText("1 key")).toBeInTheDocument();
+    const deleted = within(section).getByRole("table", {
+      name: "Deleted sealing keys in this env",
+    });
     expect(
-      await screen.findByText("3 keys, 1 revoked, 1 deleted"),
-    ).toBeInTheDocument();
+      within(deleted)
+        .getAllByRole("columnheader")
+        .map((h) => h.textContent),
+    ).toEqual([
+      "Key",
+      "Valid from",
+      "Deleted",
+      "Escrow",
+      "Clusters",
+      "Actions",
+    ]);
+    expect(within(deleted).getByTitle(KEY_A.fingerprint)).toBeInTheDocument();
   });
 
-  it("offers Revoke, Delete and Reinstate on every key, and a grayed-out one opens nothing", async () => {
+  it("shows no deleted keys section without deleted keys", async () => {
+    renderFleet(countedFleet(revokedKey()));
+    expect(await screen.findByText("2 keys, 1 revoked")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Deleted keys" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers Revoke, Delete and Reinstate on every key in use, Reinstate alone on a deleted one, and a grayed-out one opens nothing", async () => {
     const api = renderFleet(
       countedFleet(
         revokedKey(),
@@ -852,12 +913,12 @@ describe("FleetView key references and deletion", () => {
         .filter((b) =>
           /^(Revoke|Delete|Reinstate) key /.test(b.ariaLabel ?? ""),
         );
-      // the same icons in the same places on every row
-      expect(buttons.map((b) => b.ariaLabel?.split(" ")[0])).toEqual([
-        "Revoke",
-        "Delete",
-        "Reinstate",
-      ]);
+      // the same icons in the same places on every row of a table
+      expect(buttons.map((b) => b.ariaLabel?.split(" ")[0])).toEqual(
+        fp === KEY_A.fingerprint
+          ? ["Reinstate"]
+          : ["Revoke", "Delete", "Reinstate"],
+      );
       for (const b of buttons) {
         expect(b).toHaveClass("h-9", "w-9");
         expect(b).not.toHaveTextContent(/\w/);
@@ -867,10 +928,9 @@ describe("FleetView key references and deletion", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       }
     }
-    // the server's reason wins over the page's own
-    expect(keyActions(KEY_A.fingerprint).Delete).toBe(
-      "The key is already deleted.",
-    );
+    expect(keyActions(KEY_A.fingerprint)).toEqual({
+      Reinstate: "Escrowed copies were purged.",
+    });
     expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(0);
   });
 
@@ -1019,15 +1079,17 @@ describe("FleetView key references and deletion", () => {
     const api = renderFleet(
       countedFleet(deletedKey({ holders: ["use2-blue"] })),
     );
-    await screen.findByRole("heading", { name: "Keys" });
+    await screen.findByRole("heading", { name: "Deleted keys" });
     const row = keyRow(KEY_C.fingerprint);
-    expect(within(row).getByText("Deleted")).toHaveClass("text-destructive");
+    expect(row.closest("table")).toHaveAccessibleName(
+      "Deleted sealing keys in this env",
+    );
     expect(row).toHaveTextContent("by alice 2h ago");
     expect(within(row).getByText("2h ago")).toHaveAttribute(
       "title",
       expect.stringMatching(/^Deleted by alice, /),
     );
-    expect(row).toHaveTextContent("escrow purged in 29d");
+    expect(row).toHaveTextContent("purged in 29d");
     expect(within(row).getByText("in 29d")).toHaveAttribute(
       "title",
       expect.stringMatching(
@@ -1038,11 +1100,7 @@ describe("FleetView key references and deletion", () => {
       "title",
       "use2-blue",
     );
-    expect(keyActions(KEY_C.fingerprint)).toEqual({
-      Revoke: "Deleted.",
-      Delete: "Already deleted.",
-      Reinstate: "enabled",
-    });
+    expect(keyActions(KEY_C.fingerprint)).toEqual({ Reinstate: "enabled" });
 
     fireEvent.click(
       within(row).getByRole("button", { name: /reinstate key/i }),
@@ -1076,10 +1134,11 @@ describe("FleetView key references and deletion", () => {
 
   it("shows a deleted key no cluster holds, waiting for its escrow purge", async () => {
     renderFleet(countedFleet(deletedKey()));
-    await screen.findByRole("heading", { name: "Keys" });
+    await screen.findByRole("heading", { name: "Deleted keys" });
     const row = keyRow(KEY_C.fingerprint);
-    expect(row).toHaveTextContent("escrow purged in 29d");
+    expect(row).toHaveTextContent("purged in 29d");
     expect(row).not.toHaveTextContent(/removing/);
+    expect(row).toHaveTextContent("removed from every cluster");
     expect(keyActions(KEY_C.fingerprint).Reinstate).toBe("enabled");
   });
 
@@ -1096,15 +1155,13 @@ describe("FleetView key references and deletion", () => {
     );
     await screen.findByRole("heading", { name: "Keys" });
     const row = keyRow(KEY_C.fingerprint);
-    expect(row).toHaveTextContent("escrow purged 2d ago");
+    expect(row).toHaveTextContent("purged 2d ago");
     expect(within(row).getByText("2d ago")).toHaveAttribute(
       "title",
       expect.stringMatching(/: it cannot be reinstated$/),
     );
     expect(row).toHaveTextContent("removing from 1 cluster");
     expect(keyActions(KEY_C.fingerprint)).toEqual({
-      Revoke: "Deleted.",
-      Delete: "Already deleted.",
       Reinstate: "Escrowed copies were purged.",
     });
   });

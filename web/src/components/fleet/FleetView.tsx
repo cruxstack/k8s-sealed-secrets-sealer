@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Server } from "lucide-react";
 import { fleetQueryOptions } from "@/api/queries/fleet";
 import { extractApiError } from "@/api/client";
-import type { Fleet } from "@/api/types";
+import type { Fleet, FleetKey } from "@/api/types";
 import { Alert } from "@/components/ui/alert";
 import { EmptyState } from "@/components/ui/empty-state";
 import { SectionHeading } from "@/components/ui/section-heading";
@@ -10,8 +10,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { sentence } from "@/lib/utils";
 import { AgentTable } from "./AgentTable";
 import { EnvKeyBanner } from "./EnvKeyBanner";
-import { KeyTable } from "./KeyTable";
-import { CLEANUP, noneCount } from "./references";
+import { DeletedKeyTable, KeyTable } from "./KeyTable";
+import { CLEANUP, noneCount, plural } from "./references";
 
 function FleetHeader({ env }: { env?: string }) {
   return (
@@ -72,14 +72,11 @@ function KeyLimitNotice({ fleet }: { fleet: Fleet }) {
   );
 }
 
-/** "4 keys, 1 revoked, 1 deleted": the key section's count. */
-function keyCount(keys: Fleet["keys"]): string {
-  const all = keys ?? [];
-  const parts = [`${all.length} ${all.length === 1 ? "key" : "keys"}`];
-  for (const status of ["revoked", "deleted"] as const) {
-    const n = all.filter((k) => k.status === status).length;
-    if (n > 0) parts.push(`${n} ${status}`);
-  }
+/** "3 keys, 1 revoked": the key section's count, deleted keys aside. */
+function keyCount(keys: FleetKey[]): string {
+  const parts = [`${keys.length} ${keys.length === 1 ? "key" : "keys"}`];
+  const revoked = keys.filter((k) => k.status === "revoked").length;
+  if (revoked > 0) parts.push(`${revoked} revoked`);
   return parts.join(", ");
 }
 
@@ -116,7 +113,9 @@ export function FleetView() {
 
   const agents = data.agents ?? [];
   const healthy = agents.filter((a) => a.checked_in && a.healthy).length;
-  const keys = data.keys ?? [];
+  // deleted keys have their own table, so the keys in use stand out
+  const keys = (data.keys ?? []).filter((k) => k.status !== "deleted");
+  const deleted = (data.keys ?? []).filter((k) => k.status === "deleted");
 
   return (
     <div className="space-y-6">
@@ -174,6 +173,18 @@ export function FleetView() {
             </Alert>
           )}
           <KeyTable keys={keys} agents={agents} />
+        </section>
+      )}
+
+      {deleted.length > 0 && (
+        <section aria-labelledby="deleted-keys-heading" className="space-y-3">
+          <SectionHeading
+            id="deleted-keys-heading"
+            title="Deleted keys"
+            count={plural(deleted.length, "key")}
+            aside="Reinstate one until its escrowed copies are purged"
+          />
+          <DeletedKeyTable keys={deleted} />
         </section>
       )}
     </div>

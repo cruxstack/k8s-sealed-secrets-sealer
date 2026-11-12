@@ -194,6 +194,7 @@ metadata:
   namespace: apps
   annotations:
     example.com/env: dev
+    example.com/title: "  Billing ` + "\u202e" + `API\n"
     example.com/description: |
       Billing service credentials,
       rotated ` + "\u202e" + `quarterly.` + "\u200b" + `
@@ -210,6 +211,7 @@ metadata:
   annotations:
     example.com/env: dev
     example.com/docs: "javascript:alert(1)"
+    example.com/title: "` + strings.Repeat("y", 100) + `"
     example.com/description: "` + strings.Repeat("x", 400) + `"
 spec:
   encryptedData: {}
@@ -223,12 +225,15 @@ spec:
 		t.Fatalf("Find = %+v, %v", docs, err)
 	}
 	d := docs[0]
-	if d.Description != "Billing service credentials, rotated quarterly." ||
+	if d.Title != "Billing API" || d.Description != "Billing service credentials, rotated quarterly." ||
 		strings.Join(d.ExpectedKeys, ",") != "api-token,db-password" ||
 		d.Docs != "https://docs.example.com/runbooks/billing" || d.Problem != "" {
-		t.Fatalf("hints = %q %q %q", d.Description, d.ExpectedKeys, d.Docs)
+		t.Fatalf("hints = %q %q %q %q", d.Title, d.Description, d.ExpectedKeys, d.Docs)
 	}
-	// an unsafe link is dropped and a long description cut
+	// an unsafe link is dropped, and a long title and description cut
+	if len([]rune(docs[1].Title)) != maxTitleRunes || !strings.HasSuffix(docs[1].Title, "…") {
+		t.Fatalf("other title = %q (%d)", docs[1].Title, len([]rune(docs[1].Title)))
+	}
 	if docs[1].Docs != "" || len([]rune(docs[1].Description)) != maxDescriptionRunes || !strings.HasSuffix(docs[1].Description, "…") {
 		t.Fatalf("other hints = %q (%d), %q", docs[1].Description, len(docs[1].Description), docs[1].Docs)
 	}

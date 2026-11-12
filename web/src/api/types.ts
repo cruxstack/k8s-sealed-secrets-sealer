@@ -224,6 +224,9 @@ export interface SealedSecretDocument {
   /** Why values cannot be sealed into it; absent when they can. */
   problem?: string;
   /** Optional hints from the document's annotations, for people. */
+  /** A short name for the secret, shown before its path. */
+  title?: string;
+  /** What the secret is for. */
   description?: string;
   /** The keys the document should hold. */
   expected_keys?: string[];

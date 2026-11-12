@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useRef, useState, type KeyboardEvent } from "react";
 import type { PendingChange, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,17 +25,71 @@ const STATUS: Record<FileStatus, { label: string; dot: string }> = {
   unreadable: { label: "Unreadable", dot: "bg-destructive" },
 };
 
-/** A path with its directory muted and its file name strong. */
+/**
+ * A path with its directory muted and its file name strong. It wraps only
+ * after a slash, so a folder's name is never split.
+ */
 export function FilePath({ path }: { path: string }) {
   const slash = path.lastIndexOf("/");
+  const folders = path.slice(0, slash + 1).split(/(?<=\/)/);
   return (
-    <span className="font-mono break-all">
+    <span className="font-mono [overflow-wrap:anywhere]">
       {slash >= 0 && (
         <span className="text-muted-foreground">
-          {path.slice(0, slash + 1)}
+          {folders.map((f, i) => (
+            <Fragment key={i}>
+              {f}
+              <wbr />
+            </Fragment>
+          ))}
         </span>
       )}
       <span className="font-medium text-foreground">
+        {path.slice(slash + 1)}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * A path on one line, as a list shows it: the file name whole, and as much
+ * of its directory as fits before it, cut at the start ("…/billing/"),
+ * since the folders nearest a file tell it from the others. The whole
+ * path is its title. `quiet` mutes the file name too, for a path under a
+ * file's title.
+ */
+export function PathLine({
+  path,
+  quiet = false,
+  className,
+}: {
+  path: string;
+  quiet?: boolean;
+  className?: string;
+}) {
+  const slash = path.lastIndexOf("/");
+  const dir = path.slice(0, slash + 1);
+  return (
+    <span className={cn("flex min-w-0 font-mono", className)} title={path}>
+      {/* read as one path, without the marks and the cut */}
+      <span className="sr-only">{path}</span>
+      {dir && (
+        // right to left, so the ellipsis cuts the start; the marks keep the
+        // slashes on the side they belong
+        <span
+          className="min-w-0 truncate text-muted-foreground [direction:rtl]"
+          aria-hidden="true"
+        >
+          {`\u200e${dir}\u200e`}
+        </span>
+      )}
+      <span
+        className={cn(
+          "max-w-full shrink-0 truncate",
+          quiet ? "text-muted-foreground" : "font-medium text-foreground",
+        )}
+        aria-hidden="true"
+      >
         {path.slice(slash + 1)}
       </span>
     </span>
@@ -77,13 +131,14 @@ export function FileList({
   useShortcut("/", () => filterRef.current?.focus());
 
   const needle = filter.trim().toLowerCase();
-  // a file matches on its path or on what it is for
+  // a file matches on its path, its title or what it is for
   const shown = needle
-    ? files.filter(
-        (f) =>
-          f.path.toLowerCase().includes(needle) ||
-          fileHints(f).description?.toLowerCase().includes(needle),
-      )
+    ? files.filter((f) => {
+        const { title, description } = fileHints(f);
+        return [f.path, title, description].some((t) =>
+          t?.toLowerCase().includes(needle),
+        );
+      })
     : files;
 
   const buttons = () =>
@@ -150,7 +205,7 @@ export function FileList({
             const mine = changes.filter((c) => c.path === f.path);
             const stale = mine.filter((c) => c.key_revoked).length;
             const count = mine.length - stale;
-            const { description } = fileHints(f);
+            const { title, description } = fileHints(f);
             const missing =
               status === "unreadable"
                 ? []
@@ -179,7 +234,25 @@ export function FileList({
                       aria-hidden="true"
                     />
                     <span className="min-w-0 flex-1">
-                      <FilePath path={f.path} />
+                      {/* one line each, never wrapped: a title when the
+                          file has one, over its path */}
+                      {title ? (
+                        <>
+                          <span
+                            className="block truncate font-medium text-foreground"
+                            title={title}
+                          >
+                            {title}
+                          </span>
+                          <PathLine
+                            path={f.path}
+                            quiet
+                            className="mt-0.5 text-xs"
+                          />
+                        </>
+                      ) : (
+                        <PathLine path={f.path} />
+                      )}
                       {description && (
                         <span
                           className="mt-0.5 block truncate text-xs text-foreground"

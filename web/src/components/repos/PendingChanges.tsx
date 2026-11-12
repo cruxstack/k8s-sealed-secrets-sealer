@@ -32,6 +32,7 @@ import { RegionTag } from "@/components/ui/region-tag";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { CardHeading } from "@/components/ui/section-heading";
 import { safeHttpUrl, shortFingerprint } from "@/lib/utils";
+import { PathLine } from "./FileList";
 import { regionList } from "./keys";
 
 function plural(n: number, one: string, many: string) {
@@ -155,10 +156,10 @@ function ChangeItem({
         <button
           type="button"
           onClick={onSelectFile}
-          className="block max-w-full truncate rounded font-mono text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="block max-w-full rounded text-xs hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           title={`Show ${change.path}`}
         >
-          {change.path}
+          <PathLine path={change.path} quiet />
         </button>
         <p className="text-xs text-muted-foreground">
           <span title={targets}>

@@ -18,19 +18,25 @@ function file(documents: SealedSecretDocument[]): RepositoryFile {
 }
 
 describe("fileHints", () => {
-  it("takes the first description and docs, and every expected key once", () => {
+  it("takes the first title, description and docs, and every expected key once", () => {
     const hints = fileHints(
       file([
         doc({ expected_keys: ["b", "a"] }),
         doc({
+          title: "Billing API",
           description: "Payment credentials",
           docs: "https://docs.example.com/billing",
           expected_keys: ["a", "c"],
         }),
-        doc({ description: "Other", docs: "https://other.example.com" }),
+        doc({
+          title: "Other",
+          description: "Other",
+          docs: "https://other.example.com",
+        }),
       ]),
     );
     expect(hints).toEqual({
+      title: "Billing API",
       description: "Payment credentials",
       docs: "https://docs.example.com/billing",
       expected: ["b", "a", "c"],
@@ -44,6 +50,7 @@ describe("fileHints", () => {
 
   it("has nothing for a file without hints or documents", () => {
     expect(fileHints({ path: "x", blob: "b", documents: null })).toEqual({
+      title: undefined,
       description: undefined,
       docs: undefined,
       expected: [],

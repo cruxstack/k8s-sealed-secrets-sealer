@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   ArrowRight,
   Check,
@@ -8,9 +8,12 @@ import {
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { FilterInput } from "@/components/ui/filter-input";
 import { regionTagClass } from "@/components/ui/region-tag";
 import { CardHeading } from "@/components/ui/section-heading";
 import { cn } from "@/lib/utils";
+import { keyProblem } from "./SealForm";
 import {
   regionList,
   type KeyState,
@@ -222,11 +225,34 @@ function RegionChips({
   );
 }
 
+/** From this many keys, the list gets a filter and scrolls on its own. */
+export const LONG_KEY_LIST = 12;
+
+type KeyView = "all" | "seal" | "pending";
+
+/** The keys each view of a long list shows. */
+const IN_VIEW: Record<KeyView, (k: KeyStatus) => boolean> = {
+  all: () => true,
+  // missing somewhere, or sealed with a revoked key: both need a value
+  seal: (k) =>
+    k.state === "missing" || k.state === "partial" || k.state === "revoked",
+  pending: (k) => k.state === "new" || k.state === "replaced",
+};
+
+const VIEW_LABEL: Record<KeyView, string> = {
+  all: "All",
+  seal: "To seal",
+  pending: "Pending",
+};
+
 /**
  * A file's keys, one row each, with where each stands across the file's
  * documents and, when they are in more than one region, in each region.
  * When values can be sealed, picking a row fills the seal form's key, and
- * picking a region fills it for that region only.
+ * picking a region fills it for that region only. A long list (a file with
+ * dozens of keys) gets a filter and a choice of the keys to seal or those
+ * pending, and scrolls in a box of its own, so the form stays close under
+ * it; the key in the form is scrolled into view there.
  */
 export function KeyList({
   keys,
@@ -249,10 +275,111 @@ export function KeyList({
   disabled?: boolean;
 }) {
   const headingId = useId();
-  const attention = keys.filter(
-    (k) => k.state === "missing" || k.state === "partial",
-  ).length;
+  const [filter, setFilter] = useState("");
+  const [view, setView] = useState<KeyView>("all");
+  const filterRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const long = keys.length >= LONG_KEY_LIST;
+  const counts: Record<KeyView, number> = {
+    all: keys.length,
+    seal: keys.filter(IN_VIEW.seal).length,
+    pending: keys.filter(IN_VIEW.pending).length,
+  };
+  // a view emptied by sealing falls back to every key
+  const active: KeyView = long && counts[view] > 0 ? view : "all";
+  const needle = long ? filter.trim().toLowerCase() : "";
+  const shown = keys.filter(
+    (k) => IN_VIEW[active](k) && k.key.toLowerCase().includes(needle),
+  );
   const regional = keys.some((k) => k.regions.length > 0);
+  // a key the filter names that the file lacks can be sealed as a new one
+  const typed = filter.trim();
+  const newKey =
+    onPick &&
+    typed !== "" &&
+    keyProblem(typed) === null &&
+    !keys.some((k) => k.key === typed)
+      ? typed
+      : null;
+
+  // the key in the form stays in view in a long list, which scrolls on
+  // its own; the page itself never moves
+  useEffect(() => {
+    const box = listRef.current;
+    if (!long || !box || !current) return;
+    const row = Array.from(box.children).find(
+      (el): el is HTMLElement =>
+        el instanceof HTMLElement && el.dataset.key === current,
+    );
+    if (!row) return;
+    if (row.offsetTop < box.scrollTop) {
+      box.scrollTop = row.offsetTop - 4;
+    } else if (
+      row.offsetTop + row.offsetHeight >
+      box.scrollTop + box.clientHeight
+    ) {
+      box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight + 4;
+    }
+  }, [long, current, active, needle]);
+
+  const rows = shown.map((k) => {
+    const look = LOOK[k.state];
+    const Icon = look.icon;
+    const detail = keyDetail(k, docs);
+    const body = (
+      <>
+        <Icon
+          className={cn("h-3.5 w-3.5 shrink-0", look.iconClass)}
+          aria-hidden="true"
+        />
+        <code className="shrink-0 font-mono text-[13px] font-medium">
+          {k.key}
+        </code>
+        <span
+          className={cn(
+            "min-w-0 basis-full pl-6 text-xs sm:basis-auto sm:pl-0",
+            look.text,
+          )}
+        >
+          {detail}
+        </span>
+      </>
+    );
+    return (
+      <li
+        key={k.key}
+        data-key={k.key}
+        className={cn(
+          "flex flex-wrap items-center gap-x-2 rounded-lg",
+          current === k.key && "bg-selected ring-1 ring-primary",
+        )}
+      >
+        {onPick ? (
+          <button
+            type="button"
+            onClick={() => onPick(k.key)}
+            disabled={disabled}
+            aria-pressed={current === k.key}
+            className="group flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5 rounded-lg px-3 py-1.5 text-left transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-60"
+          >
+            {body}
+            <span className="ml-auto hidden shrink-0 items-center gap-1 pl-2 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-aria-pressed:opacity-100 sm:flex">
+              {look.action}
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
+            </span>
+          </button>
+        ) : (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5 px-3 py-1.5">
+            {body}
+          </div>
+        )}
+        {k.regions.length > 0 && (
+          <RegionChips k={k} onPick={onPick} disabled={disabled} />
+        )}
+      </li>
+    );
+  });
+
   return (
     <section aria-labelledby={headingId}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-2">
@@ -260,8 +387,8 @@ export function KeyList({
           <CardHeading as="h3" id={headingId} count={keys.length}>
             Keys
           </CardHeading>
-          {attention > 0 && (
-            <span className="text-xs text-warning">{attention} to seal</span>
+          {counts.seal > 0 && (
+            <span className="text-xs text-warning">{counts.seal} to seal</span>
           )}
         </div>
         {onPick && keys.length > 0 && (
@@ -272,68 +399,115 @@ export function KeyList({
           </p>
         )}
       </div>
+      {long && (
+        <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
+          <FilterInput
+            inputRef={filterRef}
+            shortcut={false}
+            className="w-full sm:w-60"
+            inputClassName="h-8"
+            name="key-filter"
+            value={filter}
+            onValueChange={setFilter}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setFilter("");
+              } else if (e.key === "Enter" && onPick && !disabled) {
+                // the first match, or a new key, goes to the form
+                const first = shown[0]?.key ?? newKey;
+                if (first) {
+                  e.preventDefault();
+                  onPick(first);
+                }
+              }
+            }}
+            placeholder="Filter keys"
+            aria-label="Filter keys"
+          />
+          {(counts.seal > 0 || counts.pending > 0) && (
+            <div
+              role="group"
+              aria-label="Show keys"
+              className="inline-flex items-center gap-0.5 rounded-md border border-input bg-card p-0.5"
+            >
+              {(["all", "seal", "pending"] as const)
+                .filter((v) => v === "all" || counts[v] > 0)
+                .map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    aria-pressed={active === v}
+                    onClick={() => setView(v)}
+                    className={cn(
+                      "inline-flex h-7 items-center gap-1.5 rounded border px-2 text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                      active === v
+                        ? "border-primary bg-selected font-medium text-primary"
+                        : "border-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    {VIEW_LABEL[v]}{" "}
+                    <span className="tabular-nums">{counts[v]}</span>
+                  </button>
+                ))}
+            </div>
+          )}
+          {shown.length < keys.length && shown.length > 0 && (
+            <span
+              className="text-xs text-muted-foreground tabular-nums sm:ml-auto"
+              role="status"
+            >
+              {shown.length} of {keys.length}
+            </span>
+          )}
+        </div>
+      )}
       {keys.length === 0 ? (
         <p className="px-4 pb-4 text-sm text-muted-foreground">
           No keys yet.{onPick && " Seal a value to add the first one."}
         </p>
+      ) : shown.length === 0 ? (
+        <div className="mx-4 mb-4 space-y-2 rounded-lg border border-dashed px-4 py-5 text-center text-sm text-muted-foreground">
+          <p>No key matches “{typed}”.</p>
+          <div className="flex flex-wrap justify-center gap-2">
+            {newKey && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={disabled}
+                onClick={() => onPick?.(newKey)}
+              >
+                {/* one span: the button's flex box would drop the spaces */}
+                <span>
+                  Seal <code className="font-mono">{newKey}</code> as a new key
+                </span>
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFilter("");
+                filterRef.current?.focus();
+              }}
+            >
+              Clear filter
+            </Button>
+          </div>
+        </div>
+      ) : long ? (
+        // the box scrolls on its own, so the form below stays close
+        <div className="mx-4 mb-4 overflow-hidden rounded-lg border border-border">
+          <ul
+            ref={listRef}
+            aria-label="Keys"
+            className="relative max-h-[min(20rem,40vh)] overflow-y-auto overscroll-contain p-1"
+          >
+            {rows}
+          </ul>
+        </div>
       ) : (
         <ul aria-label="Keys" className="px-1 pb-2">
-          {keys.map((k) => {
-            const look = LOOK[k.state];
-            const Icon = look.icon;
-            const detail = keyDetail(k, docs);
-            const body = (
-              <>
-                <Icon
-                  className={cn("h-3.5 w-3.5 shrink-0", look.iconClass)}
-                  aria-hidden="true"
-                />
-                <code className="shrink-0 font-mono text-[13px] font-medium">
-                  {k.key}
-                </code>
-                <span
-                  className={cn(
-                    "min-w-0 basis-full pl-6 text-xs sm:basis-auto sm:pl-0",
-                    look.text,
-                  )}
-                >
-                  {detail}
-                </span>
-              </>
-            );
-            return (
-              <li
-                key={k.key}
-                className={cn(
-                  "flex flex-wrap items-center gap-x-2 rounded-lg",
-                  current === k.key && "bg-selected ring-1 ring-primary",
-                )}
-              >
-                {onPick ? (
-                  <button
-                    type="button"
-                    onClick={() => onPick(k.key)}
-                    disabled={disabled}
-                    aria-pressed={current === k.key}
-                    className="group flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5 rounded-lg px-3 py-1.5 text-left transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-60"
-                  >
-                    {body}
-                    <span className="ml-auto hidden shrink-0 items-center gap-1 pl-2 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-aria-pressed:opacity-100 sm:flex">
-                      {look.action}
-                      <ArrowRight className="h-3 w-3" aria-hidden="true" />
-                    </span>
-                  </button>
-                ) : (
-                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5 px-3 py-1.5">
-                    {body}
-                  </div>
-                )}
-                {k.regions.length > 0 && (
-                  <RegionChips k={k} onPick={onPick} disabled={disabled} />
-                )}
-              </li>
-            );
-          })}
+          {rows}
         </ul>
       )}
     </section>

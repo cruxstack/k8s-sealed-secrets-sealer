@@ -58,50 +58,49 @@ function StatusBy({
 }
 
 /**
- * A deleted key's status: who deleted it, when its escrowed copies are
- * purged (until then it can be reinstated), and the clusters it is still
- * being removed from.
+ * When a deleted key's escrowed copies are purged: until then it can be
+ * reinstated.
  */
-function DeletedStatus({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
+function PurgeCell({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
+  if (fleetKey.purge_at) {
+    return (
+      <span className="text-xs whitespace-nowrap text-muted-foreground">
+        purged{" "}
+        <RelativeTime
+          iso={fleetKey.purge_at}
+          now={now}
+          past={fleetKey.purged}
+          describe={(at) =>
+            fleetKey.purged
+              ? `Escrowed copies purged ${at}: it cannot be reinstated`
+              : `Escrowed copies purged ${at}; it can be reinstated until then`
+          }
+        />
+      </span>
+    );
+  }
+  return fleetKey.purged ? (
+    <span className="text-xs whitespace-nowrap text-muted-foreground">
+      purged
+    </span>
+  ) : (
+    <Dash />
+  );
+}
+
+/** The clusters a deleted key is still being removed from. */
+function RemovalCell({ fleetKey }: { fleetKey: FleetKey }) {
   const holders = fleetKey.holders ?? [];
-  return (
-    <span className="flex flex-col items-start gap-0.5">
-      <Badge variant="destructive">Deleted</Badge>
-      <StatusBy
-        verb="Deleted"
-        by={fleetKey.deleted_by}
-        at={fleetKey.deleted_at}
-        now={now}
-      />
-      {fleetKey.purge_at ? (
-        <span className="text-xs whitespace-nowrap text-muted-foreground">
-          escrow purged{" "}
-          <RelativeTime
-            iso={fleetKey.purge_at}
-            now={now}
-            past={fleetKey.purged}
-            describe={(at) =>
-              fleetKey.purged
-                ? `Escrowed copies purged ${at}: it cannot be reinstated`
-                : `Escrowed copies purged ${at}; it can be reinstated until then`
-            }
-          />
-        </span>
-      ) : (
-        fleetKey.purged && (
-          <span className="text-xs whitespace-nowrap text-muted-foreground">
-            escrow purged
-          </span>
-        )
-      )}
-      {holders.length > 0 && (
-        <span
-          className="text-xs whitespace-nowrap text-info"
-          title={holders.join("\n")}
-        >
-          removing from {plural(holders.length, "cluster")}
-        </span>
-      )}
+  return holders.length > 0 ? (
+    <span
+      className="text-xs whitespace-nowrap text-info"
+      title={holders.join("\n")}
+    >
+      removing from {plural(holders.length, "cluster")}
+    </span>
+  ) : (
+    <span className="text-xs whitespace-nowrap text-muted-foreground">
+      removed from every cluster
     </span>
   );
 }
@@ -109,7 +108,7 @@ function DeletedStatus({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
 /** A key's status, as a badge with a word. */
 function KeyStatusBadge({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
   if (fleetKey.status === "deleted") {
-    return <DeletedStatus fleetKey={fleetKey} now={now} />;
+    return <Badge variant="destructive">Deleted</Badge>;
   }
   if (fleetKey.status === "revoked") {
     return (
@@ -178,15 +177,19 @@ export function unavailable(k: FleetKey): Partial<Record<KeyAction, string>> {
 /**
  * Revoke, Delete and Reinstate, as icons in the same places on every key's
  * row, grayed out with the reason when they do not apply, so the column
- * never changes width and a key's row says what can be done to it.
+ * never changes width and a key's row says what can be done to it. A
+ * deleted key can only be reinstated, so its row has Reinstate alone.
  */
 function KeyActions({
   fleetKey,
   onAction,
+  only,
 }: {
   fleetKey: FleetKey;
   onAction: (action: KeyAction) => void;
+  only?: KeyAction;
 }) {
+  const shows = (action: KeyAction) => !only || only === action;
   const short = shortFingerprint(fleetKey.fingerprint);
   const why = unavailable(fleetKey);
   // the destructive color says what a click would do, so only when it can
@@ -195,33 +198,39 @@ function KeyActions({
     "hover:text-destructive focus-visible:text-destructive";
   return (
     <span className="inline-flex items-center gap-1">
-      <IconButton
-        label="Revoke"
-        reason={why.revoke}
-        aria-label={`Revoke key ${short}`}
-        className={cn("text-muted-foreground", destructive("revoke"))}
-        onClick={() => onAction("revoke")}
-      >
-        <Ban className="h-4 w-4" aria-hidden="true" />
-      </IconButton>
-      <IconButton
-        label="Delete"
-        reason={why.delete}
-        aria-label={`Delete key ${short}`}
-        className={cn("text-muted-foreground", destructive("delete"))}
-        onClick={() => onAction("delete")}
-      >
-        <Trash2 className="h-4 w-4" aria-hidden="true" />
-      </IconButton>
-      <IconButton
-        label="Reinstate"
-        reason={why.reinstate}
-        aria-label={`Reinstate key ${short}`}
-        className="text-muted-foreground"
-        onClick={() => onAction("reinstate")}
-      >
-        <RotateCcw className="h-4 w-4" aria-hidden="true" />
-      </IconButton>
+      {shows("revoke") && (
+        <IconButton
+          label="Revoke"
+          reason={why.revoke}
+          aria-label={`Revoke key ${short}`}
+          className={cn("text-muted-foreground", destructive("revoke"))}
+          onClick={() => onAction("revoke")}
+        >
+          <Ban className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      )}
+      {shows("delete") && (
+        <IconButton
+          label="Delete"
+          reason={why.delete}
+          aria-label={`Delete key ${short}`}
+          className={cn("text-muted-foreground", destructive("delete"))}
+          onClick={() => onAction("delete")}
+        >
+          <Trash2 className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      )}
+      {shows("reinstate") && (
+        <IconButton
+          label="Reinstate"
+          reason={why.reinstate}
+          aria-label={`Reinstate key ${short}`}
+          className="text-muted-foreground"
+          onClick={() => onAction("reinstate")}
+        >
+          <RotateCcw className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      )}
     </span>
   );
 }
@@ -252,12 +261,7 @@ function KeyRow({
           expanded && "border-b-0",
         )}
       >
-        <th scope="row" className="px-4 py-3 text-left font-normal">
-          <span className="flex items-center gap-1 whitespace-nowrap">
-            <Fingerprint value={fleetKey.fingerprint} className="text-xs" />
-            <CopyButton value={fleetKey.fingerprint} label="key fingerprint" />
-          </span>
-        </th>
+        <KeyHeader fleetKey={fleetKey} />
         <TableCell className="whitespace-nowrap">
           <RelativeTime iso={fleetKey.not_before} now={now} />
         </TableCell>
@@ -314,21 +318,11 @@ function KeyRow({
 }
 
 /**
- * The env's keys, newest first, with how many clusters hold each, its
- * escrowed copies, the values sealed with it and its status. Admins revoke
- * a key here, delete a revoked one nothing refers to, and reinstate either,
- * each after a dialog that says what it does.
+ * Revoking, deleting and reinstating keys: each confirms in a dialog that
+ * says what it does, and refreshes the fleet when it is done. `start` opens
+ * an action's dialog; `dialog` renders it.
  */
-export function KeyTable({
-  keys,
-  agents,
-  now = new Date(),
-}: {
-  keys: FleetKey[];
-  /** The registered agents: how many, and why a cluster did not count. */
-  agents: FleetAgent[];
-  now?: Date;
-}) {
+function useKeyActions(now: Date) {
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState<{
     key: FleetKey;
@@ -389,12 +383,82 @@ export function KeyTable({
   });
   const mutations = { revoke, reinstate, delete: remove };
   const pending = revoke.isPending || reinstate.isPending || remove.isPending;
+
+  const start = (key: FleetKey, action: KeyAction) => {
+    mutations[action].reset();
+    setConfirming({ key, action });
+  };
+  const dialog = (
+    <Dialog
+      open={confirming !== null}
+      onOpenChange={(o) => !o && !pending && setConfirming(null)}
+    >
+      <DialogContent>
+        {confirming?.action === "revoke" && (
+          <RevokeKeyDialog
+            fleetKey={confirming.key}
+            request={revoke}
+            onConfirm={() => revoke.mutate(confirming.key)}
+          />
+        )}
+        {confirming?.action === "reinstate" && (
+          <ReinstateKeyDialog
+            fleetKey={confirming.key}
+            request={reinstate}
+            now={now}
+            onConfirm={() => reinstate.mutate(confirming.key)}
+          />
+        )}
+        {confirming?.action === "delete" && (
+          <DeleteKeyDialog
+            fleetKey={confirming.key}
+            request={remove}
+            now={now}
+            onConfirm={() => remove.mutate(confirming.key)}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+  return { start, dialog };
+}
+
+/** A key's fingerprint as its row's header, with a copy button. */
+function KeyHeader({ fleetKey }: { fleetKey: FleetKey }) {
+  return (
+    <th scope="row" className="px-4 py-3 text-left font-normal">
+      <span className="flex items-center gap-1 whitespace-nowrap">
+        <Fingerprint value={fleetKey.fingerprint} className="text-xs" />
+        <CopyButton value={fleetKey.fingerprint} label="key fingerprint" />
+      </span>
+    </th>
+  );
+}
+
+/**
+ * The env's keys but the deleted ones, newest first, with how many
+ * clusters hold each, its escrowed copies, the values sealed with it and
+ * its status. Admins revoke a key here, delete a revoked one nothing
+ * refers to, and reinstate a revoked one, each after a dialog that says
+ * what it does.
+ */
+export function KeyTable({
+  keys,
+  agents,
+  now = new Date(),
+}: {
+  keys: FleetKey[];
+  /** The registered agents: how many, and why a cluster did not count. */
+  agents: FleetAgent[];
+  now?: Date;
+}) {
+  const { start, dialog } = useKeyActions(now);
   const counting = !noneCount(agents);
 
   return (
     <>
       {/* cells are centred, and every row has the same actions, so
-          nothing shifts when a key is revoked, deleted or reinstated */}
+          nothing shifts when a key is revoked or reinstated */}
       <Table className="[&_td]:align-middle [&_th]:align-middle">
         <caption className="sr-only">Sealing keys in this env</caption>
         <TableHeader>
@@ -418,45 +482,77 @@ export function KeyTable({
               agents={agents}
               counting={counting}
               now={now}
-              onAction={(action) => {
-                mutations[action].reset();
-                setConfirming({ key: k, action });
-              }}
+              onAction={(action) => start(k, action)}
             />
           ))}
         </tbody>
       </Table>
+      {dialog}
+    </>
+  );
+}
 
-      <Dialog
-        open={confirming !== null}
-        onOpenChange={(o) => !o && !pending && setConfirming(null)}
-      >
-        <DialogContent>
-          {confirming?.action === "revoke" && (
-            <RevokeKeyDialog
-              fleetKey={confirming.key}
-              request={revoke}
-              onConfirm={() => revoke.mutate(confirming.key)}
-            />
-          )}
-          {confirming?.action === "reinstate" && (
-            <ReinstateKeyDialog
-              fleetKey={confirming.key}
-              request={reinstate}
-              now={now}
-              onConfirm={() => reinstate.mutate(confirming.key)}
-            />
-          )}
-          {confirming?.action === "delete" && (
-            <DeleteKeyDialog
-              fleetKey={confirming.key}
-              request={remove}
-              now={now}
-              onConfirm={() => remove.mutate(confirming.key)}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
+/**
+ * The env's deleted keys, newest first: who deleted each and when, when
+ * its escrowed copies are purged (until then it can be reinstated), and
+ * the clusters it is still being removed from. Nothing refers to a deleted
+ * key, so it has no references to show.
+ */
+export function DeletedKeyTable({
+  keys,
+  now = new Date(),
+}: {
+  keys: FleetKey[];
+  now?: Date;
+}) {
+  const { start, dialog } = useKeyActions(now);
+  return (
+    <>
+      <Table className="text-muted-foreground [&_td]:align-middle [&_th]:align-middle">
+        <caption className="sr-only">Deleted sealing keys in this env</caption>
+        <TableHeader>
+          <tr>
+            <TableHead>Key</TableHead>
+            <TableHead>Valid from</TableHead>
+            <TableHead>Deleted</TableHead>
+            <TableHead>Escrow</TableHead>
+            <TableHead>Clusters</TableHead>
+            <TableHead className="w-px text-right">Actions</TableHead>
+          </tr>
+        </TableHeader>
+        <tbody>
+          {keys.map((k) => (
+            <TableRow key={k.fingerprint}>
+              <KeyHeader fleetKey={k} />
+              <TableCell className="whitespace-nowrap">
+                <RelativeTime iso={k.not_before} now={now} />
+              </TableCell>
+              <TableCell>
+                <StatusBy
+                  verb="Deleted"
+                  by={k.deleted_by}
+                  at={k.deleted_at}
+                  now={now}
+                />
+              </TableCell>
+              <TableCell>
+                <PurgeCell fleetKey={k} now={now} />
+              </TableCell>
+              <TableCell>
+                <RemovalCell fleetKey={k} />
+              </TableCell>
+              <TableCell className="py-2 text-right whitespace-nowrap">
+                <KeyActions
+                  fleetKey={k}
+                  only="reinstate"
+                  onAction={(action) => start(k, action)}
+                />
+              </TableCell>
+            </TableRow>
+          ))}
+        </tbody>
+      </Table>
+      {dialog}
     </>
   );
 }
