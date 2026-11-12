@@ -1,10 +1,10 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, ChevronRight, FolderGit2 } from "lucide-react";
-import { reposQueryOptions } from "@/api/queries/repos";
+import { ArrowRight, ChevronRight, FolderGit2, Loader2 } from "lucide-react";
+import { useReposQueryOptions } from "@/api/queries/repos";
 import { sessionsQueryOptions } from "@/api/queries/sessions";
-import { extractApiError } from "@/api/client";
+import { extractApiError, toApiError } from "@/api/client";
 import type { Repository } from "@/api/types";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -161,8 +161,20 @@ function TableSkeleton() {
 export function RepoList() {
   const env = useEnv()?.name ?? "";
   const navigate = useNavigate();
-  const { data: list, error, isPending } = useQuery(reposQueryOptions);
+  const {
+    data: saved,
+    error,
+    isPending,
+    isFetching,
+    dataUpdatedAt,
+    refetch,
+  } = useQuery(useReposQueryOptions());
+  // a list the server refuses is not shown, even from this browser
+  const refused = !!error && toApiError(error).status === 403;
+  const list = refused ? undefined : saved;
   const data = list?.repositories;
+  // the list on screen came from this browser and is being checked
+  const checking = isFetching && !isPending;
   // pending changes per repository; the list works without them
   const { data: sessions } = useQuery(sessionsQueryOptions);
   const pending = new Map(
@@ -239,6 +251,32 @@ export function RepoList() {
         </EmptyState>
       ) : (
         <>
+          {error && (
+            <Alert
+              variant="warning"
+              role="status"
+              aria-label="List not checked"
+              action={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isFetching}
+                  onClick={() => void refetch()}
+                >
+                  Try Again
+                </Button>
+              }
+            >
+              Couldn't check the list for changes:{" "}
+              {sentence(extractApiError(error))} It is as of{" "}
+              <RelativeTime
+                iso={new Date(dataUpdatedAt).toISOString()}
+                past
+                describe={(at) => `The list as of ${at}`}
+              />
+              .
+            </Alert>
+          )}
           {!needle && <Recent items={recentItems(data, pending, recent)} />}
           {list?.incomplete && <IncompleteNotice />}
           <section aria-labelledby="all-heading" className="space-y-3">
@@ -249,6 +287,20 @@ export function RepoList() {
                 needle
                   ? `${shown.length} of ${data.length}`
                   : plural(data.length, "repository", "repositories")
+              }
+              aside={
+                checking && (
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1.5"
+                  >
+                    <Loader2
+                      className="h-3 w-3 animate-spin"
+                      aria-hidden="true"
+                    />
+                    Checking for changes…
+                  </span>
+                )
               }
             />
             {shown.length === 0 ? (

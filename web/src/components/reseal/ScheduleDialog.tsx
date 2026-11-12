@@ -16,7 +16,7 @@ import {
   createSchedule,
   updateSchedule,
 } from "@/api/queries/reseal";
-import { reposQueryOptions } from "@/api/queries/repos";
+import { useReposQueryOptions } from "@/api/queries/repos";
 import type { ResealSchedule, ResealScheduleInput } from "@/api/types";
 import { plural } from "@/components/fleet/references";
 import { Alert } from "@/components/ui/alert";
@@ -311,7 +311,7 @@ function ScheduleForm({
   const [tried, setTried] = useState(false);
   // suggestions: the repositories the user can read, and their owners
   const { data: readable } = useQuery({
-    ...reposQueryOptions,
+    ...useReposQueryOptions(),
     select: (list) => list.repositories,
   });
   const repoSuggestions = (readable ?? []).map((r) => r.full_name);

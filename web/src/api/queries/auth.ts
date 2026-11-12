@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import apiClient, { navigation, setCsrfToken } from "@/api/client";
 import type { MeResponse } from "@/api/types";
+import { forgetBrowserData } from "@/lib/repo-cache";
 
 export const authMeQueryOptions = queryOptions({
   queryKey: ["auth", "me"],
@@ -25,6 +26,9 @@ export function useLogout() {
 
   return useMutation({
     mutationFn: async () => {
+      // before the request: someone signing out of a shared browser wants
+      // nothing of theirs left in it, even if the server can't be reached
+      forgetBrowserData();
       await apiClient.post("/auth/logout");
     },
     onSuccess: () => {

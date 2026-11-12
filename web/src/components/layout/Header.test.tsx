@@ -118,9 +118,15 @@ describe("Header", () => {
     expect(
       screen.queryByRole("menuitem", { name: /reseal/i }),
     ).not.toBeInTheDocument();
+    // what this browser keeps of anyone's goes with signing out; the
+    // theme, which is no one's, stays
+    localStorage.setItem("sealer.repos.v1:1:dev", "{}");
+    localStorage.setItem("sealer.recent-repos:octocat:dev", "[]");
+    localStorage.setItem("sealer-theme", "dark");
     fireEvent.click(screen.getByRole("menuitem", { name: /sign out/i }));
 
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
+    expect(Object.keys(localStorage)).toEqual(["sealer-theme"]);
     const logout = api.calls.find((c) => c.url === "/auth/logout");
     // signing out is for every env at once
     expect(logout).toEqual({
