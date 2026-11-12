@@ -112,7 +112,24 @@ describe("KeyList", () => {
     expect(
       within(views).getByRole("button", { name: "All 14" }),
     ).toHaveAttribute("aria-pressed", "true");
+    // one joined group as tall as the filter, the chosen segment's edge on
+    // the group's outline
+    expect(views).toHaveClass("h-8");
+    expect(screen.getByRole("searchbox", { name: "Filter keys" })).toHaveClass(
+      "h-8",
+    );
+    expect(within(views).getByRole("button", { name: "All 14" })).toHaveClass(
+      "z-10",
+      "border-primary",
+      "bg-selected",
+    );
     fireEvent.click(within(views).getByRole("button", { name: "To seal 2" }));
+    expect(
+      within(views).getByRole("button", { name: "To seal 2" }),
+    ).toHaveClass("z-10", "border-primary");
+    expect(
+      within(views).getByRole("button", { name: "All 14" }),
+    ).not.toHaveClass("border-primary");
     expect(rows()).toEqual(["tax-api-key", "risk-token"]);
     fireEvent.click(within(views).getByRole("button", { name: "Pending 1" }));
     expect(rows()).toEqual(["key-03"]);
