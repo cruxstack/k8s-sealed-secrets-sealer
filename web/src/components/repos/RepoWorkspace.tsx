@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ExternalLink, FileSearch, GitBranch, Lock, X } from "lucide-react";
@@ -16,11 +16,15 @@ import { useEnv } from "@/lib/env";
 import { safeHttpUrl, sentence } from "@/lib/utils";
 import { FileList, fileStatus } from "./FileList";
 import { FilePanel } from "./FilePanel";
+import { sortFiles } from "./hints";
 import { OpenedDialog, PendingChanges } from "./PendingChanges";
 import { AccessBadge } from "./RepoList";
 import { useFileReseal } from "./ResealFile";
 
-/** The file to show when none is chosen: the first one values fit in. */
+/**
+ * The file to show when none is chosen: the first one values fit in, in
+ * the list's order.
+ */
 function defaultFile(files: RepositoryFile[]): RepositoryFile | undefined {
   return files.find((f) => fileStatus(f) === "ready") ?? files[0];
 }
@@ -193,7 +197,8 @@ export function RepoWorkspace({
     onSelect(path);
   };
 
-  const files = data?.files ?? [];
+  // in the list's order: files with an order hint first
+  const files = useMemo(() => sortFiles(data?.files ?? []), [data?.files]);
   const chosen = files.find((f) => f.path === selected);
   const current = chosen ?? defaultFile(files);
   const canWrite = data?.repository.access === "write";

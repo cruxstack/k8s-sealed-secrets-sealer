@@ -237,6 +237,8 @@ export interface SealedSecretDocument {
   expected_keys?: string[];
   /** An http(s) link to the secret's docs. */
   docs?: string;
+  /** Where its file goes in the file list: 0 first, then up. */
+  order?: number;
 }
 
 /** A file holding SealedSecret documents for this env. */

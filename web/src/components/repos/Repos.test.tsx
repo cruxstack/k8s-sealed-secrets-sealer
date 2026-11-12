@@ -169,6 +169,56 @@ describe("repositories", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("lists files with an order hint first, 0 at the top, and opens the first", async () => {
+    const base = listing();
+    const [billing, legacy] = base.files;
+    const worker = {
+      ...billing!,
+      path: "deploy/worker/sealed-secret.yaml",
+      blob: "3333333333333333333333333333333333333333",
+      documents: (billing!.documents ?? []).map((d) => ({ ...d, order: 0 })),
+    };
+    renderAt(
+      "/secrets/example-org/apps",
+      fakeApi({
+        me: ME,
+        files: {
+          "example-org/apps": listing({
+            // the server's order, by path
+            files: [
+              {
+                ...billing!,
+                documents: (billing!.documents ?? []).map((d) => ({
+                  ...d,
+                  order: 5,
+                })),
+              },
+              legacy!,
+              worker,
+            ],
+          }),
+        },
+      }),
+    );
+    const files = await screen.findByRole("list", { name: "Files" });
+    expect(
+      within(files)
+        .getAllByRole("button")
+        .map((b) => b.getAttribute("aria-label") ?? b.textContent),
+    ).toEqual([
+      expect.stringMatching(/^deploy\/worker\//),
+      expect.stringMatching(/^deploy\/billing\//),
+      // no order: after the files with one
+      expect.stringMatching(/^deploy\/legacy\//),
+    ]);
+    // with no file in the URL, the page opens the first in that order
+    expect(
+      await screen.findByRole("region", {
+        name: "deploy/worker/sealed-secret.yaml",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("names a file by its title, over its path, and filters by it", async () => {
     const base = listing();
     const [billing, ...rest] = base.files;

@@ -11,8 +11,9 @@
 //
 // Optional hint annotations, under the env annotation's prefix, only help
 // people: a short name for the secret (<prefix>/title), what it is for
-// (<prefix>/description), the keys it should hold (<prefix>/keys) and where
-// its docs are (<prefix>/docs). They never change what is sealed or where.
+// (<prefix>/description), the keys it should hold (<prefix>/keys), where
+// its docs are (<prefix>/docs) and where its file goes in the list
+// (<prefix>/order). They never change what is sealed or where.
 package manifest
 
 import (
@@ -23,6 +24,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -49,6 +51,7 @@ const (
 	maxTitleRunes       = 80
 	maxDescriptionRunes = 300
 	maxDocsURLBytes     = 2048
+	maxOrder            = 1_000_000
 )
 
 // DefaultPrefix is the annotation prefix hints use when the env annotation
@@ -109,12 +112,14 @@ type Document struct {
 	Problem string `json:"problem,omitempty"`
 
 	// Hints from optional annotations, for people: a short name for the
-	// secret, what it is for, the keys it should hold, and an http(s) link
-	// to its docs.
+	// secret, what it is for, the keys it should hold, an http(s) link to
+	// its docs, and where its file goes in the list (0 first; nil when
+	// unset, so it goes after the files that set one).
 	Title        string   `json:"title,omitempty"`
 	Description  string   `json:"description,omitempty"`
 	ExpectedKeys []string `json:"expected_keys,omitempty"`
 	Docs         string   `json:"docs,omitempty"`
+	Order        *int     `json:"order,omitempty"`
 
 	// badRegions is set when the region annotation is not a region list.
 	badRegions bool
@@ -201,6 +206,7 @@ func find(content []byte, ann Annotations, env string, withValues bool) ([]Docum
 			Description:  oneLine(annotations[ann.Hint("description")], maxDescriptionRunes),
 			ExpectedKeys: expectedKeys(annotations[ann.Hint("keys")]),
 			Docs:         docsURL(annotations[ann.Hint("docs")]),
+			Order:        order(annotations[ann.Hint("order")]),
 		}
 		doc.Regions, doc.badRegions = regionList(annotations[ann.Region])
 		doc.Problem = problem(root, spec, doc)
@@ -443,6 +449,20 @@ func expectedKeys(v string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// order returns an order hint when it is a whole number from 0 to
+// maxOrder, written in digits alone; anything else is no hint.
+func order(v string) *int {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > len(strconv.Itoa(maxOrder)) || strings.Trim(v, "0123456789") != "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n > maxOrder {
+		return nil
+	}
+	return &n
 }
 
 // docsURL returns a docs hint when it is an absolute http(s) URL, the only

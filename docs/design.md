@@ -1682,7 +1682,7 @@ lists them separated by commas or spaces (`use1, use2`, at most 32); they
 share the document, so a value goes to all of them. Files that already use
 other annotation names keep working by configuring the keys to match them.
 
-**Hints.** Four more annotations, under the env annotation's prefix (the
+**Hints.** Five more annotations, under the env annotation's prefix (the
 part of its key before `/`), help people seal the right values. They are
 optional and change nothing about how a value is sealed:
 
@@ -1696,6 +1696,8 @@ optional and change nothing about how a value is sealed:
 |                        | commas or spaces.                             |
 | `<prefix>/docs`        | An http(s) link to the secret's docs or       |
 |                        | runbook.                                      |
+| `<prefix>/order`       | Where the file goes in the file list: a whole |
+|                        | number, quoted, 0 at the top.                 |
 
 ```yaml
 metadata:
@@ -1705,6 +1707,7 @@ metadata:
     k8s-sealed-secrets-sealer/description: Credentials the billing service uses
     k8s-sealed-secrets-sealer/keys: api-token, db-password
     k8s-sealed-secrets-sealer/docs: https://docs.example.com/runbooks/billing
+    k8s-sealed-secrets-sealer/order: "0"
 ```
 
 The UI names a file by its title, with its path under it, in the file list
@@ -1712,11 +1715,18 @@ and the file's header; a file without one goes by its path. It shows the
 description in the same places, links the docs, lists the expected keys
 first among the file's keys and marks the ones some document lacks, suggests
 them first in the seal form and warns, without refusing, when a new key is
-not among them. Invalid values are dropped: a key that cannot name a Secret
-value, a link that is not absolute http(s) or carries credentials. Control
-and formatting characters are dropped from a title or description, so
-neither can read as something else. They come from the documents
-themselves, so they are reviewed with the file like any other change.
+not among them. It lists the files with an order first, lowest first, then
+the rest by path, and opens the first one values can be sealed into when
+none is picked; a file takes the first order its documents give, and files
+with the same order stay in path order. Annotation values are strings, so
+an order is quoted (`"0"`).
+
+Invalid values are dropped: a key that cannot name a Secret value, a link
+that is not absolute http(s) or carries credentials, an order that is not a
+whole number from 0 to 1000000 in digits alone. Control and formatting
+characters are dropped from a title or description, so neither can read as
+something else. Hints come from the documents themselves, so they are
+reviewed with the file like any other change.
 
 **Discovery.** A repository's SealedSecret files are found on the head of its
 default branch: the commit's tree is listed once, files whose name matches
