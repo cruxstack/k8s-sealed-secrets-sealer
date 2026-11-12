@@ -208,12 +208,12 @@ fits before it, cut at the start with an ellipsis, since the folders nearest
 a file tell it from the others (`PathLine`). The whole path is its `title`
 and what a screen reader reads.
 
-A file's header keeps its title, path and description to one line each as
-well, and doesn't repeat what its sections say (the documents table counts
-the SealedSecrets). The description runs under the actions, across the
-header's whole width. Whatever is cut shows whole in a tooltip on hover,
+A file's header keeps its title and path to one line each as well, and
+doesn't repeat what its sections say (the documents table counts the
+SealedSecrets). Either one, when cut, shows whole in a tooltip on hover,
 keyboard focus and a tap (`OneLine`), and takes keyboard focus only while
-it is cut.
+it is cut. The description is prose: it runs under the actions, across the
+header's whole width, and wraps at its edge.
 
 ## Keyboard
 

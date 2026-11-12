@@ -203,8 +203,9 @@ function Documents({
 }
 
 /**
- * A file's panel: a header with its title, path and description, each on
- * one line with the whole in a tooltip when it is cut, and its actions.
+ * A file's panel: a header with its title and path, each on one line with
+ * the whole in a tooltip when it is cut, its actions, and its description
+ * under them all, across the header's whole width.
  */
 function Panel({
   file,
@@ -257,13 +258,10 @@ function Panel({
           </div>
         )}
         {description && (
-          <div className="min-w-0 sm:col-span-2">
-            <OneLine full={description}>
-              <span className="block truncate text-sm text-muted-foreground italic">
-                {description}
-              </span>
-            </OneLine>
-          </div>
+          // prose: it wraps, but at the header's edge, not the actions'
+          <p className="text-sm text-muted-foreground italic sm:col-span-2">
+            {description}
+          </p>
         )}
       </div>
       {children}

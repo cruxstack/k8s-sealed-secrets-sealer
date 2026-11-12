@@ -743,16 +743,15 @@ describe("hints", () => {
     );
 
     const panel = await screen.findByRole("region", { name: BILLING });
-    // the description reads apart from the title and path, on one line
+    // the description reads apart from the title and path, and wraps
+    // across the header's whole width, under the actions
     const description = within(panel).getByText(
       "Credentials for the payment provider",
     );
     expect(description).toBeVisible();
-    expect(description).toHaveClass(
-      "truncate",
-      "italic",
-      "text-muted-foreground",
-    );
+    expect(description).toHaveClass("italic", "text-muted-foreground");
+    expect(description).not.toHaveClass("truncate");
+    expect(description.className).toContain("sm:col-span-2");
     // the documents table counts the SealedSecrets; the header doesn't
     expect(panel).not.toHaveTextContent(/SealedSecrets? for the dev env/);
     const docs = within(panel).getByRole("link", { name: /docs/i });
