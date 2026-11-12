@@ -32,9 +32,9 @@ export const Route = createFileRoute("/setup")({
 
 const PERMISSION_LABELS: Readonly<Record<string, string>> = {
   contents: "Contents",
-  pull_requests: "Pull requests",
+  pull_requests: "Pull Requests",
   metadata: "Metadata",
-  members: "Members (organization)",
+  members: "Members (Organization)",
 };
 
 const PERMISSION_USES: Readonly<Record<string, string>> = {
@@ -59,7 +59,7 @@ function SetupPage() {
             />
           </div>
           <div className="text-center">
-            <h1 className="text-2xl font-bold tracking-tight">Set up Sealer</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Set Up Sealer</h1>
             <p className="mt-2 text-sm text-muted-foreground">
               Sealer reads and writes your repositories, and signs people in, as
               a GitHub App in your organization.
@@ -130,7 +130,7 @@ function CreateApp({
           </ol>
 
           <div className="space-y-2">
-            <h2 className="font-medium">The App asks for</h2>
+            <h2 className="font-medium">The App Asks For</h2>
             <ul className="divide-y rounded-lg border">
               {setup.permissions.map((p) => (
                 <li
@@ -147,7 +147,7 @@ function CreateApp({
                     </span>
                   </span>
                   <span className="shrink-0 text-muted-foreground">
-                    {p.access === "write" ? "Read and write" : "Read"}
+                    {p.access === "write" ? "Read and Write" : "Read"}
                   </span>
                 </li>
               ))}
@@ -180,10 +180,10 @@ function SetUp() {
   return (
     <Alert
       variant="success"
-      heading="Sealer is set up"
+      heading="Sealer Is Set Up"
       action={
         <Button asChild size="sm" variant="outline">
-          <Link to="/login">Sign in</Link>
+          <Link to="/login">Sign In</Link>
         </Button>
       }
     >

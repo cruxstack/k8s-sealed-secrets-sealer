@@ -66,10 +66,10 @@ describe("command palette", () => {
     const apps = await within(dialog).findByRole("option", {
       name: /example-org\/apps/,
     });
-    expect(apps).toHaveTextContent("2 pending");
+    expect(apps).toHaveTextContent("2 Pending");
     expect(
       within(dialog).getByRole("option", { name: /example-org\/platform/ }),
-    ).toHaveTextContent("Read only");
+    ).toHaveTextContent("Read Only");
 
     const input = within(dialog).getByRole("combobox");
     fireEvent.change(input, { target: { value: "platform" } });

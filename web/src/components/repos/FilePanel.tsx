@@ -47,11 +47,11 @@ const SCOPES: Record<
     detail: "Decrypts only into a Secret with this exact name and namespace.",
   },
   "namespace-wide": {
-    label: "Namespace-wide",
+    label: "Namespace-Wide",
     detail: "Decrypts into a Secret of any name in this namespace.",
   },
   "cluster-wide": {
-    label: "Cluster-wide",
+    label: "Cluster-Wide",
     detail:
       "Would decrypt into any namespace, so anyone able to create a SealedSecret could read it. Not allowed here.",
   },
@@ -142,7 +142,7 @@ function Documents({
         </caption>
         <TableHeader>
           <tr>
-            <TableHead>Namespace / name</TableHead>
+            <TableHead>Namespace / Name</TableHead>
             <TableHead>Region</TableHead>
             <TableHead className="text-right">Scope</TableHead>
           </tr>
@@ -293,7 +293,7 @@ export function FilePanel({
           <Alert
             variant="destructive"
             role="alert"
-            heading="Could not read this file"
+            heading="Could Not Read This File"
           >
             {sentence(file.error ?? "")} Fix it in the repository, then reload.
           </Alert>
@@ -395,7 +395,7 @@ export function FilePanel({
           ) : (
             <Alert
               variant="warning"
-              heading="Values can't be sealed into this file"
+              heading="Values Can't Be Sealed Into This File"
             >
               A document below can't be sealed into, so the file can't be
               either. Fix it in the repository, then reload.

@@ -118,7 +118,7 @@ export function RevokeKeyDialog({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Revoke this key?</DialogTitle>
+        <DialogTitle>Revoke This Key?</DialogTitle>
         <DialogDescription>
           The control plane stops using{" "}
           <Fingerprint value={fleetKey.fingerprint} className="text-xs" />:
@@ -151,7 +151,7 @@ export function RevokeKeyDialog({
       <Confirm
         request={request}
         failed="revoke the key"
-        label="Revoke key"
+        label="Revoke Key"
         destructive
         onConfirm={onConfirm}
       />
@@ -180,7 +180,7 @@ export function ReinstateKeyDialog({
     <>
       <DialogHeader>
         <DialogTitle>
-          {deleted ? "Reinstate this deleted key?" : "Reinstate this key?"}
+          {deleted ? "Reinstate This Deleted Key?" : "Reinstate This Key?"}
         </DialogTitle>
         {deleted ? (
           <DialogDescription>
@@ -224,7 +224,7 @@ export function ReinstateKeyDialog({
       <Confirm
         request={request}
         failed="reinstate the key"
-        label="Reinstate key"
+        label="Reinstate Key"
         onConfirm={onConfirm}
       />
     </>
@@ -250,7 +250,7 @@ export function DeleteKeyDialog({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Delete this key?</DialogTitle>
+        <DialogTitle>Delete This Key?</DialogTitle>
         <DialogDescription>
           <Fingerprint value={fleetKey.fingerprint} className="text-xs" /> is
           removed from every cluster, and each controller restarts once to drop
@@ -292,7 +292,7 @@ export function DeleteKeyDialog({
       <Confirm
         request={request}
         failed="delete the key"
-        label="Delete key"
+        label="Delete Key"
         destructive
         onConfirm={onConfirm}
       />

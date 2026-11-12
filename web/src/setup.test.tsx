@@ -111,9 +111,9 @@ describe("GitHub App setup page", () => {
     const create = await screen.findByRole("button", {
       name: /create the github app in example-org/i,
     });
-    expect(screen.getByText("Pull requests")).toBeInTheDocument();
-    expect(screen.getByText("Members (organization)")).toBeInTheDocument();
-    expect(screen.getAllByText("Read and write")).toHaveLength(2);
+    expect(screen.getByText("Pull Requests")).toBeInTheDocument();
+    expect(screen.getByText("Members (Organization)")).toBeInTheDocument();
+    expect(screen.getAllByText("Read and Write")).toHaveLength(2);
 
     fireEvent.click(create);
     await waitFor(() => expect(navigation.postForm).toHaveBeenCalledTimes(1));
@@ -153,8 +153,8 @@ describe("GitHub App setup page", () => {
   it("points to signing in once the App is set up", async () => {
     apiClient.defaults.adapter = setupApi({ setup: null }).adapter;
     renderSetup("/setup");
-    expect(await screen.findByText("Sealer is set up")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+    expect(await screen.findByText("Sealer Is Set Up")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Sign In" })).toHaveAttribute(
       "href",
       "/login",
     );

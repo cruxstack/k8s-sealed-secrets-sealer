@@ -103,7 +103,7 @@ export function FleetView() {
         <Alert
           variant="destructive"
           role="alert"
-          heading="Could not load the fleet"
+          heading="Could Not Load the Fleet"
         >
           {sentence(extractApiError(error))}
         </Alert>
@@ -142,7 +142,7 @@ export function FleetView() {
         />
 
         {agents.length === 0 ? (
-          <EmptyState icon={Server} title="No agents registered">
+          <EmptyState icon={Server} title="No Agents Registered">
             Nothing can be sealed until an agent checks in. Add agents to the
             control plane's agent registry; each one appears here once it is
             registered.
@@ -180,7 +180,7 @@ export function FleetView() {
         <section aria-labelledby="deleted-keys-heading" className="space-y-3">
           <SectionHeading
             id="deleted-keys-heading"
-            title="Deleted keys"
+            title="Deleted Keys"
             count={plural(deleted.length, "key")}
             aside="Reinstate one until its escrowed copies are purged"
           />

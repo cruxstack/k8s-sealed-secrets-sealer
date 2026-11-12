@@ -124,7 +124,7 @@ const LOOK: Record<
     icon: RotateCcw,
     iconClass: "text-warning",
     text: "text-warning",
-    action: "Seal again",
+    action: "Seal Again",
   },
 };
 
@@ -241,7 +241,7 @@ const IN_VIEW: Record<KeyView, (k: KeyStatus) => boolean> = {
 
 const VIEW_LABEL: Record<KeyView, string> = {
   all: "All",
-  seal: "To seal",
+  seal: "To Seal",
   pending: "Pending",
 };
 
@@ -482,7 +482,7 @@ export function KeyList({
               >
                 {/* one span: the button's flex box would drop the spaces */}
                 <span>
-                  Seal <code className="font-mono">{newKey}</code> as a new key
+                  Seal <code className="font-mono">{newKey}</code> as a New Key
                 </span>
               </Button>
             )}
@@ -494,7 +494,7 @@ export function KeyList({
                 filterRef.current?.focus();
               }}
             >
-              Clear filter
+              Clear Filter
             </Button>
           </div>
         </div>

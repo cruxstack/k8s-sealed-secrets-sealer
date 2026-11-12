@@ -129,14 +129,14 @@ function KeyStatusBadge({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
         variant="warning"
         title={`Valid only from ${formatDateTime(fleetKey.not_before)}; not used or restored until then`}
       >
-        Future-dated
+        Future-Dated
       </Badge>
     );
   }
   if (fleetKey.env_key) {
     return (
       <Badge variant="success" title="Values are sealed with it">
-        Env key
+        Env Key
       </Badge>
     );
   }
@@ -464,8 +464,8 @@ export function KeyTable({
         <TableHeader>
           <tr>
             <TableHead>Key</TableHead>
-            <TableHead>Valid from</TableHead>
-            <TableHead className="text-right">Held by</TableHead>
+            <TableHead>Valid From</TableHead>
+            <TableHead className="text-right">Held By</TableHead>
             <TableHead className="text-right">Escrowed</TableHead>
             <TableHead className="text-right">References</TableHead>
             <TableHead>Status</TableHead>
@@ -513,7 +513,7 @@ export function DeletedKeyTable({
         <TableHeader>
           <tr>
             <TableHead>Key</TableHead>
-            <TableHead>Valid from</TableHead>
+            <TableHead>Valid From</TableHead>
             <TableHead>Deleted</TableHead>
             <TableHead>Escrow</TableHead>
             <TableHead>Clusters</TableHead>

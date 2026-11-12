@@ -29,7 +29,7 @@ const REPO_STATUS: Record<ResealRunRepo["status"], Look> = {
   pending: { label: "Pending", variant: "outline" },
   resealing: { label: "Resealing", variant: "info" },
   opening: { label: "Opening PR", variant: "info" },
-  opened: { label: "PR opened", variant: "success" },
+  opened: { label: "PR Opened", variant: "success" },
   unchanged: { label: "Unchanged", variant: "secondary" },
   skipped: { label: "Skipped", variant: "outline" },
   failed: { label: "Failed", variant: "destructive" },

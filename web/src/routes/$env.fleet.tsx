@@ -24,7 +24,7 @@ function FleetPage() {
         <EmptyState
           page
           icon={ShieldAlert}
-          title="The fleet is for admins"
+          title="The Fleet Is for Admins"
           action={
             <Button asChild variant="outline" size="sm">
               <Link to="/$env/secrets" params={{ env: env?.name ?? "" }}>

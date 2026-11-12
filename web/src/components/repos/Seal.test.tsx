@@ -150,7 +150,7 @@ describe("sealing", () => {
     ).getByRole("list", { name: "Keys" });
     const row = within(keys).getByRole("button", { name: /^api-token/ });
     expect(row).toHaveTextContent("api-tokenNew, in your pending changes");
-    // "Seal again" is only for values sealed with a revoked key
+    // "Seal Again" is only for values sealed with a revoked key
     expect(row).toHaveTextContent(/Replace$/);
     const files = screen.getByRole("list", { name: "Files" });
     expect(
@@ -258,14 +258,14 @@ describe("sealing", () => {
 
     fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Discard pending changes?",
+      name: "Discard Pending Changes?",
     });
     expect(dialog).toHaveTextContent("This removes 1 pending change");
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
     // the card stays, saying what will gather in it
     expect(await screen.findByText(/Nothing sealed yet/)).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Open pull request" }),
+      screen.queryByRole("button", { name: "Open Pull Request" }),
     ).not.toBeInTheDocument();
     expect(
       api.calls.filter((c) => c.method === "DELETE").map((c) => c.url),
@@ -289,12 +289,12 @@ describe("sealing", () => {
     });
     renderAt(PAGE, api);
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Could not load this repository.*If it is gone from main, discard the changes/,
+      /Could Not Load This Repository.*If it is gone from main, discard the changes/,
     );
     const pending = screen.getByRole("region", { name: /pending changes/i });
     fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Discard pending changes?",
+      name: "Discard Pending Changes?",
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
     await waitFor(() =>
@@ -341,7 +341,7 @@ describe("sealing", () => {
       name: /example-org\/apps/,
     });
     expect(
-      await within(apps).findByText("2 pending changes"),
+      await within(apps).findByText("2 Pending Changes"),
     ).toBeInTheDocument();
   });
 
@@ -366,10 +366,10 @@ describe("sealing", () => {
       name: /pending changes/i,
     });
     fireEvent.click(
-      within(pending).getByRole("button", { name: "Open pull request" }),
+      within(pending).getByRole("button", { name: "Open Pull Request" }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Open a pull request?",
+      name: "Open a Pull Request?",
     });
     expect(dialog).toHaveTextContent(
       "writes 3 sealed values into 2 files, changing only spec.encryptedData",
@@ -381,11 +381,11 @@ describe("sealing", () => {
     expect(files).toHaveTextContent(`${BILLING}api-tokenpassword`);
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Open pull request" }),
+      within(dialog).getByRole("button", { name: "Open Pull Request" }),
     );
     // a dialog says it is open, with the way to it
     const opened = await screen.findByRole("dialog", {
-      name: "Pull request #7 is open",
+      name: "Pull Request #7 Is Open",
     });
     const link = within(opened).getByRole("link", {
       name: /view pull request/i,
@@ -396,7 +396,7 @@ describe("sealing", () => {
     );
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     fireEvent.click(
-      within(opened).getByRole("button", { name: "Keep sealing" }),
+      within(opened).getByRole("button", { name: "Keep Sealing" }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -441,13 +441,13 @@ describe("sealing", () => {
       name: /pending changes/i,
     });
     fireEvent.click(
-      within(pending).getByRole("button", { name: "Open pull request" }),
+      within(pending).getByRole("button", { name: "Open Pull Request" }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Open a pull request?",
+      name: "Open a Pull Request?",
     });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Open pull request" }),
+      within(dialog).getByRole("button", { name: "Open Pull Request" }),
     );
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Could not open the pull request: deploy/billing/sealed-secret.yaml: its documents for the dev env no longer match what api-token was sealed for; seal it again",
@@ -475,7 +475,7 @@ describe("sealing", () => {
     });
     expect(pending).toHaveTextContent(/Nothing sealed yet/);
     expect(
-      within(pending).queryByRole("button", { name: "Open pull request" }),
+      within(pending).queryByRole("button", { name: "Open Pull Request" }),
     ).not.toBeInTheDocument();
     expect(
       within(pending).queryByRole("button", { name: "Discard" }),
@@ -501,7 +501,7 @@ describe("sealing", () => {
       name: /pending changes/i,
     });
     const open = within(pending).getByRole("button", {
-      name: "Open pull request",
+      name: "Open Pull Request",
     });
     expect(open).toBeEnabled();
 
@@ -572,7 +572,7 @@ describe("sealing", () => {
 
     fireEvent.click(within(pending).getByRole("button", { name: "Discard" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Discard pending changes?",
+      name: "Discard Pending Changes?",
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
     await waitFor(() =>
@@ -599,10 +599,10 @@ describe("sealing", () => {
     const pending = await screen.findByRole("region", {
       name: /pending changes/i,
     });
-    const badge = within(pending).getByText("Seal again");
+    const badge = within(pending).getByText("Seal Again");
     expect(badge).toHaveAttribute("title", expect.stringMatching(/revoked/));
     const open = within(pending).getByRole("button", {
-      name: "Open pull request",
+      name: "Open Pull Request",
     });
     expect(open).toBeDisabled();
     const why = "Seal again, or remove, the values sealed with a revoked key.";
@@ -615,7 +615,7 @@ describe("sealing", () => {
     const keys = within(panel).getByRole("list", { name: "Keys" });
     const row = within(keys).getByRole("button", { name: /^api-token/ });
     expect(row).toHaveTextContent("Sealed with a revoked key; seal it again");
-    expect(row).toHaveTextContent(/Seal again$/);
+    expect(row).toHaveTextContent(/Seal Again$/);
     expect(
       within(keys).getByRole("button", {
         name: "use2: sealed with a revoked key, seal again. Seal api-token for use2 only",
@@ -623,7 +623,7 @@ describe("sealing", () => {
     ).toHaveClass("text-warning");
     const files = screen.getByRole("list", { name: "Files" });
     const billing = within(files).getByRole("button", { name: /billing/ });
-    expect(within(billing).getByText("Seal again")).toBeInTheDocument();
+    expect(within(billing).getByText("Seal Again")).toBeInTheDocument();
     // and not as a blue pending count
     expect(within(billing).queryByText("pending")).not.toBeInTheDocument();
   });
@@ -659,7 +659,7 @@ describe("sealing", () => {
     });
     // the server's problem, as a sentence; a refused scope is a warning
     expect(legacy).toHaveTextContent("Cluster-wide scope is not allowed.");
-    expect(within(legacy).getByText("Cluster-wide")).toHaveClass(
+    expect(within(legacy).getByText("Cluster-Wide")).toHaveClass(
       "text-warning",
     );
     expect(legacy).toHaveTextContent(/can't be sealed into/);
@@ -749,7 +749,7 @@ describe("hints", () => {
     const files = screen.getByRole("list", { name: "Files" });
     const item = within(files).getByRole("button", { name: /billing/ });
     expect(item).toHaveTextContent("Credentials for the payment provider");
-    expect(item).toHaveTextContent("2 missing");
+    expect(item).toHaveTextContent("2 Missing");
     fireEvent.change(screen.getByLabelText("Filter files"), {
       target: { value: "payment" },
     });
@@ -899,7 +899,7 @@ describe("regions", () => {
     expect(within(form).getByText(/Only the documents in use2/)).toBeVisible();
 
     fireEvent.click(
-      within(regions).getByRole("button", { name: "All regions" }),
+      within(regions).getByRole("button", { name: "All Regions" }),
     );
     expect(chip("use1")).toHaveAttribute("aria-pressed", "true");
     fireEvent.change(key, { target: { value: "api-key" } });

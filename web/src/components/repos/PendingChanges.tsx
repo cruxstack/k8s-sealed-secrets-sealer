@@ -149,7 +149,7 @@ function ChangeItem({
               className="shrink-0"
               title="Sealed with a key an admin has since revoked. Seal the value again, or remove it, before opening a pull request."
             >
-              Seal again
+              Seal Again
             </Badge>
           )}
         </p>
@@ -188,7 +188,7 @@ function ChangeItem({
         onClick={onRemove}
         disabled={removing}
         aria-label={`Remove ${keyIn(change)} from ${change.path}`}
-        title="Remove this change"
+        title="Remove This Change"
       >
         <Trash2 className="h-4 w-4" aria-hidden="true" />
       </Button>
@@ -228,7 +228,7 @@ export function PendingChanges({
     >
       <div className="border-b border-border px-4 py-3">
         <CardHeading id="pending-heading" count={0}>
-          Pending changes
+          Pending Changes
         </CardHeading>
       </div>
       <p className="px-4 py-3 text-xs text-muted-foreground">{NOTHING_YET}</p>
@@ -315,7 +315,7 @@ function SessionChanges({
     >
       <div className="space-y-0.5 border-b border-border px-4 py-3">
         <CardHeading id="pending-heading" count={changes.length}>
-          Pending changes
+          Pending Changes
         </CardHeading>
         <p className="text-xs text-muted-foreground">
           On <code className="font-mono">{session.branch}</code> at{" "}
@@ -372,7 +372,7 @@ function SessionChanges({
                 }}
               >
                 <GitPullRequest className="mr-1.5 h-4 w-4" aria-hidden="true" />
-                Open pull request
+                Open Pull Request
               </Button>
               <Button
                 variant="ghost"
@@ -403,7 +403,7 @@ function SessionChanges({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Open a pull request?</DialogTitle>
+            <DialogTitle>Open a Pull Request?</DialogTitle>
             <DialogDescription>
               One commit on a new branch from{" "}
               <code className="font-mono">{session.branch}</code> at{" "}
@@ -453,7 +453,7 @@ function SessionChanges({
               ) : (
                 <GitPullRequest className="mr-2 h-4 w-4" aria-hidden />
               )}
-              {open.isPending ? "Opening…" : "Open pull request"}
+              {open.isPending ? "Opening…" : "Open Pull Request"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -465,7 +465,7 @@ function SessionChanges({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Discard pending changes?</DialogTitle>
+            <DialogTitle>Discard Pending Changes?</DialogTitle>
             <DialogDescription>
               This removes{" "}
               {plural(changes.length, "pending change", "pending changes")} to{" "}
@@ -518,7 +518,7 @@ export function OpenedDialog({
             </div>
             <DialogHeader className="space-y-2 pr-0 text-center">
               <DialogTitle className="text-xl">
-                Pull request #{pr.number} is open
+                Pull Request #{pr.number} Is Open
               </DialogTitle>
               <DialogDescription className="space-y-1">
                 <span className="block font-medium text-foreground">
@@ -537,13 +537,13 @@ export function OpenedDialog({
               {url && (
                 <Button asChild className="w-full">
                   <a href={url} target="_blank" rel="noopener noreferrer">
-                    View pull request
+                    View Pull Request
                     <ExternalLink className="ml-2 h-4 w-4" aria-hidden="true" />
                   </a>
                 </Button>
               )}
               <Button variant="outline" className="w-full" onClick={onClose}>
-                Keep sealing
+                Keep Sealing
               </Button>
             </div>
           </>

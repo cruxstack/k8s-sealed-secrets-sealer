@@ -36,7 +36,7 @@ function ResealPage() {
         <EmptyState
           page
           icon={ShieldAlert}
-          title="Resealing is for admins"
+          title="Resealing Is for Admins"
           action={
             <Button asChild variant="outline" size="sm">
               <Link to="/$env/secrets" params={{ env: env?.name ?? "" }}>

@@ -249,16 +249,16 @@ function summaryTitle(r: FileReseal): {
   tone: "success" | "error";
 } {
   if (r.status === "expired") {
-    return { title: "Resealing timed out", tone: "error" };
+    return { title: "Resealing Timed Out", tone: "error" };
   }
   if (r.status === "failed")
-    return { title: "Resealing failed", tone: "error" };
+    return { title: "Resealing Failed", tone: "error" };
   const { resealed, failed } = r.values;
   if (resealed > 0) {
-    return { title: `Resealed ${plural(resealed, "value")}`, tone: "success" };
+    return { title: `Resealed ${plural(resealed, "Value")}`, tone: "success" };
   }
-  if (failed > 0) return { title: "No value was resealed", tone: "error" };
-  return { title: "Nothing to reseal", tone: "success" };
+  if (failed > 0) return { title: "No Value Was Resealed", tone: "error" };
+  return { title: "Nothing to Reseal", tone: "success" };
 }
 
 /** The values of a file's documents for the env, and those pending. */
@@ -325,7 +325,7 @@ function ConfirmStep({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Reseal all values in this file?</DialogTitle>
+        <DialogTitle>Reseal All Values in This File?</DialogTitle>
         <DialogDescription>
           <code className="font-mono text-xs [overflow-wrap:anywhere]">
             {file.path}
@@ -365,7 +365,7 @@ function ConfirmStep({
         </DialogClose>
         <Button onClick={onConfirm}>
           <RotateCcwKey className="mr-2 h-4 w-4" aria-hidden="true" />
-          Reseal all
+          Reseal All
         </Button>
       </DialogFooter>
     </>
@@ -573,7 +573,7 @@ export function ResealAll({
         ) : (
           <RotateCcwKey className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
         )}
-        {running && here ? "Resealing…" : "Reseal all"}
+        {running && here ? "Resealing…" : "Reseal All"}
       </ReasonButton>
       <Dialog
         open={state.open && here}

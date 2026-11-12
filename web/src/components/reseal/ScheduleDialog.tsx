@@ -261,7 +261,7 @@ function preview(
   now: Date,
 ): string | null {
   if (!enabled) {
-    return "Paused: it doesn't run until you resume it. Run now still works.";
+    return "Paused: it doesn't run until you resume it. Run Now still works.";
   }
   if (
     schedule?.enabled &&
@@ -378,12 +378,12 @@ function ScheduleForm({
     <form
       onSubmit={submit}
       onKeyDown={onFormKeyDown}
-      aria-label={editing ? `Edit ${schedule.name}` : "New schedule"}
+      aria-label={editing ? `Edit ${schedule.name}` : "New Schedule"}
       className="grid gap-4"
       noValidate
     >
       <DialogHeader>
-        <DialogTitle>{editing ? "Edit schedule" : "New schedule"}</DialogTitle>
+        <DialogTitle>{editing ? "Edit Schedule" : "New Schedule"}</DialogTitle>
         <DialogDescription>
           Every so many days, a run reseals the values of these repositories
           that are on older keys, and opens a pull request in each one with
@@ -539,8 +539,8 @@ function ScheduleForm({
           {save.isPending
             ? "Saving…"
             : editing
-              ? "Save changes"
-              : "Create schedule"}
+              ? "Save Changes"
+              : "Create Schedule"}
         </Button>
       </DialogFooter>
     </form>

@@ -1994,8 +1994,8 @@ sets the next run an interval from now, as does enabling the schedule
 again; disabling it clears the next run, and any other change keeps it.
 
 A run is started by a tick when its schedule is due, or by an admin with
-"Run now". A schedule has one active run at most: a due schedule waits for
-it, and "Run now" is refused meanwhile (409). Ticks advance a run a bounded
+"Run Now". A schedule has one active run at most: a due schedule waits for
+it, and "Run Now" is refused meanwhile (409). Ticks advance a run a bounded
 step at a time:
 
 1. **Discover** the repositories: those listed, and every repository of the
@@ -2116,7 +2116,7 @@ repository and counts, never a value or ciphertext:
 | `reseal.schedule_created` | An admin creates a schedule.                    |
 | `reseal.schedule_updated` | An admin changes one.                           |
 | `reseal.schedule_deleted` | An admin deletes one.                           |
-| `reseal.run_started`      | A run starts, on schedule or by "Run now".      |
+| `reseal.run_started`      | A run starts, on schedule or by "Run Now".      |
 | `reseal.run_finished`     | A run ends, or is cancelled: its status and     |
 |                           | counts.                                         |
 | `reseal.pr_opened`        | A reseal pull request is opened.                |

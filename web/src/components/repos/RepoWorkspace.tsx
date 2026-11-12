@@ -44,7 +44,7 @@ function OpenedBanner({
           {url && (
             <Button asChild variant="outline" size="sm">
               <a href={url} target="_blank" rel="noopener noreferrer">
-                View pull request
+                View Pull Request
                 <ExternalLink
                   className="ml-1.5 h-3.5 w-3.5"
                   aria-hidden="true"
@@ -114,7 +114,7 @@ function LoadError({
         variant="destructive"
         role="alert"
         heading={
-          missing ? "Repository not found" : "Could not load this repository"
+          missing ? "Repository Not Found" : "Could Not Load This Repository"
         }
         action={
           <Button asChild variant="outline" size="sm">
@@ -280,7 +280,7 @@ export function RepoWorkspace({
             <Alert
               variant="destructive"
               role="status"
-              heading={`Can't seal in ${env} right now`}
+              heading={`Can't Seal in ${env} Right Now`}
             >
               {sentence(status.message)} You can still look around.
             </Alert>

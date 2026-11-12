@@ -30,7 +30,7 @@ function ErrorPanel({ title, message }: { title: string; message: string }) {
           {message}
         </pre>
         <Button type="button" onClick={() => window.location.reload()}>
-          Refresh page
+          Refresh Page
         </Button>
       </div>
     </div>
@@ -59,7 +59,7 @@ class ErrorBoundary extends Component<
     if (this.state.error) {
       return (
         <ErrorPanel
-          title="Something went wrong"
+          title="Something Went Wrong"
           message={this.state.error.message}
         />
       );
@@ -71,7 +71,7 @@ class ErrorBoundary extends Component<
 function RouteError({ error }: ErrorComponentProps) {
   const message =
     error instanceof Error ? error.message : "An unexpected error occurred.";
-  return <ErrorPanel title="Page error" message={message} />;
+  return <ErrorPanel title="Page Error" message={message} />;
 }
 
 function PageSkeleton() {

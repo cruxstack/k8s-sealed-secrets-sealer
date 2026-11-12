@@ -52,8 +52,8 @@ says so above the files, since seals would fail.
 
 Under its agents, the fleet lists the env's keys, newest first: how many
 clusters hold each, its escrowed copies, its references (the values sealed with
-it, as its clusters counted them), and its status as a badge (env key, active,
-revoked, future-dated). Deleted keys have a table of their own under it, so the
+it, as its clusters counted them), and its status as a badge (Env Key, Active,
+Revoked, Future-Dated). Deleted keys have a table of their own under it, so the
 keys in use stand out: who deleted each and when, when its escrowed copies are
 purged, and the clusters it is still being removed from. Nothing refers to a
 deleted key, so that table has no references. A reference count never shows a
@@ -93,7 +93,7 @@ does not rotate them), and a warning when the env cannot reseal now. Then
 come the reseal pull requests, like a maintenance queue: the open ones,
 oldest first, with merged, closed and all a toggle away, an open one's age
 in the warning color once it is a week old, and a count of those in
-repositories the viewer cannot read. Then the schedules, with Run now,
+repositories the viewer cannot read. Then the schedules, with Run Now,
 Edit, Pause or Resume, and Delete as row icons, and their runs, newest
 first, each opening in a row under it with what it did per repository. The
 schedule and the open run are in the URL (`?schedule=`, `?run=`), so the
@@ -149,7 +149,7 @@ The regions chosen stay for the next value, since values that differ by
 region usually come several at a time.
 
 The file's header holds its actions: Docs, and for the env's admins
-"Reseal all", which moves the file's values on older keys to the env key as
+"Reseal All", which moves the file's values on older keys to the env key as
 pending changes (on a phone they go under the path). Its dialog says what
 it does and does not do, then shows its progress and what it did: values
 resealed, already current, failed with why, and left out because a change
@@ -159,8 +159,8 @@ came off in the cart, "Resealed" in its key's row, and "resealed values" in
 the pull request dialog.
 
 A pending change sealed with a key an admin has since revoked is amber "Seal
-again" everywhere it shows: its badge in the cart, its key's row and region
-chips, and its file in the list. "Seal again" means only that; a key whose
+Again" everywhere it shows: its badge in the cart, its key's row and region
+chips, and its file in the list. "Seal Again" means only that; a key whose
 pending value is fine offers "Replace". The pull request button stays
 disabled until the value is sealed again or removed, with the reason in
 muted text under it (and in its `title`), as for any disabled action.
@@ -217,9 +217,31 @@ that waits on a status that could not be read says so, never "Checking…"
 for good. A row action stays busy until the list it changed is read again,
 so it can't be used twice in between.
 
+## Capitalization
+
+Names of things and of actions are in Title Case: page, section, card and
+dialog titles, buttons, menu items, toggles, badges and status labels, table
+column names, form labels, and the headings of alerts and empty states that
+name something ("Could Not Load Repositories", "No Schedules"). Capitalize
+every word but articles (a, an, the), coordinating conjunctions (and, but,
+or, nor, for, so, yet) and prepositions of three letters or fewer (as, at,
+by, for, in, of, off, on, per, to, up, via), unless it comes first or last.
+A phrasal verb's particle is capitalized ("Sign In", "Set Up"), and so is
+each part of a hyphenated word ("Future-Dated", "Namespace-Wide").
+
+Whatever is a sentence stays in sentence case: body and help text, notes
+beside a heading ("Refreshes every 15 seconds"), status lines, a cell's
+words ("Not counted yet"), toasts, the reasons of grayed-out controls,
+tooltips that explain, and placeholders. So does a heading that is a
+sentence with figures in it (the key limit notice), and text only a screen
+reader reads (`aria-label`, table captions). Identifiers keep their own
+case wherever they appear: env names, keys, paths and fingerprints ("Can't
+Seal in dev Right Now"). Text that names a control matches its label
+("start one with Run Now").
+
 ## Headings
 
-There are two section headings, and no uppercase ones:
+There are two section headings, in Title Case and never uppercase:
 
 - A section of a page, above its table or cards, uses `SectionHeading`: the
   title in `text-base font-semibold` with its count in muted `text-sm`
@@ -287,7 +309,7 @@ the right (filters, refresh status, export). Keep a toolbar to one row on a
 desktop width; if a section needs more than three controls, it needs a
 different design.
 
-A choice between views of a list (a file's keys: All, To seal, Pending) is
+A choice between views of a list (a file's keys: All, To Seal, Pending) is
 one joined group of buttons, as tall as the filter beside it, each with its
 count. The chosen one (`aria-pressed`) has the selected colors and its own
 primary edge, drawn on the group's outline rather than inset in it.
@@ -318,10 +340,10 @@ content with `p-10`.
 
 ## Buttons
 
-- One primary button per card or dialog, for its main action (Sign in with
-  GitHub, Seal, Open pull request). Everything else is `outline` or `ghost`.
+- One primary button per card or dialog, for its main action (Sign In With
+  GitHub, Seal, Open Pull Request). Everything else is `outline` or `ghost`.
 - Every size shares one radius. Actions inside cards are `size="sm"` (Seal,
-  Open pull request, Docs); page and dialog actions use the default size.
+  Open Pull Request, Docs); page and dialog actions use the default size.
   Buttons stacked in a dialog are the same size and full width.
 - Header controls are all `h-9`: the search button, the theme toggle and
   the account menu.
@@ -370,7 +392,7 @@ destructive, and its help text says what is wrong.
   and never replaces an error that needs action. Toasts sit top right,
   under the header, clear of the seal form and the cart.
 - The end of a flow (a pull request opened) gets a dialog with the way
-  forward ("View pull request") and the way back ("Keep sealing").
+  forward ("View Pull Request") and the way back ("Keep Sealing").
 - Errors from the API show the server's short message in an alert, never a
   stack trace or a raw status code alone. A page that could not load says
   what to do next and links back (a repository that was not found links to
@@ -382,9 +404,9 @@ destructive, and its help text says what is wrong.
   repository list shows its table's header and three rows), and controls
   that will be there render disabled rather than appearing late.
 - Empty states (`EmptyState`) say what is missing, then why and what to do
-  about it ("No repositories" / "The GitHub App is not installed…"). A
+  about it ("No Repositories" / "The GitHub App is not installed…"). A
   filter that matches nothing says so with the filter in quotes ("No file
-  matches “billing”.") and offers Clear filter.
+  matches “billing”.") and offers Clear Filter.
 
 ## Color
 
@@ -396,13 +418,13 @@ controls are the exception, at `opacity-50`. Each meaning has one token:
 
 | Meaning                           | Token                  | Examples                                                                           |
 | --------------------------------- | ---------------------- | ---------------------------------------------------------------------------------- |
-| Works, done                       | `success`              | Healthy, Env key, sealed, pull request opened                                      |
-| Needs attention                   | `warning`              | Missing keys, Seal again, key limit near, refused scope                            |
-| Failed, unavailable, irreversible | `destructive`          | Errors, Revoked, Unhealthy, Never checked in, sealing unavailable, unreadable file |
-| Pending, informational            | `info`                 | Pending changes, read only, list may be incomplete                                 |
+| Works, done                       | `success`              | Healthy, Env Key, sealed, pull request opened                                      |
+| Needs attention                   | `warning`              | Missing keys, Seal Again, key limit near, refused scope                            |
+| Failed, unavailable, irreversible | `destructive`          | Errors, Revoked, Unhealthy, Never Checked In, sealing unavailable, unreadable file |
+| Pending, informational            | `info`                 | Pending Changes, Read Only, list may be incomplete                                 |
 | Selected, pressed                 | `selected` + `primary` | The picked file and key row, chosen regions                                        |
 | Action, link, focus               | `primary`, `ring`      | Primary buttons, links, focus rings                                                |
-| Neutral                           | `secondary`, `outline` | Counts, Private, Write, capabilities, Active key                                   |
+| Neutral                           | `secondary`, `outline` | Counts, Private, Write, capabilities, Active                                       |
 
 - Status badges and alerts sit on their color's `*-subtle` background
   (`bg-warning-subtle text-warning`); `Badge` and `Alert` do this.

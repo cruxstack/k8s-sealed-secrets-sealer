@@ -51,8 +51,8 @@ export function FilterInput({
             onValueChange("");
             inputRef.current?.focus();
           }}
-          aria-label="Clear filter"
-          title="Clear filter"
+          aria-label="Clear Filter"
+          title="Clear Filter"
           className="absolute top-1/2 right-1.5 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />

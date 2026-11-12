@@ -36,7 +36,7 @@ export function AccessBadge({ access }: { access: Repository["access"] }) {
   return access === "write" ? (
     <Badge variant="outline">Write</Badge>
   ) : (
-    <Badge variant="secondary">Read only</Badge>
+    <Badge variant="secondary">Read Only</Badge>
   );
 }
 
@@ -54,7 +54,7 @@ function Recent({ items }: { items: RecentItem[] }) {
   if (items.length === 0) return null;
   return (
     <section aria-labelledby="recent-heading" className="space-y-3">
-      <SectionHeading id="recent-heading" title="Recent repositories" />
+      <SectionHeading id="recent-heading" title="Recent Repositories" />
       <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {items.map(({ repo: r, pending, sealedAt, path }) => (
           <li key={r.full_name}>
@@ -72,7 +72,7 @@ function Recent({ items }: { items: RecentItem[] }) {
                   <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     {pending > 0 && (
                       <Badge variant="info">
-                        {plural(pending, "pending change", "pending changes")}
+                        {plural(pending, "Pending Change", "Pending Changes")}
                       </Badge>
                     )}
                     {sealedAt && (
@@ -113,7 +113,7 @@ function IncompleteNotice() {
   );
 }
 
-const COLUMNS = ["Repository", "Visibility", "Your access", "Default branch"];
+const COLUMNS = ["Repository", "Visibility", "Your Access", "Default Branch"];
 
 /** The repositories table's shape while it loads. */
 function TableSkeleton() {
@@ -225,14 +225,14 @@ export function RepoList() {
         <Alert
           variant="destructive"
           role="alert"
-          heading="Could not load repositories"
+          heading="Could Not Load Repositories"
         >
           {sentence(extractApiError(error))}
         </Alert>
       ) : data.length === 0 && list?.incomplete ? (
         <IncompleteNotice />
       ) : data.length === 0 ? (
-        <EmptyState icon={FolderGit2} title="No repositories">
+        <EmptyState icon={FolderGit2} title="No Repositories">
           The GitHub App is not installed on any repository you can read. Ask an
           organization owner to install it on the repositories that hold your
           SealedSecrets.
@@ -244,7 +244,7 @@ export function RepoList() {
           <section aria-labelledby="all-heading" className="space-y-3">
             <SectionHeading
               id="all-heading"
-              title="All repositories"
+              title="All Repositories"
               count={
                 needle
                   ? `${shown.length} of ${data.length}`
@@ -262,7 +262,7 @@ export function RepoList() {
                     filterRef.current?.focus();
                   }}
                 >
-                  Clear filter
+                  Clear Filter
                 </Button>
               </div>
             ) : (
@@ -306,8 +306,8 @@ export function RepoList() {
                             >
                               {plural(
                                 count,
-                                "pending change",
-                                "pending changes",
+                                "Pending Change",
+                                "Pending Changes",
                               )}
                             </Badge>
                           ) : null}

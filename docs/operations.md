@@ -506,7 +506,7 @@ the admin API (`POST /api/v1/envs/{env}/admin/keys/{fingerprint}/revoke`). A
 revoked key is never the env key and is never restored into a cluster again;
 clusters that hold it keep it, so values sealed with it still decrypt. Seals
 still running with it fail, and people with pending changes sealed with it see
-them marked "Seal again": their pull request is refused until they seal those
+them marked "Seal Again": their pull request is refused until they seal those
 values again or remove them. Pull requests opened before the revocation are not
 changed; check open ones for the key's fingerprint, which each lists, shortened.
 Revoking doesn't make those values secret again: rotate them, and seal the new
@@ -571,7 +571,7 @@ of their controllers seals with the env key yet.
   every so many days. Each run opens one pull request per repository with
   every value it moved, from the default branch's head, and skips a
   repository while an earlier run's pull request is still open there.
-  "Run now" starts one at once.
+  "Run Now" starts one at once.
 
 Watch them on the reseal pages, or with the admin token:
 

@@ -111,13 +111,13 @@ describe("FilterInput", () => {
     expect(input).toHaveAttribute("aria-keyshortcuts", "/");
     expect(screen.getByText("/")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Clear filter" }),
+      screen.queryByRole("button", { name: "Clear Filter" }),
     ).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: "billing" } });
     // the hint and the clear button never sit on top of each other
     expect(screen.queryByText("/")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear Filter" }));
     expect(input).toHaveValue("");
     expect(input).toHaveFocus();
     expect(screen.getByText("/")).toBeInTheDocument();
@@ -274,10 +274,10 @@ describe("ReasonButton", () => {
     let clicked = 0;
     render(
       <TooltipProvider>
-        <ReasonButton onClick={() => clicked++}>New schedule</ReasonButton>
+        <ReasonButton onClick={() => clicked++}>New Schedule</ReasonButton>
       </TooltipProvider>,
     );
-    const button = screen.getByRole("button", { name: "New schedule" });
+    const button = screen.getByRole("button", { name: "New Schedule" });
     expect(button).not.toHaveAttribute("aria-disabled");
     fireEvent.click(button);
     expect(clicked).toBe(1);
@@ -288,11 +288,11 @@ describe("ReasonButton", () => {
     render(
       <TooltipProvider>
         <ReasonButton reason={why} onClick={() => clicked++}>
-          New schedule
+          New Schedule
         </ReasonButton>
       </TooltipProvider>,
     );
-    const button = screen.getByRole("button", { name: "New schedule" });
+    const button = screen.getByRole("button", { name: "New Schedule" });
     expect(button).toHaveAttribute("aria-disabled", "true");
     expect(button).not.toBeDisabled();
     expect(button).toHaveClass("opacity-50", "cursor-not-allowed");
