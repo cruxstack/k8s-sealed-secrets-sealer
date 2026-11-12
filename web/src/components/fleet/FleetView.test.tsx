@@ -131,6 +131,13 @@ function tooltipShown() {
     ?.textContent;
 }
 
+/** An agent's details, opened from its name. */
+function details(name: string) {
+  const button = within(row(name)).getByRole("button", { name });
+  if (button.getAttribute("aria-expanded") !== "true") fireEvent.click(button);
+  return screen.getByLabelText(`Details of ${name}`);
+}
+
 /** An agent's row; its header names the agent, then its cluster. */
 function row(name: string) {
   return screen
@@ -180,13 +187,10 @@ describe("FleetView", () => {
     expect(screen.getByText("2 of 2 healthy")).toBeInTheDocument();
     // the agents whose active key is the env key say so
     expect(within(row("use1-blue")).getByText("env key")).toBeInTheDocument();
-    // the cluster shows under the agent when it is named differently, then
-    // its region and version, so the table needs no columns for them
+    // one line a row: the agent and its region, and what does not fit in
+    // its details, which its name opens
     expect(
-      screen.getByRole("rowheader", {
-        // jsdom has no layout to put the lines apart
-        name: /^use1-blue blue\s?use1\s?version\s?v0\.1\.0$/,
-      }),
+      screen.getByRole("rowheader", { name: "use1-blue use1" }),
     ).toBeInTheDocument();
     expect(
       within(agentTable)
@@ -199,8 +203,24 @@ describe("FleetView", () => {
       "Missing",
       "Active key",
       "Sealed values",
-      "Capabilities",
     ]);
+    const name = within(row("use1-blue")).getByRole("button", {
+      name: "use1-blue",
+    });
+    expect(name).toHaveAttribute("aria-expanded", "false");
+    const open = details("use1-blue");
+    expect(name).toHaveAttribute("aria-expanded", "true");
+    expect(name).toHaveAttribute("aria-controls", open.closest("tr")?.id);
+    // the cluster when it is named differently, and the version
+    expect(open).toHaveTextContent(/Cluster\s*blue/);
+    expect(open).toHaveTextContent(/Version\s*v0\.1\.0/);
+    expect((open.closest("tr") as HTMLElement).previousElementSibling).toBe(
+      row("use1-blue"),
+    );
+    expect(open.closest("td")).toHaveAttribute("colspan", "6");
+    expect(within(agentTable).getAllByRole("row")).toHaveLength(4);
+    fireEvent.click(name);
+    expect(screen.queryByLabelText("Details of use1-blue")).toBeNull();
   });
 
   it("warns when keys are out of sync and shows missing keys per agent", async () => {
@@ -257,7 +277,11 @@ describe("FleetView", () => {
           id: "use1-green",
           healthy: false,
           last_checkin: new Date(Date.now() - 10 * 60_000).toISOString(),
-          issues: ["has not checked in recently"],
+          keys_complete: false,
+          issues: [
+            "has not checked in recently",
+            "reports only its controller's active key (no keys capability)",
+          ],
         }),
         agent({
           id: "use2-blue",
@@ -284,30 +308,43 @@ describe("FleetView", () => {
       within(row("use1-green")).getByText("Unhealthy"),
     ).toBeInTheDocument();
     expect(within(row("use1-green")).getByText("10m ago")).toBeInTheDocument();
-    // issues are sentences, in a row under the agent's that spans the table
-    const issues = screen.getByRole("list", { name: "Issues of use1-green" });
-    expect(issues).toHaveTextContent("Has not checked in recently.");
-    expect((issues.closest("tr") as HTMLElement).previousElementSibling).toBe(
-      row("use1-green"),
+    // the rows stay one line: the other issues are a count beside the
+    // health, which opens them in the agent's details, without the one the
+    // badge already says
+    const count = within(row("use1-green")).getByRole("button", {
+      name: "1 issue",
+    });
+    expect(count).toHaveClass("text-warning");
+    fireEvent.click(count);
+    expect(count).toHaveAttribute("aria-expanded", "true");
+    const issues = within(details("use1-green")).getByRole("list", {
+      name: "Issues of use1-green",
+    });
+    expect(issues).toHaveTextContent(
+      "Reports only its controller's active key (no keys capability).",
     );
-    expect(issues.closest("td")).toHaveAttribute("colspan", "7");
+    expect(issues).not.toHaveTextContent(/checked in/);
     expect(
-      screen.queryByRole("list", { name: "Issues of use1-blue" }),
+      within(row("use1-blue")).queryByRole("button", { name: /issue/ }),
     ).not.toBeInTheDocument();
     const never = row("use2-blue");
     // red, as the conventions say: an agent that never checked in can't seal
     expect(within(never).getByText("Never checked in")).toHaveClass(
       "text-destructive",
     );
+    // the badge says it all
     expect(
-      screen.getByRole("list", { name: "Issues of use2-blue" }),
-    ).toHaveTextContent("Has never checked in.");
+      within(never).queryByRole("button", { name: /issue/ }),
+    ).not.toBeInTheDocument();
+    expect(details("use2-blue")).not.toHaveTextContent(/Issues/);
     // registered capabilities still show for an agent that never checked in
-    expect(within(never).getByText("seal")).toBeInTheDocument();
+    expect(within(details("use2-blue")).getByText("seal")).toBeInTheDocument();
     // capabilities are sorted, and the region is a tag
     expect(
       within(
-        within(row("use1-blue")).getByRole("list", { name: "Capabilities" }),
+        within(details("use1-blue")).getByRole("list", {
+          name: "Capabilities",
+        }),
       )
         .getAllByRole("listitem")
         .map((li) => li.textContent),
@@ -1224,40 +1261,40 @@ describe("FleetView key references and deletion", () => {
     );
     await screen.findByRole("heading", { name: "Keys" });
 
+    // the counts on one line, and when and where in the details
     const all = row("use1-blue");
-    expect(within(all).getByText("12 values")).toBeInTheDocument();
+    expect(within(all).getByText("12 values")).toHaveAttribute(
+      "title",
+      "Counted 1m ago",
+    );
     expect(within(all).getByText("in 4 SealedSecrets")).toBeInTheDocument();
-    expect(all).toHaveTextContent("counted 1m ago");
-    expect(within(all).getByText("1m ago")).toHaveAttribute(
+    expect(within(all).queryByText(/unmatched/)).not.toBeInTheDocument();
+    const allDetails = details("use1-blue");
+    expect(allDetails).toHaveTextContent("Counted 1m ago, in every namespace");
+    expect(within(allDetails).getByText("1m ago")).toHaveAttribute(
       "title",
       expect.stringMatching(/^Counted /),
     );
-    // every namespace: nothing more to say
-    expect(within(all).queryByText(/namespace/)).not.toBeInTheDocument();
-    expect(within(all).queryByText(/unmatched/)).not.toBeInTheDocument();
 
     const some = row("use2-blue");
     expect(within(some).getByText("1 value")).toBeInTheDocument();
     expect(within(some).getByText("in 1 SealedSecret")).toBeInTheDocument();
-    expect(some).toHaveTextContent("counted 5m ago");
-    // only how many namespaces shows; their names are in the title, and
-    // read out to a screen reader
-    const watched = within(some).getByText(/^in 2 namespaces/);
-    expect(watched).toHaveAttribute("title", "dev-use2-blue-apps\nbilling");
-    expect(watched).toHaveTextContent(
-      "in 2 namespaces: dev-use2-blue-apps, billing",
-    );
+    expect(some).not.toHaveTextContent(/namespace/);
     // values the controller cannot decrypt need attention
     expect(within(some).getByText("3 unmatched")).toHaveClass("text-warning");
+    // the namespaces it counted in, by name
+    expect(details("use2-blue")).toHaveTextContent(
+      "Counted 5m ago, in 2 namespaces: dev-use2-blue-apps, billing",
+    );
 
     const failed = row("use1-green");
     expect(within(failed).getByText(/^Count failed/)).toHaveClass(
       "text-destructive",
     );
-    expect(failed).toHaveTextContent(
-      "Cannot list sealedsecrets.bitnami.com: forbidden.",
-    );
     expect(failed).not.toHaveTextContent(/SealedSecret/);
+    expect(details("use1-green")).toHaveTextContent(
+      /Failed 1m ago: Cannot list sealedsecrets\.bitnami\.com: forbidden\./,
+    );
 
     expect(row("use2-green")).toHaveTextContent("Not counted yet");
     expect(within(row("use1-red")).getByText("Doesn't count")).toHaveAttribute(

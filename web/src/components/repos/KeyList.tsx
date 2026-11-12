@@ -428,7 +428,10 @@ export function KeyList({
             <div
               role="group"
               aria-label="Show keys"
-              className="inline-flex items-center gap-0.5 rounded-md border border-input bg-card p-0.5"
+              // one joined group as tall as the filter: each segment owns
+              // its part of the outline, so the chosen one's edge is the
+              // group's edge, with nothing inset
+              className="inline-flex h-8 rounded-md shadow-xs dark:shadow-none"
             >
               {(["all", "seal", "pending"] as const)
                 .filter((v) => v === "all" || counts[v] > 0)
@@ -439,10 +442,11 @@ export function KeyList({
                     aria-pressed={active === v}
                     onClick={() => setView(v)}
                     className={cn(
-                      "inline-flex h-7 items-center gap-1.5 rounded border px-2 text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                      "relative -ml-px inline-flex items-center gap-1.5 border px-3 text-xs font-medium transition-colors first:ml-0 first:rounded-l-md last:rounded-r-md focus-visible:z-20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                       active === v
-                        ? "border-primary bg-selected font-medium text-primary"
-                        : "border-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                        ? // above its neighbours, so its whole edge shows
+                          "z-10 border-primary bg-selected text-primary"
+                        : "border-input bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
                     )}
                   >
                     {VIEW_LABEL[v]}{" "}
