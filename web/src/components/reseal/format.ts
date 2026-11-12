@@ -181,3 +181,15 @@ export function resealReason(
   }
   return "Checking whether values can be resealed…";
 }
+
+/**
+ * A reseal failure's regions: its list, or the one region of a failure
+ * kept from before documents could list several.
+ */
+export function failureRegions(f: {
+  regions?: string[];
+  region?: string;
+}): string[] {
+  if (f.regions?.length) return f.regions;
+  return f.region ? [f.region] : [];
+}

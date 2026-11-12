@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -139,7 +140,7 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 	packs, tooLarge := packReseal(plan.groups)
 	for _, g := range tooLarge {
 		for _, v := range g.values {
-			plan.failures = append(plan.failures, store.ResealFailure{Key: v.key, Document: v.doc.Index, Region: v.doc.Region, Error: errTooLargeToReseal})
+			plan.failures = append(plan.failures, store.ResealFailure{Key: v.key, Document: v.doc.Index, Regions: v.doc.Regions, Error: errTooLargeToReseal})
 		}
 	}
 	failed := len(plan.failures)
@@ -162,7 +163,7 @@ func (s *Server) requestReseal(w http.ResponseWriter, r *http.Request) {
 		Failures:  withoutPath(plan.failures),
 	}
 	for _, d := range plan.docs {
-		reseal.Documents = append(reseal.Documents, store.Target{Index: &d.Index, Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
+		reseal.Documents = append(reseal.Documents, store.Target{Index: &d.Index, Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Regions: d.Regions})
 	}
 	var cmds []store.CommandRecord
 	places := map[string]string{}
@@ -250,7 +251,8 @@ func pendingIn(effective []store.Change, path string) func(manifest.Document, st
 		key   string
 		index int
 	}
-	type named struct{ key, region, namespace, name string }
+	// regions joined, as a target stored then named its one region
+	type named struct{ key, regions, namespace, name string }
 	byIndex, byName := map[at]bool{}, map[named]bool{}
 	for _, c := range effective {
 		if c.Path != path {
@@ -261,12 +263,12 @@ func pendingIn(effective []store.Change, path string) func(manifest.Document, st
 				byIndex[at{c.Key, *t.Index}] = true
 			} else {
 				// changes stored before targets recorded positions
-				byName[named{c.Key, t.Region, t.Namespace, t.Name}] = true
+				byName[named{c.Key, strings.Join(t.RegionList(), ","), t.Namespace, t.Name}] = true
 			}
 		}
 	}
 	return func(d manifest.Document, key string) bool {
-		return byIndex[at{key, d.Index}] || byName[named{key, d.Region, d.Namespace, d.Name}]
+		return byIndex[at{key, d.Index}] || byName[named{key, strings.Join(d.Regions, ","), d.Namespace, d.Name}]
 	}
 }
 
@@ -362,7 +364,7 @@ func (s *Server) viewFileReseal(ctx context.Context, fr store.FileReseal, now ti
 		v.Values.Failed += len(c.Items)
 		for _, id := range c.Items {
 			_, doc, key, _ := parseResealItemID(id)
-			v.Failures = append(v.Failures, store.ResealFailure{Key: key, Document: doc, Region: docs[doc].Region, Error: errNoAgentAnswered})
+			v.Failures = append(v.Failures, store.ResealFailure{Key: key, Document: doc, Regions: docs[doc].RegionList(), Error: errNoAgentAnswered})
 		}
 	}
 	sort.SliceStable(v.Failures, func(i, j int) bool {
@@ -529,14 +531,14 @@ func (s *Server) recordFileReseal(ctx context.Context, cmd store.CommandRecord, 
 					c.from = append(c.from, it.From)
 				}
 			case protocol.ResealFailed:
-				outcome.Failures = append(outcome.Failures, store.ResealFailure{Key: key, Document: doc, Region: target.Region, Error: it.Error})
+				outcome.Failures = append(outcome.Failures, store.ResealFailure{Key: key, Document: doc, Regions: target.RegionList(), Error: it.Error})
 			}
 		}
 	} else {
 		outcome.Counts.Failed = len(p.Items)
 		for _, it := range p.Items {
 			_, doc, key, _ := parseResealItemID(it.ID)
-			outcome.Failures = append(outcome.Failures, store.ResealFailure{Key: key, Document: doc, Region: docs[doc].Region, Error: errMsg})
+			outcome.Failures = append(outcome.Failures, store.ResealFailure{Key: key, Document: doc, Regions: docs[doc].RegionList(), Error: errMsg})
 		}
 	}
 	if len(outcome.Failures) > maxResealFailures {

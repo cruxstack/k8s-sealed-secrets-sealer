@@ -18,7 +18,7 @@ import type {
 } from "@/api/types";
 import { Point, Points } from "@/components/fleet/KeyDialogs";
 import { plural } from "@/components/fleet/references";
-import { resealReason } from "@/components/reseal/format";
+import { failureRegions, resealReason } from "@/components/reseal/format";
 import { Progress } from "@/components/reseal/status";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -500,7 +500,9 @@ function DoneStep({ progress }: { progress: FileReseal }) {
                 <span className="text-xs text-muted-foreground">
                   document #{f.document}
                 </span>
-                {f.region && <RegionTag region={f.region} />}
+                {failureRegions(f).map((r) => (
+                  <RegionTag key={r} region={r} />
+                ))}
               </p>
               <p className="text-xs text-destructive">{sentence(f.error)}</p>
             </li>

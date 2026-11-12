@@ -881,6 +881,118 @@ describe("regions", () => {
     ).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("shows a Kustomize base's regions, which can't be sealed apart", async () => {
+    const BASE = "deploy/payments/base/sealed-secret.yaml";
+    const api = fakeApi({
+      me: ME,
+      files: {
+        "example-org/apps": listing({
+          files: [
+            {
+              path: BASE,
+              blob: "4444444444444444444444444444444444444444",
+              documents: [
+                {
+                  index: 0,
+                  name: "payments",
+                  namespace: "apps",
+                  regions: ["use1", "use2"],
+                  scope: "strict",
+                  keys: ["token"],
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    });
+    renderAt(`${PAGE}?file=${encodeURIComponent(BASE)}`, api);
+    const { form, key, value } = await openForm(BASE);
+
+    // the key's regions show as chips, which pick nothing
+    const panel = screen.getByRole("region", { name: BASE });
+    const chips = within(panel).getByRole("list", { name: "token by region" });
+    expect(within(chips).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(chips).queryByRole("button")).toBeNull();
+    expect(within(chips).getByLabelText("use1: set")).toBeInTheDocument();
+    expect(
+      within(panel).getByText(
+        "Pick a key to seal its value, or type a new one below.",
+      ),
+    ).toBeInTheDocument();
+    // the form lists them, with why there is no choice
+    expect(within(form).queryByRole("group", { name: "Regions" })).toBeNull();
+    const listed = within(form).getByRole("list", { name: "Regions" });
+    expect(
+      within(listed)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["use1", "use2"]);
+    expect(form).toHaveTextContent(
+      "The value goes to use1 and use2: regions listed in one document share it, so they can't be sealed apart.",
+    );
+    // the document lists both
+    expect(
+      within(panel)
+        .getByRole("rowheader", { name: "apps/payments" })
+        .closest("tr"),
+    ).toHaveTextContent(/use1use2/);
+
+    fireEvent.change(key, { target: { value: "token" } });
+    fireEvent.change(value, { target: { value: "v" } });
+    fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
+    await within(form).findByText(/sealed/i, { selector: "span" });
+    // sealed for the document: no regions are named
+    expect(api.calls.find((c) => c.url.endsWith("/seals"))?.body).toEqual({
+      path: BASE,
+      key: "token",
+      value: "v",
+    });
+  });
+
+  it("shows the one region of a file Kustomize keeps per region", async () => {
+    const USE1 = "deploy/payments/overlays/use1/sealed-secret.yaml";
+    renderAt(
+      `${PAGE}?file=${encodeURIComponent(USE1)}`,
+      fakeApi({
+        me: ME,
+        files: {
+          "example-org/apps": listing({
+            files: [
+              {
+                path: USE1,
+                blob: "5555555555555555555555555555555555555555",
+                documents: [
+                  {
+                    index: 0,
+                    name: "payments",
+                    namespace: "apps",
+                    regions: ["use1"],
+                    scope: "strict",
+                    keys: ["token"],
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+      }),
+    );
+    const { form } = await openForm(USE1);
+    const panel = screen.getByRole("region", { name: USE1 });
+    const chips = within(panel).getByRole("list", { name: "token by region" });
+    expect(within(chips).getByLabelText("use1: set")).toBeInTheDocument();
+    expect(within(chips).queryByRole("button")).toBeNull();
+    // one region, in the documents' words
+    expect(
+      within(panel).getByRole("button", { name: /^token/ }),
+    ).toHaveTextContent("tokenSet");
+    expect(form).toHaveTextContent("The value is for use1.");
+    // and the file in the list carries it as a tag
+    const files = screen.getByRole("list", { name: "Files" });
+    expect(within(files).getByText("use1")).toHaveClass("font-mono");
+  });
+
   it("keeps at least one region chosen, and seals everywhere with all", async () => {
     const api = fakeApi({ me: ME, files: { "example-org/apps": hinted() } });
     renderAt(PAGE, api);

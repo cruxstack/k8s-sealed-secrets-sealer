@@ -17,23 +17,23 @@ export function regionList(regions: readonly string[]): string {
 
 /**
  * Names a document within its file for people: its namespace and name, and
- * its region when it has one, since copies of a secret in several regions
+ * its regions when it has some, since copies of a secret in several regions
  * often share a namespace and name.
  */
 export function docId(d: {
   namespace: string;
   name: string;
-  region?: string;
+  regions?: readonly string[];
 }): string {
   const id = `${d.namespace}/${d.name}`;
-  return d.region ? `${id} in ${d.region}` : id;
+  return d.regions?.length ? `${id} in ${regionList(d.regions)}` : id;
 }
 
 interface DocRef {
   index?: number;
   namespace: string;
   name: string;
-  region?: string;
+  regions?: readonly string[];
 }
 
 /**
@@ -45,7 +45,7 @@ function docRef(d: DocRef): string {
 }
 
 function byName(d: DocRef): string {
-  return `${d.region ?? ""}/${d.namespace}/${d.name}`;
+  return `${(d.regions ?? []).join(",")}/${d.namespace}/${d.name}`;
 }
 
 /**
@@ -160,6 +160,11 @@ export interface RegionStatus {
   state: RegionKeyState;
   /** How many documents the region has in the file. */
   docs: number;
+  /**
+   * Whether a seal can be limited to it (`regionChoices`): its chip picks
+   * the key for this region only.
+   */
+  choosable: boolean;
 }
 
 export interface KeyStatus {
@@ -183,24 +188,49 @@ export interface KeyStatus {
   /** The documents that lack it, as `docId` names them. */
   lacking: string[];
   /**
-   * Where it stands per region, when the file's documents are in more than
-   * one; empty otherwise.
+   * Where it stands per region, when the file's documents name regions;
+   * empty otherwise.
    */
   regions: RegionStatus[];
 }
 
+/** Whether a document is for the region; "" is for documents without one. */
+function inRegion(d: SealedSecretDocument, region: string): boolean {
+  const regions = d.regions ?? [];
+  return region === "" ? regions.length === 0 : regions.includes(region);
+}
+
 /**
- * The regions of a file's documents, in order of first appearance, with ""
- * for documents without one. Empty when they are all in one region or none,
- * so there is nothing to choose between.
+ * The regions a file's documents are for, in order of first appearance,
+ * with "" for documents without one; empty when none names a region. A file
+ * Kustomize keeps per region has one, and a base deployed to several lists
+ * them in one document; each shows as a region all the same.
  */
 export function fileRegions(file: RepositoryFile): string[] {
   const regions: string[] = [];
   for (const d of file.documents ?? []) {
-    const r = d.region ?? "";
-    if (!regions.includes(r)) regions.push(r);
+    const rs = d.regions?.length ? d.regions : [""];
+    for (const r of rs) if (!regions.includes(r)) regions.push(r);
   }
-  return regions.filter((r) => r !== "").length >= 2 ? regions : [];
+  return regions.some((r) => r !== "") ? regions : [];
+}
+
+/**
+ * The regions a seal into the file can be limited to: its regions, when
+ * there are two or more and no document lists several. Regions listed in
+ * one document share it, so a value can't differ between them, and a file
+ * with such a document is always sealed for every document.
+ */
+export function regionChoices(file: RepositoryFile): string[] {
+  const docs = file.documents ?? [];
+  if (docs.some((d) => (d.regions ?? []).length > 1)) return [];
+  const regions = fileRegions(file).filter((r) => r !== "");
+  return regions.length >= 2 ? regions : [];
+}
+
+/** Whether some document of the file lists several regions. */
+export function sharesRegions(file: RepositoryFile): boolean {
+  return (file.documents ?? []).some((d) => (d.regions ?? []).length > 1);
 }
 
 function regionState(states: DocKeyState[]): RegionKeyState {
@@ -229,6 +259,7 @@ export function keyStatuses(
   const docs = file.documents ?? [];
   const { expected } = fileHints(file);
   const regions = fileRegions(file);
+  const choices = regionChoices(file);
   const others = [
     ...new Set([...docs.flatMap((d) => d.keys), ...pending.keys()]),
   ].filter((k) => !expected.includes(k));
@@ -266,13 +297,14 @@ export function keyStatuses(
       needed: states.filter((s) => s !== "unneeded").length,
       lacking,
       regions: regions.map((region) => {
-        const inRegion = docs
-          .map((d, i) => ((d.region ?? "") === region ? states[i] : null))
+        const here = docs
+          .map((d, i) => (inRegion(d, region) ? states[i] : null))
           .filter((s): s is DocKeyState => s !== null);
         return {
           region,
-          state: regionState(inRegion),
-          docs: inRegion.length,
+          state: regionState(here),
+          docs: here.length,
+          choosable: choices.includes(region),
         };
       }),
     };

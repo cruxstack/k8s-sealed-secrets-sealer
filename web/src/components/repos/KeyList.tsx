@@ -24,8 +24,9 @@ import {
 
 /** What a key's state means for the file, in a few words. */
 export function keyDetail(k: KeyStatus, docs: number): string {
-  // per region, the chips beside it say the rest
-  if (k.regions.length > 0) {
+  // per region, the chips beside it say the rest; with one region, the
+  // chip names it and the documents' words say where the key stands
+  if (k.regions.filter((r) => r.region !== "").length > 1) {
     const needed = k.regions.filter((r) => r.state !== "unneeded");
     const pendingIn = k.regions
       .filter((r) => r.state === "pending")
@@ -165,8 +166,10 @@ const REGION_LOOK: Record<
 };
 
 /**
- * Where a key stands in each region, as chips. When values can be sealed,
- * a region's chip fills the form with the key, limited to that region.
+ * Where a key stands in each region, as chips. When values can be sealed
+ * and a seal can be limited to the region, its chip fills the form with
+ * the key for that region only; otherwise (one region, or regions a
+ * document lists together) the chip only shows where the key stands.
  */
 function RegionChips({
   k,
@@ -180,7 +183,7 @@ function RegionChips({
   return (
     <ul
       aria-label={`${k.key} by region`}
-      className="flex basis-full flex-wrap gap-1 pb-1 pl-9 sm:basis-auto sm:pb-0 sm:pl-0"
+      className="flex basis-full flex-wrap gap-1 pb-1 pl-9 sm:basis-auto sm:pr-2 sm:pb-0 sm:pl-0"
     >
       {k.regions.map((r: RegionStatus) => {
         const look = REGION_LOOK[r.state];
@@ -195,7 +198,7 @@ function RegionChips({
         );
         return (
           <li key={r.region}>
-            {onPick && r.region ? (
+            {onPick && r.choosable ? (
               <button
                 type="button"
                 disabled={disabled}
@@ -291,7 +294,8 @@ export function KeyList({
   const shown = keys.filter(
     (k) => IN_VIEW[active](k) && k.key.toLowerCase().includes(needle),
   );
-  const regional = keys.some((k) => k.regions.length > 0);
+  // a region's chip picks the key for that region only, where it can be
+  const regional = keys.some((k) => k.regions.some((r) => r.choosable));
   // a key the filter names that the file lacks can be sealed as a new one
   const typed = filter.trim();
   const newKey =

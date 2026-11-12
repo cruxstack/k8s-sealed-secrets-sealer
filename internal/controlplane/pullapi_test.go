@@ -18,6 +18,7 @@ import (
 	sscrypto "github.com/bitnami/sealed-secrets/pkg/crypto"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/manifest"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/mockgithub"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/registry"
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/store"
@@ -696,6 +697,59 @@ func (sh *sealHarness) sealNowIn(sessionID, path, key, value string, regions ...
 	return seal
 }
 
+// A Kustomize base is one document for several regions: the listing names
+// them all, a value goes to all of them, and a seal for some only is refused.
+func TestSharedRegionDocument(t *testing.T) {
+	const shared = "deploy/payments/base/sealed-secret.yaml"
+	sh := newSealHarness(t, map[string]string{shared: `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: payments
+  namespace: dev-use1-blue-apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/region: use1, use2
+spec:
+  encryptedData: {}
+`})
+	rec := sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/files", nil, false)
+	listing := decode[struct {
+		Files []struct {
+			Path      string              `json:"path"`
+			Documents []manifest.Document `json:"documents"`
+		} `json:"files"`
+	}](t, rec)
+	var found bool
+	for _, f := range listing.Files {
+		if f.Path == shared {
+			found = len(f.Documents) == 1 && slices.Equal(f.Documents[0].Regions, []string{"use1", "use2"}) && f.Documents[0].Sealable()
+		}
+	}
+	if !found {
+		t.Fatalf("listing = %+v", listing.Files)
+	}
+
+	sess := sh.openSession()
+	rec = sh.do("alice", http.MethodPost, "/api/v1/repos/example-org/apps/session/"+sess.ID+"/seals",
+		map[string]any{"path": shared, "key": "token", "value": "v", "regions": []string{"use1"}}, true)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "lists several regions") {
+		t.Fatalf("a seal for use1 only = %d %s", rec.Code, rec.Body)
+	}
+	seal := sh.sealNow(sess.ID, shared, "token", "s3cr3t")
+	if seal.Regions != nil || len(seal.Targets) != 1 || !slices.Equal(seal.Targets[0].Regions, []string{"use1", "use2"}) {
+		t.Fatalf("seal = %+v", seal)
+	}
+	rec = sh.do("alice", http.MethodGet, "/api/v1/repos/example-org/apps/session", nil, false)
+	changes := decode[sessionResponse](t, rec).Session.Changes
+	if len(changes) != 1 || !slices.Equal(changes[0].Targets[0].Regions, []string{"use1", "use2"}) {
+		t.Fatalf("changes = %+v", changes)
+	}
+	// its pull request writes the one document
+	if code := sh.openPullRequest(sess.ID); code != http.StatusCreated {
+		t.Fatalf("pull request = %d", code)
+	}
+}
+
 func TestRegionSeals(t *testing.T) {
 	sh := newSealHarness(t)
 	sess := sh.openSession()
@@ -725,7 +779,7 @@ func TestRegionSeals(t *testing.T) {
 	sh.sealNowIn(sess.ID, billing, "db-password", "use2-db-s3cr3t", "use2")
 	got := changes()
 	if len(got) != 3 ||
-		got[0].Key != "api-token" || got[0].Regions != nil || len(got[0].Targets) != 1 || got[0].Targets[0].Region != "use2" ||
+		got[0].Key != "api-token" || got[0].Regions != nil || len(got[0].Targets) != 1 || !slices.Equal(got[0].Targets[0].Regions, []string{"use2"}) ||
 		got[1].Key != "api-token" || !slices.Equal(got[1].Regions, []string{"use1"}) || len(got[1].Targets) != 2 ||
 		got[2].Key != "db-password" || !slices.Equal(got[2].Regions, []string{"use2"}) {
 		t.Fatalf("changes = %+v", got)
@@ -835,7 +889,7 @@ func TestRegionSeals_SameNameInEachRegion(t *testing.T) {
 			}
 			var regions []string
 			for _, t := range c.Targets {
-				regions = append(regions, t.Region)
+				regions = append(regions, t.Regions...)
 			}
 			out = append(out, regions)
 		}

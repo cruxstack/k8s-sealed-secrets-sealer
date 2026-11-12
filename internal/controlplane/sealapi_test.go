@@ -602,8 +602,41 @@ func TestViewSession_SortsChangesByFileKeyAndRegions(t *testing.T) {
 	}
 }
 
+// A document listing several regions shares them: a value goes to all of
+// them or none, so a seal for some regions only is refused, and one naming
+// every region is a seal for all.
+func TestSealRegions_SharedDocument(t *testing.T) {
+	kustomizeBase := []manifest.Document{{Regions: []string{"use1", "use2"}}}
+	mixed := []manifest.Document{{Regions: []string{"use1", "use2"}}, {Regions: []string{"use3"}}}
+	for name, tc := range map[string]struct {
+		docs  []manifest.Document
+		named []string
+		err   bool
+	}{
+		"everywhere":         {kustomizeBase, nil, false},
+		"every region named": {kustomizeBase, []string{"use2", "use1"}, false},
+		"one of the shared":  {kustomizeBase, []string{"use1"}, true},
+		"mixed, all named":   {mixed, []string{"use1", "use2", "use3"}, false},
+		"mixed, the other":   {mixed, []string{"use3"}, true},
+		"mixed, the shared":  {mixed, []string{"use1", "use2"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := sealRegions(tc.named, tc.docs)
+			if tc.err {
+				if err == nil || !strings.Contains(err.Error(), "lists several regions") {
+					t.Fatalf("sealRegions = %v, %v; want it refused", got, err)
+				}
+				return
+			}
+			if err != nil || got != nil {
+				t.Fatalf("sealRegions = %v, %v; want every document", got, err)
+			}
+		})
+	}
+}
+
 func TestSealRegions(t *testing.T) {
-	docs := []manifest.Document{{Region: "use1"}, {Region: "use2"}, {Region: ""}}
+	docs := []manifest.Document{{Regions: []string{"use1"}}, {Regions: []string{"use2"}}, {}}
 	cases := map[string]struct {
 		named []string
 		want  []string

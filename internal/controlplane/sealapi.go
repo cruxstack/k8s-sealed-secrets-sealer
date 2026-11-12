@@ -88,7 +88,9 @@ func changeID(path, key string, regions []string) string {
 
 // sealRegions checks the regions a seal names against a file's documents
 // and returns them sorted, or nil when they reach every document: naming
-// every region is sealing for all. Each must be the region of a document.
+// every region is sealing for all. Each must be a region of a document. A
+// file with a document that lists several regions can be sealed only for
+// all of them: the regions it lists share that document.
 func sealRegions(named []string, docs []manifest.Document) ([]string, error) {
 	if len(named) == 0 {
 		return nil, nil
@@ -97,12 +99,17 @@ func sealRegions(named []string, docs []manifest.Document) ([]string, error) {
 		return nil, fmt.Errorf("at most %d regions can be named", maxRegions)
 	}
 	have := map[string]bool{}
-	unlabelled := false
+	unlabelled, shared := false, false
 	for _, d := range docs {
-		if d.Region == "" {
+		if len(d.Regions) == 0 {
 			unlabelled = true
 		}
-		have[d.Region] = true
+		if len(d.Regions) > 1 {
+			shared = true
+		}
+		for _, r := range d.Regions {
+			have[r] = true
+		}
 	}
 	regions := slices.Clone(named)
 	slices.Sort(regions)
@@ -117,6 +124,9 @@ func sealRegions(named []string, docs []manifest.Document) ([]string, error) {
 	}
 	if !unlabelled && len(regions) == len(have) {
 		return nil, nil
+	}
+	if shared {
+		return nil, errors.New("a document of this file lists several regions, which share it, so a value can't be sealed for some regions only: seal it for every document")
 	}
 	return regions, nil
 }
@@ -197,16 +207,16 @@ func (s *Server) requestSeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var targets []store.Target
-	var regions []string
+	var targeted []manifest.Document
 	for _, d := range file.Documents {
-		if len(sealFor) > 0 && !slices.Contains(sealFor, d.Region) {
+		if len(sealFor) > 0 && !d.InRegions(sealFor) {
 			continue
 		}
-		targets = append(targets, store.Target{Index: &d.Index, Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Region: d.Region})
-		if d.Region != "" {
-			regions = append(regions, d.Region)
-		}
+		targeted = append(targeted, d)
+		targets = append(targets, store.Target{Index: &d.Index, Namespace: d.Namespace, Name: d.Name, Scope: d.Scope, Regions: d.Regions})
 	}
+	// an agent in one of the documents' regions is preferred
+	regions := manifest.RegionsOf(targeted)
 	if !protocol.SealFits(len(in.Value), len(targets)) {
 		writeError(w, http.StatusRequestEntityTooLarge,
 			fmt.Sprintf("value is too large to seal for %d documents", len(targets)))

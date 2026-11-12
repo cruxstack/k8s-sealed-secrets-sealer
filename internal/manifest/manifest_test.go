@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,13 +26,13 @@ func TestFind_MultiDocumentFile(t *testing.T) {
 		t.Fatalf("found %d dev documents, want 3: %+v", len(docs), docs)
 	}
 	want := []Document{
-		{Index: 0, Name: "billing", Namespace: "dev-use1-blue-apps", Region: "use1", Scope: ScopeStrict, Keys: []string{}},
-		{Index: 1, Name: "billing", Namespace: "dev-use1-green-apps", Region: "use1", Scope: ScopeStrict, Keys: []string{}},
-		{Index: 2, Name: "billing", Namespace: "dev-use2-blue-apps", Region: "use2", Scope: ScopeStrict, Keys: []string{}},
+		{Index: 0, Name: "billing", Namespace: "dev-use1-blue-apps", Regions: []string{"use1"}, Scope: ScopeStrict, Keys: []string{}},
+		{Index: 1, Name: "billing", Namespace: "dev-use1-green-apps", Regions: []string{"use1"}, Scope: ScopeStrict, Keys: []string{}},
+		{Index: 2, Name: "billing", Namespace: "dev-use2-blue-apps", Regions: []string{"use2"}, Scope: ScopeStrict, Keys: []string{}},
 	}
 	for i, d := range docs {
 		w := want[i]
-		if d.Index != w.Index || d.Name != w.Name || d.Namespace != w.Namespace || d.Region != w.Region || d.Scope != w.Scope || len(d.Keys) != 0 || !d.Sealable() {
+		if d.Index != w.Index || d.Name != w.Name || d.Namespace != w.Namespace || !slices.Equal(d.Regions, w.Regions) || d.Scope != w.Scope || len(d.Keys) != 0 || !d.Sealable() {
 			t.Errorf("document %d = %+v, want %+v", i, d, w)
 		}
 	}
@@ -99,6 +100,73 @@ spec:
 	}
 }
 
+func TestFind_RegionLists(t *testing.T) {
+	var tooMany []string
+	for i := 0; i <= MaxDocumentRegions; i++ {
+		tooMany = append(tooMany, fmt.Sprintf("r%d", i))
+	}
+	for name, tc := range map[string]struct {
+		value   string
+		regions []string
+		bad     bool
+	}{
+		"none":          {"", nil, false},
+		"one":           {"use1", []string{"use1"}, false},
+		"commas":        {`"use1, use2"`, []string{"use1", "use2"}, false},
+		"no spaces":     {"use1,use2,use3", []string{"use1", "use2", "use3"}, false},
+		"spaces":        {"use1 use2", []string{"use1", "use2"}, false},
+		"order kept":    {`"use2, use1"`, []string{"use2", "use1"}, false},
+		"empty entries": {`",use1,, use2,"`, []string{"use1", "use2"}, false},
+		"duplicates":    {`"use1, use2, use1"`, []string{"use1", "use2"}, false},
+		"one bad":       {`"use1, USE2"`, nil, true},
+		"semicolons":    {`"use1; use2"`, nil, true},
+		"too many":      {`"` + strings.Join(tooMany, ",") + `"`, nil, true},
+		"as many as allowed": {
+			`"` + strings.Join(tooMany[:MaxDocumentRegions], ",") + `"`,
+			tooMany[:MaxDocumentRegions], false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			annotations := "    k8s-sealed-secrets-sealer/env: dev\n"
+			if tc.value != "" {
+				annotations += "    k8s-sealed-secrets-sealer/region: " + tc.value + "\n"
+			}
+			content := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: a\n  namespace: ns\n  annotations:\n" +
+				annotations + "spec:\n  encryptedData: {}\n"
+			docs, err := Find([]byte(content), ann, "dev")
+			if err != nil || len(docs) != 1 {
+				t.Fatalf("Find = %+v, %v", docs, err)
+			}
+			d := docs[0]
+			if !slices.Equal(d.Regions, tc.regions) {
+				t.Errorf("regions = %q, want %q", d.Regions, tc.regions)
+			}
+			if bad := strings.Contains(d.Problem, "region annotation is not a valid region list"); bad != tc.bad {
+				t.Errorf("problem = %q", d.Problem)
+			}
+		})
+	}
+}
+
+func TestDocumentRegions(t *testing.T) {
+	both := Document{Regions: []string{"use1", "use2"}}
+	one := Document{Regions: []string{"use1"}}
+	none := Document{}
+	// a document listing several regions takes a value only when all are named
+	if both.InRegions([]string{"use1"}) || !both.InRegions([]string{"use2", "use1"}) {
+		t.Error("a shared document must take a value for all its regions or none")
+	}
+	if !one.InRegions([]string{"use1", "use2"}) || one.InRegions([]string{"use2"}) {
+		t.Error("a one-region document takes a value named for its region")
+	}
+	if none.InRegions([]string{"use1"}) {
+		t.Error("a document without regions takes no value limited to regions")
+	}
+	if got := RegionsOf([]Document{both, one, none, {Regions: []string{"use3"}}}); !slices.Equal(got, []string{"use1", "use2", "use3"}) {
+		t.Errorf("RegionsOf = %q", got)
+	}
+}
+
 func TestFind_BadRegionMarksOnlyItsDocument(t *testing.T) {
 	content := `
 apiVersion: bitnami.com/v1alpha1
@@ -160,7 +228,7 @@ metadata:
 	custom := strings.Replace(content, "name: no-env\n  namespace: ns", "name: s\n  namespace: ns\n  annotations: {acme.io/env: dev, acme.io/region: eu}", 1)
 	docs, err = Find([]byte(custom), Annotations{Env: "acme.io/env", Region: "acme.io/region"}, "dev")
 	// the empty document is not counted
-	if err != nil || len(docs) != 1 || docs[0].Index != 4 || docs[0].Region != "eu" {
+	if err != nil || len(docs) != 1 || docs[0].Index != 4 || !slices.Equal(docs[0].Regions, []string{"eu"}) {
 		t.Fatalf("custom annotations: docs = %+v, err = %v", docs, err)
 	}
 }

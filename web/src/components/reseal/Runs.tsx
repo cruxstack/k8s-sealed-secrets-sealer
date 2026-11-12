@@ -43,7 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn, safeHttpUrl, sentence } from "@/lib/utils";
-import { formatDuration } from "./format";
+import { failureRegions, formatDuration } from "./format";
 import { Progress, RepoStatusBadge, RunStatusBadge } from "./status";
 
 /** The columns of the run table, for the row under a run that spans them. */
@@ -159,7 +159,15 @@ function Failures({ repo }: { repo: ResealRunRepo }) {
                 #{f.document}
               </TableCell>
               <TableCell className="py-2">
-                {f.region ? <RegionTag region={f.region} /> : <Dash />}
+                {failureRegions(f).length > 0 ? (
+                  <span className="flex gap-1">
+                    {failureRegions(f).map((r) => (
+                      <RegionTag key={r} region={r} />
+                    ))}
+                  </span>
+                ) : (
+                  <Dash />
+                )}
               </TableCell>
               <TableCell className="min-w-56 py-2 text-destructive">
                 {sentence(f.error)}

@@ -208,7 +208,7 @@ func TestResealFile(t *testing.T) {
 	done := sh.resealStatus(sess.ID, queued.ID)
 	if done.Status != resealDone || done.Values != (resealValuesView{Total: 7, Resealed: 2, Current: 3, Failed: 1, Pending: 1}) ||
 		len(done.ChangeIDs) != 1 || len(done.Failures) != 1 || done.Failures[0].Key != "bad" || done.Failures[0].Document != 0 ||
-		done.Failures[0].Region != "use1" || done.Failures[0].Path != "" {
+		!slices.Equal(done.Failures[0].Regions, []string{"use1"}) || done.Failures[0].Region != "" || done.Failures[0].Path != "" {
 		t.Fatalf("done = %+v", done)
 	}
 	// the command keeps counts only

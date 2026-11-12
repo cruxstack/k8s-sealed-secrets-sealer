@@ -146,14 +146,22 @@ stays close under them. The key in the form scrolls into view in that box
 without moving the page. Enter in the filter picks the first match, and a
 filter that names a key the file lacks offers to seal it as a new one.
 
-When a file's documents are in more than one region, each key row also shows
-a chip per region with where the key stands there, and the form gets a
-choice of regions, all chosen at first. Picking a region's chip fills the
-key and limits the seal to that region. A limited seal says so everywhere it
-shows: the form's heading and note name the regions, the documents left out
-say "not in this seal", and the pending change carries its regions as tags.
-The regions chosen stay for the next value, since values that differ by
-region usually come several at a time.
+When a file's documents name regions, each key row also shows a chip per
+region with where the key stands there, and the file carries its regions as
+tags in the list: a file Kustomize keeps per region shows its one region, a
+base its list. When the documents are in more than one region and each names
+one, the form gets a choice of regions, all chosen at first, and picking a
+region's chip fills the key and limits the seal to that region. A limited
+seal says so everywhere it shows: the form's heading and note name the
+regions, the documents left out say "not in this seal", and the pending
+change carries its regions as tags. The regions chosen stay for the next
+value, since values that differ by region usually come several at a time.
+
+Regions listed in one document share it, so they are never a choice: when a
+file has such a document, or only one region, its chips only show where a
+key stands, and the form lists the regions as tags and says why they can't
+be chosen ("regions listed in one document share it"). The documents table
+shows each document's regions.
 
 The file's header holds its actions: Docs, and for the env's admins
 "Reseal All", which moves the file's values on older keys to the env key as

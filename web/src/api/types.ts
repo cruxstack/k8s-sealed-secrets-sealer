@@ -217,7 +217,12 @@ export interface SealedSecretDocument {
   index: number;
   name: string;
   namespace: string;
-  region?: string;
+  /**
+   * The regions it is for, from its region annotation: one, or several a
+   * Kustomize base, say, is deployed to. Regions listed together share the
+   * document, so a value can't differ between them.
+   */
+  regions?: string[];
   scope: "strict" | "namespace-wide" | "cluster-wide";
   /** Names in spec.encryptedData. */
   keys: string[];
@@ -261,7 +266,7 @@ export interface SealTarget {
   namespace: string;
   name: string;
   scope: "strict" | "namespace-wide";
-  region?: string;
+  regions?: string[];
 }
 
 /** An agent, as users see it. */
@@ -464,6 +469,8 @@ export interface ResealFailure {
   key: string;
   /** The document's position in the file, counting from 0. */
   document: number;
+  regions?: string[];
+  /** The one region of a failure kept from before regions were lists. */
   region?: string;
   error: string;
 }
