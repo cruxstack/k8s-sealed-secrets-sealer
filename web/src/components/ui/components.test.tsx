@@ -14,6 +14,7 @@ import { FieldLabel } from "./field-label";
 import { IconButton } from "./icon-button";
 import { ReasonButton } from "./reason-button";
 import { FilterInput } from "./filter-input";
+import { InfoTip } from "./info-tip";
 import { RegionTag } from "./region-tag";
 import { RelativeTime } from "./relative-time";
 import { Dash, Table } from "./table";
@@ -146,6 +147,26 @@ describe("FieldLabel", () => {
     fireEvent.pointerDown(about, { pointerType: "touch" });
     fireEvent.click(about);
     await waitFor(() => expect(tooltipShown()).toBe(help));
+  });
+});
+
+describe("InfoTip", () => {
+  it("has its text as its description, and shows it on focus", async () => {
+    render(
+      <TooltipProvider>
+        <p>
+          Sealed.{" "}
+          <InfoTip label="About This Seal">One agent sealed it.</InfoTip>
+        </p>
+      </TooltipProvider>,
+    );
+    const about = screen.getByRole("button", { name: "About This Seal" });
+    expect(about).toHaveAttribute("type", "button");
+    expect(about).toHaveAccessibleDescription("One agent sealed it.");
+    // out of sight until asked for, and not read as part of the sentence
+    expect(screen.getByText("One agent sealed it.")).not.toBeVisible();
+    fireEvent.focus(about);
+    await waitFor(() => expect(tooltipShown()).toBe("One agent sealed it."));
   });
 });
 

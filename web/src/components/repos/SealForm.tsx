@@ -25,6 +25,7 @@ import type {
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { FieldLabel } from "@/components/ui/field-label";
+import { InfoTip } from "@/components/ui/info-tip";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { RegionTag } from "@/components/ui/region-tag";
@@ -99,6 +100,8 @@ interface SealFormProps {
   ref?: Ref<SealFormHandle>;
   owner: string;
   repo: string;
+  /** The env the page seals for ("dev"), named in a seal's result. */
+  env: string;
   file: RepositoryFile;
   /** The commit the page shows; a new session opens there. */
   commit: string;
@@ -130,6 +133,7 @@ export function SealForm({
   ref,
   owner,
   repo,
+  env,
   file,
   commit,
   session,
@@ -566,7 +570,7 @@ export function SealForm({
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <SealProgress seal={seal} busy={busy} error={error} />
+        <SealProgress seal={seal} busy={busy} error={error} env={env} />
         <div className="flex shrink-0 items-center gap-3 sm:ml-auto">
           <span className="hidden items-center gap-1 text-xs text-muted-foreground md:flex">
             <Kbd>{modKey()}</Kbd>
@@ -598,14 +602,22 @@ export function SealForm({
   );
 }
 
+/**
+ * Where a seal stands, in the terms of the person sealing: one agent seals,
+ * but with the env key every cluster holds, so the value decrypts in every
+ * cluster. Which agent sealed it, with which key, is behind an info icon;
+ * naming one cluster up front reads as if the value worked only there.
+ */
 function SealProgress({
   seal,
   busy,
   error,
+  env,
 }: {
   seal: Seal | null;
   busy: boolean;
   error: string | null;
+  env: string;
 }) {
   if (error) {
     return (
@@ -632,29 +644,33 @@ function SealProgress({
           className="flex items-center gap-2 text-sm text-muted-foreground"
         >
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-          {seal.status === "queued"
-            ? `Waiting for ${agentName(seal)}…`
-            : `Sealing in ${agentName(seal)}…`}
+          {seal.status === "queued" ? "Waiting for an agent…" : "Sealing…"}
         </p>
       );
     case "sealed":
       return (
-        <p role="status" className="flex items-center gap-2 text-sm">
-          <CheckCircle2
-            className="h-4 w-4 shrink-0 text-success"
-            aria-hidden="true"
-          />
-          <span>
-            Sealed <code className="font-mono text-xs">{seal.key}</code> for{" "}
-            {documents(seal.targets.length)}
-            {seal.regions?.length
-              ? ` in ${regionList(seal.regions)}`
-              : ""} by {agentName(seal)} with{" "}
-            <code className="font-mono text-xs" title={seal.fingerprint}>
+        <div className="flex items-center gap-1 text-sm">
+          <p role="status" className="flex items-center gap-2">
+            <CheckCircle2
+              className="h-4 w-4 shrink-0 text-success"
+              aria-hidden="true"
+            />
+            <span>
+              Sealed <code className="font-mono text-xs">{seal.key}</code> for{" "}
+              {documents(seal.targets.length)}
+              {seal.regions?.length ? ` in ${regionList(seal.regions)}` : ""}.
+              Every cluster in the {env} env can decrypt it.
+            </span>
+          </p>
+          <InfoTip label="About This Seal">
+            {agentName(seal)}&apos;s agent sealed it with the env key (
+            <code className="font-mono">
               {shortFingerprint(seal.fingerprint)}
             </code>
-          </span>
-        </p>
+            ). Every cluster in the {env} env holds that key, so one agent seals
+            for all of them.
+          </InfoTip>
+        </div>
       );
     case "superseded":
       return (
