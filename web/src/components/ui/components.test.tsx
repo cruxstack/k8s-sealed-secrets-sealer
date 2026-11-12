@@ -10,6 +10,7 @@ import {
 import { Lock } from "lucide-react";
 import { Alert } from "./alert";
 import { Badge } from "./badge";
+import { FieldLabel } from "./field-label";
 import { IconButton } from "./icon-button";
 import { ReasonButton } from "./reason-button";
 import { FilterInput } from "./filter-input";
@@ -103,6 +104,50 @@ function Filter() {
     />
   );
 }
+
+describe("FieldLabel", () => {
+  const help = "The name in spec.encryptedData.";
+
+  it("names the field, with its help as the field's description", () => {
+    render(
+      <TooltipProvider>
+        <FieldLabel htmlFor="key" helpId="key-help" help={help}>
+          Key
+        </FieldLabel>
+        <input id="key" aria-describedby="key-help" />
+      </TooltipProvider>,
+    );
+    const input = screen.getByRole("textbox", { name: "Key" });
+    expect(input).toHaveAccessibleDescription(help);
+    // the help is out of sight until asked for
+    expect(screen.getByText(help)).not.toBeVisible();
+    const about = screen.getByRole("button", { name: "About Key" });
+    expect(about).toHaveAttribute("type", "button");
+    expect(about).toHaveAccessibleDescription(help);
+  });
+
+  it("shows the help on focus and on a tap", async () => {
+    render(
+      <TooltipProvider>
+        <FieldLabel id="regions" helpId="regions-help" help={help}>
+          Regions
+        </FieldLabel>
+        <div role="group" aria-labelledby="regions" />
+      </TooltipProvider>,
+    );
+    // without htmlFor, it names a group
+    expect(screen.getByRole("group", { name: "Regions" })).toBeInTheDocument();
+    const about = screen.getByRole("button", { name: "About Regions" });
+    fireEvent.focus(about);
+    await waitFor(() => expect(tooltipShown()).toBe(help));
+    fireEvent.keyDown(about, { key: "Escape" });
+    await waitFor(() => expect(tooltipShown()).toBeUndefined());
+    // a touch screen has no hover: a tap shows it
+    fireEvent.pointerDown(about, { pointerType: "touch" });
+    fireEvent.click(about);
+    await waitFor(() => expect(tooltipShown()).toBe(help));
+  });
+});
 
 describe("FilterInput", () => {
   it("shows its shortcut while empty and a clear button once it has text", () => {

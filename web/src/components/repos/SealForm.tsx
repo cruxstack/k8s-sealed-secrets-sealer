@@ -24,9 +24,9 @@ import type {
   SealSession,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { FieldLabel } from "@/components/ui/field-label";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
-import { Label } from "@/components/ui/label";
 import { RegionTag } from "@/components/ui/region-tag";
 import { Textarea } from "@/components/ui/textarea";
 import { useRememberSeal } from "@/lib/recent-repos";
@@ -250,6 +250,7 @@ export function SealForm({
   const canSubmit = !busy && key !== "" && !problem && value !== "";
   const k = <code className="font-mono">{key}</code>;
   const data = <code className="font-mono">spec.encryptedData</code>;
+  // what sealing this key would do, once there is one
   const note: ReactNode = problem ? (
     problem
   ) : pendingHere ? (
@@ -274,11 +275,7 @@ export function SealForm({
       Adds {k} to {data}
       {where}.
     </>
-  ) : expected.length > 0 ? (
-    <>The name in {data}; pick a key above or type one.</>
-  ) : (
-    <>The name in {data}; existing keys are suggested.</>
-  );
+  ) : null;
   const toggle = (r: string) =>
     setChosen((c) =>
       c.includes(r)
@@ -364,8 +361,21 @@ export function SealForm({
         </p>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor={`${id}-key`}>Key</Label>
+      <div className="space-y-2">
+        <FieldLabel
+          htmlFor={`${id}-key`}
+          helpId={`${id}-key-help`}
+          help={
+            <>
+              The value's name in {data}.{" "}
+              {expected.length > 0
+                ? "Pick a key above or type one."
+                : "The file's keys are suggested as you type."}
+            </>
+          }
+        >
+          Key
+        </FieldLabel>
         <Input
           ref={keyRef}
           id={`${id}-key`}
@@ -377,7 +387,9 @@ export function SealForm({
           value={key}
           disabled={busy}
           aria-invalid={problem ? true : undefined}
-          aria-describedby={`${id}-key-help`}
+          aria-describedby={
+            note ? `${id}-key-note ${id}-key-help` : `${id}-key-help`
+          }
           onChange={(e) => setKey(e.target.value.trim())}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !(e.metaKey || e.ctrlKey)) {
@@ -393,26 +405,36 @@ export function SealForm({
             <option key={k} value={k} />
           ))}
         </datalist>
-        <p
-          id={`${id}-key-help`}
-          className={cn(
-            "text-xs",
-            problem
-              ? "text-destructive"
-              : unexpected
-                ? "text-warning"
-                : "text-muted-foreground",
-          )}
-        >
-          {note}
-        </p>
+        {note && (
+          <p
+            id={`${id}-key-note`}
+            className={cn(
+              "text-xs",
+              problem
+                ? "text-destructive"
+                : unexpected
+                  ? "text-warning"
+                  : "text-muted-foreground",
+            )}
+          >
+            {note}
+          </p>
+        )}
       </div>
 
       {choices.length > 1 && (
-        <div className="space-y-1.5">
-          <span id={`${id}-regions`} className="text-sm font-medium">
+        <div className="space-y-2">
+          <FieldLabel
+            id={`${id}-regions`}
+            helpId={`${id}-regions-help`}
+            help={
+              everywhere
+                ? "Every document gets the value. For a value that differs by region, choose the regions it is for."
+                : `Only the documents in ${regionList(chosen)} get the value${unlabelled ? "; documents without a region are left out" : ""}.`
+            }
+          >
             Regions
-          </span>
+          </FieldLabel>
           <div
             role="group"
             aria-labelledby={`${id}-regions`}
@@ -461,27 +483,26 @@ export function SealForm({
               </Button>
             )}
           </div>
-          <p
-            id={`${id}-regions-help`}
-            className={cn(
-              "text-xs",
-              everywhere ? "text-muted-foreground" : "text-primary",
-            )}
-          >
-            {everywhere
-              ? "Every document gets the value. For a value that differs by region, choose the regions it is for."
-              : `Only the documents in ${regionList(chosen)} get the value${unlabelled ? "; documents without a region are left out" : ""}.`}
-          </p>
         </div>
       )}
 
       {choices.length < 2 && listed.length > 0 && (
         // the regions show, but there is nothing to choose: one region, or
         // regions listed together in one document, which share it
-        <div className="space-y-1.5">
-          <span id={`${id}-regions`} className="text-sm font-medium">
+        <div className="space-y-2">
+          <FieldLabel
+            id={`${id}-regions`}
+            helpId={`${id}-regions-help`}
+            help={
+              listed.length === 1
+                ? `The value is for ${listed[0]}${unlabelled ? ", and the documents without a region" : ""}.`
+                : sharesRegions(file)
+                  ? `The value goes to ${regionList(listed)}: regions listed in one document share it, so they can't be sealed apart.`
+                  : `The value goes to ${regionList(listed)}.`
+            }
+          >
             Regions
-          </span>
+          </FieldLabel>
           <ul
             aria-labelledby={`${id}-regions`}
             aria-describedby={`${id}-regions-help`}
@@ -493,21 +514,17 @@ export function SealForm({
               </li>
             ))}
           </ul>
-          <p
-            id={`${id}-regions-help`}
-            className="text-xs text-muted-foreground"
-          >
-            {listed.length === 1
-              ? `The value is for ${listed[0]}${unlabelled ? ", and the documents without a region" : ""}.`
-              : sharesRegions(file)
-                ? `The value goes to ${regionList(listed)}: regions listed in one document share it, so they can't be sealed apart.`
-                : `The value goes to ${regionList(listed)}.`}
-          </p>
         </div>
       )}
 
-      <div className="space-y-1.5">
-        <Label htmlFor={`${id}-value`}>Value</Label>
+      <div className="space-y-2">
+        <FieldLabel
+          htmlFor={`${id}-value`}
+          helpId={`${id}-value-help`}
+          help="Encrypted as soon as it reaches the server; only the agent that seals it can read it."
+        >
+          Value
+        </FieldLabel>
         <div className="relative">
           <Textarea
             ref={valueRef}
@@ -525,6 +542,7 @@ export function SealForm({
             data-form-type="other"
             value={value}
             disabled={busy}
+            aria-describedby={`${id}-value-help`}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={onSubmitKeys}
           />
@@ -545,10 +563,6 @@ export function SealForm({
             {shown ? "Hide" : "Show"}
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground">
-          Encrypted as soon as it reaches the server; only the agent that seals
-          it can read it.
-        </p>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
