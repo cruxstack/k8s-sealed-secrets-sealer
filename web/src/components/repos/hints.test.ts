@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RepositoryFile, SealedSecretDocument } from "@/api/types";
-import { fileHints } from "./hints";
+import { fileHints, sortFiles } from "./hints";
 
 function doc(over: Partial<SealedSecretDocument>): SealedSecretDocument {
   return {
@@ -13,8 +13,11 @@ function doc(over: Partial<SealedSecretDocument>): SealedSecretDocument {
   };
 }
 
-function file(documents: SealedSecretDocument[]): RepositoryFile {
-  return { path: "sealed.yaml", blob: "b", documents };
+function file(
+  documents: SealedSecretDocument[],
+  path = "sealed.yaml",
+): RepositoryFile {
+  return { path, blob: "b", documents };
 }
 
 describe("fileHints", () => {
@@ -55,5 +58,36 @@ describe("fileHints", () => {
       docs: undefined,
       expected: [],
     });
+  });
+
+  it("takes the first order given, 0 included", () => {
+    expect(
+      fileHints(file([doc({}), doc({ order: 0 }), doc({ order: 3 })])).order,
+    ).toBe(0);
+    expect(fileHints(file([doc({})])).order).toBeUndefined();
+  });
+});
+
+describe("sortFiles", () => {
+  it("puts files with an order first, lowest first, then the rest as they came", () => {
+    const files = [
+      file([doc({})], "a.yaml"),
+      file([doc({ order: 10 })], "b.yaml"),
+      file([], "c.yaml"),
+      file([doc({ order: 0 })], "d.yaml"),
+      file([doc({})], "e.yaml"),
+      file([doc({ order: 10 })], "f.yaml"),
+    ];
+    expect(sortFiles(files).map((f) => f.path)).toEqual([
+      "d.yaml",
+      // a tie keeps the order the files came in
+      "b.yaml",
+      "f.yaml",
+      "a.yaml",
+      "c.yaml",
+      "e.yaml",
+    ]);
+    // the list it was given stays as it was
+    expect(files[0]?.path).toBe("a.yaml");
   });
 });

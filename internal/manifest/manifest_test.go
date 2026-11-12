@@ -307,6 +307,65 @@ spec:
 	}
 }
 
+func TestFind_OrderHint(t *testing.T) {
+	doc := func(order string) string {
+		return `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: billing
+  namespace: apps
+  annotations:
+    k8s-sealed-secrets-sealer/env: dev
+    k8s-sealed-secrets-sealer/order: "` + order + `"
+spec:
+  encryptedData: {}
+`
+	}
+	tests := map[string]struct {
+		in   string
+		want *int
+	}{
+		"zero, the top":     {in: "0", want: ptr(0)},
+		"a number":          {in: "20", want: ptr(20)},
+		"padded":            {in: " 7 ", want: ptr(7)},
+		"leading zeros":     {in: "007", want: ptr(7)},
+		"the most":          {in: "1000000", want: ptr(maxOrder)},
+		"unset":             {in: "", want: nil},
+		"negative":          {in: "-1", want: nil},
+		"a sign":            {in: "+2", want: nil},
+		"a fraction":        {in: "1.5", want: nil},
+		"a word":            {in: "first", want: nil},
+		"too large":         {in: "1000001", want: nil},
+		"far too large":     {in: "99999999999999999999", want: nil},
+		"digits and spaces": {in: "1 2", want: nil},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			docs, err := Find([]byte(doc(tt.in)), Annotations{Env: DefaultEnvAnnotation}, "dev")
+			if err != nil || len(docs) != 1 {
+				t.Fatalf("Find = %+v, %v", docs, err)
+			}
+			got := docs[0].Order
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Fatalf("order of %q = %v, want %v", tt.in, deref(got), deref(tt.want))
+			}
+			// a hint: it never stops a seal
+			if docs[0].Problem != "" {
+				t.Fatalf("problem = %q", docs[0].Problem)
+			}
+		})
+	}
+}
+
+func ptr(n int) *int { return &n }
+
+func deref(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 func TestEncryptedData(t *testing.T) {
 	content := `apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
