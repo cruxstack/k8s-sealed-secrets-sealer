@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
+import { FieldLabel } from "@/components/ui/field-label";
 import { Label } from "@/components/ui/label";
 import { modKey } from "@/lib/shortcuts";
 import { cn, relativeTime, sentence } from "@/lib/utils";
@@ -72,7 +73,6 @@ function ChipInput({
   max,
   noun,
   placeholder,
-  help,
   problem: outer,
   suggestions,
   onNext,
@@ -87,7 +87,6 @@ function ChipInput({
   /** What a value is: "repository", "org". */
   noun: string;
   placeholder: string;
-  help: string;
   /** What is wrong with the whole list, from the form. */
   problem?: string;
   suggestions: string[];
@@ -185,7 +184,8 @@ function ChipInput({
           spellCheck={false}
           value={text}
           aria-invalid={shown ? true : undefined}
-          aria-describedby={`${id}-help`}
+          // the field's help is by its name (FieldLabel)
+          aria-describedby={shown ? `${id}-note ${id}-help` : `${id}-help`}
           onChange={(e) => {
             setText(e.target.value);
             setProblem(null);
@@ -203,15 +203,11 @@ function ChipInput({
             ))}
         </datalist>
       </div>
-      <p
-        id={`${id}-help`}
-        className={cn(
-          "text-xs",
-          shown ? "text-destructive" : "text-muted-foreground",
-        )}
-      >
-        {shown ?? help}
-      </p>
+      {shown && (
+        <p id={`${id}-note`} className="text-xs text-destructive">
+          {shown}
+        </p>
+      )}
     </>
   );
 }
@@ -326,7 +322,8 @@ function ScheduleForm({
     enabled,
   };
   const problems = tried ? scheduleProblems(input) : {};
-  const hint = intervalHint(interval);
+  // the interval in weeks or months, or what is wrong with it
+  const note = problems.interval ?? intervalHint(interval);
   const next = preview(schedule, interval, enabled, now);
 
   const save = useMutation({
@@ -391,7 +388,7 @@ function ScheduleForm({
         </DialogDescription>
       </DialogHeader>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <Label htmlFor={`${id}-name`}>Name</Label>
         <Input
           ref={nameRef}
@@ -415,8 +412,14 @@ function ScheduleForm({
         )}
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor={`${id}-repos`}>Repositories</Label>
+      <div className="space-y-2">
+        <FieldLabel
+          htmlFor={`${id}-repos`}
+          helpId={`${id}-repos-help`}
+          help={`Each as owner/name; up to ${LIMITS.repos}.`}
+        >
+          Repositories
+        </FieldLabel>
         <ChipInput
           ref={reposRef}
           id={`${id}-repos`}
@@ -426,15 +429,20 @@ function ScheduleForm({
           max={LIMITS.repos}
           noun="repository"
           placeholder="owner/name, then Enter"
-          help={`Each as owner/name; up to ${LIMITS.repos}.`}
           problem={problems.scope}
           suggestions={repoSuggestions}
           onNext={() => orgsRef.current?.focus()}
         />
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor={`${id}-orgs`}>Orgs</Label>
+      <div className="space-y-2">
+        <FieldLabel
+          htmlFor={`${id}-orgs`}
+          helpId={`${id}-orgs-help`}
+          help={`Every repository of the org the GitHub App is installed on, apart from archived ones; up to ${LIMITS.orgs}.`}
+        >
+          Orgs
+        </FieldLabel>
         <ChipInput
           ref={orgsRef}
           id={`${id}-orgs`}
@@ -444,14 +452,19 @@ function ScheduleForm({
           max={LIMITS.orgs}
           noun="org"
           placeholder="An org's login, then Enter"
-          help={`Every repository of the org the GitHub App is installed on, apart from archived ones; up to ${LIMITS.orgs}.`}
           suggestions={orgSuggestions}
           onNext={() => daysRef.current?.focus()}
         />
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor={`${id}-days`}>Every</Label>
+      <div className="space-y-2">
+        <FieldLabel
+          htmlFor={`${id}-days`}
+          helpId={`${id}-days-help`}
+          help={`From ${LIMITS.minDays} to ${LIMITS.maxDays} days.`}
+        >
+          Every
+        </FieldLabel>
         <div className="flex items-center gap-2">
           <Input
             ref={daysRef}
@@ -464,7 +477,9 @@ function ScheduleForm({
             className="h-10 w-24 tabular-nums"
             value={days}
             aria-invalid={problems.interval ? true : undefined}
-            aria-describedby={`${id}-days-help`}
+            aria-describedby={
+              note ? `${id}-days-note ${id}-days-help` : `${id}-days-help`
+            }
             onChange={(e) => setDays(e.target.value)}
             onKeyDown={(e) => {
               if (plainEnter(e)) enabledRef.current?.focus();
@@ -472,20 +487,20 @@ function ScheduleForm({
           />
           <span className="text-sm">days</span>
         </div>
-        <p
-          id={`${id}-days-help`}
-          className={cn(
-            "text-xs",
-            problems.interval ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {problems.interval ??
-            hint ??
-            `From ${LIMITS.minDays} to ${LIMITS.maxDays} days.`}
-        </p>
+        {note && (
+          <p
+            id={`${id}-days-note`}
+            className={cn(
+              "text-xs",
+              problems.interval ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {note}
+          </p>
+        )}
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         <div className="flex items-center gap-2">
           <input
             ref={enabledRef}

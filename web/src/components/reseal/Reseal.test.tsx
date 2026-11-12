@@ -491,8 +491,9 @@ describe("reseal schedules", () => {
     fireEvent.keyDown(repos, { key: "Enter" });
     expect(repos).toHaveValue("apps");
     expect(repos).toHaveAttribute("aria-invalid", "true");
+    // the problem, then the field's help from its info icon
     expect(repos).toHaveAccessibleDescription(
-      "Use owner/name, as in example-org/apps.",
+      "Use owner/name, as in example-org/apps. Each as owner/name; up to 100.",
     );
     fireEvent.change(repos, { target: { value: "" } });
     fireEvent.change(within(dialog).getByLabelText("Every"), {
@@ -516,7 +517,7 @@ describe("reseal schedules", () => {
     fireEvent.change(repos, { target: { value: "Example-Org/Apps" } });
     fireEvent.keyDown(repos, { key: "Enter" });
     expect(repos).toHaveAccessibleDescription(
-      "Example-Org/Apps is already added.",
+      /^Example-Org\/Apps is already added\. /,
     );
     expect(
       api.calls.filter(

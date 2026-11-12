@@ -186,20 +186,39 @@ describe("sealing", () => {
       fakeApi({ me: ME, files: { "example-org/apps": listing() } }),
     );
     const { form, key, value, seal } = await openForm();
+    // what a field is for sits behind an info icon by its name, and is the
+    // field's description; there is no note under it until there is a key
+    expect(key).toHaveAccessibleDescription(
+      /^The value's name in spec\.encryptedData\. The file's keys are suggested as you type\.$/,
+    );
+    expect(value).toHaveAccessibleDescription(
+      "Encrypted as soon as it reaches the server; only the agent that seals it can read it.",
+    );
+    expect(within(form).getByText(/^Encrypted as soon/)).not.toBeVisible();
+    expect(form.querySelector('[id$="-key-note"]')).toBeNull();
+    const about = within(form).getByRole("button", { name: "About Value" });
+    expect(about).toHaveAccessibleDescription(/^Encrypted as soon/);
+    fireEvent.focus(about);
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-radix-popper-content-wrapper]"),
+      ).toHaveTextContent(/^Encrypted as soon as it reaches the server/),
+    );
     fireEvent.change(value, { target: { value: "v" } });
     fireEvent.change(key, { target: { value: "a/b" } });
     expect(within(form).getByText(/letters, digits/)).toBeVisible();
     expect(key).toHaveAttribute("aria-invalid", "true");
     expect(seal).toBeDisabled();
     fireEvent.change(key, { target: { value: "api-key" } });
-    // one document holds it, the other doesn't
+    // one document holds it, the other doesn't: the note comes first, then
+    // what the field is for
     expect(key).toHaveAccessibleDescription(
-      "Replaces api-key where it is set and adds it to the other documents.",
+      /^Replaces api-key where it is set and adds it to the other documents\. The value's name/,
     );
     expect(seal).toBeEnabled();
     fireEvent.change(key, { target: { value: "new-key" } });
     expect(key).toHaveAccessibleDescription(
-      "Adds new-key to spec.encryptedData.",
+      /^Adds new-key to spec\.encryptedData\. The value's name/,
     );
     // keys and fields in the note are monospace
     expect(
@@ -827,7 +846,7 @@ describe("regions", () => {
       within(form).getByText(/Sealed for the document in use2/),
     ).toBeVisible();
     expect(key).toHaveAccessibleDescription(
-      "Adds db-password to spec.encryptedData in use2.",
+      /^Adds db-password to spec\.encryptedData in use2\. /,
     );
     // the document left out says so
     expect(
@@ -928,7 +947,7 @@ describe("regions", () => {
         .getAllByRole("listitem")
         .map((li) => li.textContent),
     ).toEqual(["use1", "use2"]);
-    expect(form).toHaveTextContent(
+    expect(listed).toHaveAccessibleDescription(
       "The value goes to use1 and use2: regions listed in one document share it, so they can't be sealed apart.",
     );
     // the document lists both
@@ -987,7 +1006,9 @@ describe("regions", () => {
     expect(
       within(panel).getByRole("button", { name: /^token/ }),
     ).toHaveTextContent("tokenSet");
-    expect(form).toHaveTextContent("The value is for use1.");
+    expect(
+      within(form).getByRole("list", { name: "Regions" }),
+    ).toHaveAccessibleDescription("The value is for use1.");
     // and the file in the list carries it as a tag
     const files = screen.getByRole("list", { name: "Files" });
     expect(within(files).getByText("use1")).toHaveClass("font-mono");
@@ -1008,7 +1029,9 @@ describe("regions", () => {
     // the last one chosen stays
     fireEvent.click(chip("use2"));
     expect(chip("use2")).toHaveAttribute("aria-pressed", "true");
-    expect(within(form).getByText(/Only the documents in use2/)).toBeVisible();
+    expect(regions).toHaveAccessibleDescription(
+      "Only the documents in use2 get the value.",
+    );
 
     fireEvent.click(
       within(regions).getByRole("button", { name: "All Regions" }),

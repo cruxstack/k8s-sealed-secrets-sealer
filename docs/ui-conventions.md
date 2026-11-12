@@ -387,7 +387,17 @@ content with `p-10`.
 
 Inputs and textareas have an `--input` border, which meets 3:1 against the
 page. A field with `aria-invalid` turns its border and focus ring
-destructive, and its help text says what is wrong.
+destructive, and its note says what is wrong.
+
+- A field's name sits 8px over its control (`space-y-2`).
+- What a field is for goes behind an info icon after its name
+  (`FieldLabel`, `components/ui/field-label.tsx`), never in a line of small
+  print under the control. The help shows on hover, keyboard focus and a
+  tap, and is the control's description for a screen reader.
+- A note under the control is for what the input means right now, and only
+  once there is input: a problem (destructive), a likely mistake (warning),
+  or what the action will do ("Replaces the current value of `api-key`").
+  It comes first in the control's description, before the help.
 
 ## Messages
 
