@@ -93,9 +93,21 @@ describe("sealing", () => {
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
 
-    const done = await within(form).findByText(/sealed/i, { selector: "span" });
+    const done = await within(form).findByText(/^Sealed /, {
+      selector: "span",
+    });
+    // one agent sealed it, but the result says where it works: everywhere,
+    // since every cluster holds the env key
     expect(done).toHaveTextContent(
-      /Sealed api-token for 2 documents by dev-use1-blue/,
+      /^Sealed api-token for 2 documents\. Every cluster in the dev env can decrypt it\.$/,
+    );
+    // which agent, and with which key, is behind the info icon
+    const about = within(form).getByRole("button", { name: "About This Seal" });
+    expect(about).toHaveAccessibleDescription(
+      /^dev-use1-blue's agent sealed it with the env key \(\S+\)\. Every cluster in the dev env holds that key, so one agent seals for all of them\.$/,
+    );
+    expect(done.closest("[role=status]")).not.toHaveTextContent(
+      "dev-use1-blue",
     );
     // ready for the next value, with a notice that names no value
     expect(done.closest("[role=status]")).not.toHaveTextContent("s3cr3t");
@@ -555,12 +567,12 @@ describe("sealing", () => {
     fireEvent.change(key, { target: { value: "api-token" } });
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.click(seal);
-    await within(form).findByText(/sealed/i, { selector: "span" });
+    await within(form).findByText(/^Sealed /, { selector: "span" });
     const pending = screen.getByRole("region", { name: /pending changes/i });
     await within(pending).findByText("api-token");
     // the status stays while its change waits
     expect(
-      within(form).getByText(/sealed/i, { selector: "span" }),
+      within(form).getByText(/^Sealed /, { selector: "span" }),
     ).toBeVisible();
 
     fireEvent.click(
@@ -570,7 +582,7 @@ describe("sealing", () => {
     );
     await waitFor(() =>
       expect(
-        within(form).queryByText(/sealed/i, { selector: "span" }),
+        within(form).queryByText(/^Sealed /, { selector: "span" }),
       ).not.toBeInTheDocument(),
     );
   });
@@ -586,7 +598,7 @@ describe("sealing", () => {
     fireEvent.change(key, { target: { value: "api-token" } });
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.click(seal);
-    await within(form).findByText(/sealed/i, { selector: "span" });
+    await within(form).findByText(/^Sealed /, { selector: "span" });
     const pending = screen.getByRole("region", { name: /pending changes/i });
     await within(pending).findByText("api-token");
 
@@ -597,7 +609,7 @@ describe("sealing", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
     await waitFor(() =>
       expect(
-        within(form).queryByText(/sealed/i, { selector: "span" }),
+        within(form).queryByText(/^Sealed /, { selector: "span" }),
       ).not.toBeInTheDocument(),
     );
   });
@@ -861,8 +873,10 @@ describe("regions", () => {
     fireEvent.change(value, { target: { value: "s3cr3t" } });
     fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
     expect(
-      await within(form).findByText(/sealed/i, { selector: "span" }),
-    ).toHaveTextContent(/Sealed db-password for 1 document in use2 by/);
+      await within(form).findByText(/^Sealed /, { selector: "span" }),
+    ).toHaveTextContent(
+      /^Sealed db-password for 1 document in use2\. Every cluster in the dev env can decrypt it\.$/,
+    );
     const seal = api.calls.find((c) => c.url.endsWith("/seals"));
     expect(seal?.body).toEqual({
       path: BILLING,
@@ -966,7 +980,7 @@ describe("regions", () => {
     fireEvent.change(key, { target: { value: "token" } });
     fireEvent.change(value, { target: { value: "v" } });
     fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
-    await within(form).findByText(/sealed/i, { selector: "span" });
+    await within(form).findByText(/^Sealed /, { selector: "span" });
     // sealed for the document: no regions are named
     expect(api.calls.find((c) => c.url.endsWith("/seals"))?.body).toEqual({
       path: BASE,
@@ -1049,7 +1063,7 @@ describe("regions", () => {
     fireEvent.change(key, { target: { value: "api-key" } });
     fireEvent.change(value, { target: { value: "v" } });
     fireEvent.keyDown(value, { key: "Enter", ctrlKey: true });
-    await within(form).findByText(/sealed/i, { selector: "span" });
+    await within(form).findByText(/^Sealed /, { selector: "span" });
     // every region is every document: no regions are sent
     expect(api.calls.find((c) => c.url.endsWith("/seals"))?.body).toEqual({
       path: BILLING,

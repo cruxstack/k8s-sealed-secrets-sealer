@@ -388,6 +388,7 @@ export function FilePanel({
           ref={form}
           owner={owner}
           repo={repo}
+          env={env}
           file={file}
           commit={commit}
           session={session}

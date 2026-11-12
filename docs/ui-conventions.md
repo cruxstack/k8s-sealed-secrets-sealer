@@ -435,6 +435,11 @@ destructive, and its note says what is wrong.
   in the cart) needs no toast as well. A toast never carries a secret value,
   and never replaces an error that needs action. Toasts sit top right,
   under the header, clear of the seal form and the cart.
+- A result says what it means for the person who acted, not how the
+  system got there. A seal's status line says every cluster in the env can
+  decrypt the value. Which agent sealed it, and with which key, sits behind
+  an info icon (`InfoTip`): naming one cluster up front reads as if the
+  value worked only there.
 - The end of a flow (a pull request opened) gets a dialog with the way
   forward ("View Pull Request") and the way back ("Keep Sealing").
 - Errors from the API show the server's short message in an alert, never a
