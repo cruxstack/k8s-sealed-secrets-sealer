@@ -129,7 +129,19 @@ type Target struct {
 	Namespace string `dynamodbav:"namespace"`
 	Name      string `dynamodbav:"name"`
 	Scope     string `dynamodbav:"scope"`
-	Region    string `dynamodbav:"region,omitempty"`
+	// Regions are the document's regions.
+	Regions []string `dynamodbav:"regions,omitempty"`
+	// Region is the one region of a target stored before documents could
+	// list several; read through RegionList.
+	Region string `dynamodbav:"region,omitempty"`
+}
+
+// RegionList returns the target's regions, whenever it was stored.
+func (t Target) RegionList() []string {
+	if len(t.Regions) == 0 && t.Region != "" {
+		return []string{t.Region}
+	}
+	return t.Regions
 }
 
 // Seal is a seal requested in a session: which command carries it and to

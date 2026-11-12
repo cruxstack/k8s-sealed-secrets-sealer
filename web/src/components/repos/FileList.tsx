@@ -3,11 +3,12 @@ import type { PendingChange, RepositoryFile } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FilterInput } from "@/components/ui/filter-input";
+import { RegionTag } from "@/components/ui/region-tag";
 import { CardHeading } from "@/components/ui/section-heading";
 import { useShortcut } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import { fileHints } from "./hints";
-import { missingKeys, pendingDocs } from "./keys";
+import { fileRegions, missingKeys, pendingDocs } from "./keys";
 
 export type FileStatus = "ready" | "blocked" | "unreadable";
 
@@ -100,10 +101,26 @@ function summary(file: RepositoryFile): string {
   const docs = file.documents ?? [];
   const status = fileStatus(file);
   if (status === "unreadable") return "Unreadable";
-  const regions = [...new Set(docs.map((d) => d.region).filter(Boolean))];
   const count = docs.length === 1 ? "1 document" : `${docs.length} documents`;
-  const where = regions.length > 0 ? ` · ${regions.join(", ")}` : "";
-  return status === "blocked" ? `${count} · Can't Seal` : `${count}${where}`;
+  return status === "blocked" ? `${count} · Can't Seal` : count;
+}
+
+/**
+ * The regions a file's documents are for, as tags after its summary: a
+ * file Kustomize keeps per region shows its one region, a base its list.
+ */
+function SummaryRegions({ file }: { file: RepositoryFile }) {
+  if (fileStatus(file) !== "ready") return null;
+  const regions = fileRegions(file).filter((r) => r !== "");
+  if (regions.length === 0) return null;
+  return (
+    <>
+      <span className="sr-only"> in </span>
+      {regions.map((r) => (
+        <RegionTag key={r} region={r} className="h-5 px-1.5" />
+      ))}
+    </>
+  );
 }
 
 /**
@@ -261,8 +278,9 @@ export function FileList({
                           {description}
                         </span>
                       )}
-                      <span className="mt-0.5 block text-xs text-muted-foreground">
-                        {summary(f)}
+                      <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
+                        <span>{summary(f)}</span>
+                        <SummaryRegions file={f} />
                       </span>
                       {/* the badges always get their own row, left-aligned */}
                       {badges && (

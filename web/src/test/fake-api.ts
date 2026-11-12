@@ -548,7 +548,7 @@ export function listing(overrides: Partial<FileListing> = {}): FileListing {
             index: 0,
             name: "billing",
             namespace: "dev-use1-blue-apps",
-            region: "use1",
+            regions: ["use1"],
             scope: "strict",
             keys: [],
           },
@@ -556,7 +556,7 @@ export function listing(overrides: Partial<FileListing> = {}): FileListing {
             index: 2,
             name: "billing",
             namespace: "dev-use2-blue-apps",
-            region: "use2",
+            regions: ["use2"],
             scope: "strict",
             keys: ["api-key"],
           },
@@ -611,13 +611,13 @@ export const SEAL: Seal = {
       namespace: "dev-use1-blue-apps",
       name: "billing",
       scope: "strict",
-      region: "use1",
+      regions: ["use1"],
     },
     {
       namespace: "dev-use2-blue-apps",
       name: "billing",
       scope: "strict",
-      region: "use2",
+      regions: ["use2"],
     },
   ],
   agent: { id: "dev-use1-blue", cluster: "dev-use1-blue", region: "use1" },
@@ -639,7 +639,10 @@ function sealOf({ path, key, regions }: SealRequest): Seal {
     key,
     regions,
     targets: SEAL.targets.filter(
-      (t) => !regions || regions.includes(t.region ?? ""),
+      (t) =>
+        !regions ||
+        ((t.regions ?? []).length > 0 &&
+          (t.regions ?? []).every((r) => regions.includes(r))),
     ),
   };
 }

@@ -1,6 +1,9 @@
 package store
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // Outranks reports whether change a wins over change b where both set a
 // document's key: a value sealed in the session always wins over a reseal,
@@ -136,5 +139,5 @@ func (s docSet) add(c Change, t Target) {
 }
 
 func byName(c Change, t Target) docRef {
-	return docRef{path: c.Path, key: c.Key, region: t.Region, namespace: t.Namespace, name: t.Name}
+	return docRef{path: c.Path, key: c.Key, region: strings.Join(t.RegionList(), ","), namespace: t.Namespace, name: t.Name}
 }

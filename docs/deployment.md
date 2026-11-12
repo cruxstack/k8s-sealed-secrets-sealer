@@ -584,6 +584,24 @@ spec:
 In dev, the file has one document. In prod it has two: a value goes into
 both, or only one region's when it differs by region.
 
+With Kustomize, a region's documents usually sit in its own overlay's file,
+one region each (`overlays/use1/sealed-secret.yaml`), and Sealer shows each
+file's region as it does a file with several. A document the overlays share,
+such as one in the base, lists every region it is deployed to, separated by
+commas:
+
+```yaml
+metadata:
+  name: billing
+  namespace: billing
+  annotations:
+    k8s-sealed-secrets-sealer/env: prod
+    k8s-sealed-secrets-sealer/region: use1, use2
+```
+
+Regions listed together share the document, so its value goes to all of
+them: they can't be sealed apart, and the UI says so.
+
 ## 6. What people see
 
 People open `https://sealer.example.com` and sign in with GitHub once. At

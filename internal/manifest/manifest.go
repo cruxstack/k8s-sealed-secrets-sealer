@@ -2,8 +2,9 @@
 // belong to an env.
 //
 // A document belongs to the env when its env annotation equals the env's
-// name; its region annotation says which region it is for, so a value that
-// differs by region goes only into its regions' documents. The
+// name; its region annotation says which regions it is for (one, or a list
+// for a document deployed to several), so a value that differs by region
+// goes only into its regions' documents. The
 // decryption label (name, namespace and scope) always comes from the
 // document's own metadata, the same place the controller reads it, so it
 // can never be chosen by a user.
@@ -17,8 +18,10 @@ package manifest
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -40,6 +43,8 @@ const (
 	MaxFileBytes     = 1 << 20
 	MaxDocuments     = 100
 	MaxKeysPerSecret = 200
+	// MaxDocumentRegions bounds the regions one document lists.
+	MaxDocumentRegions = 32
 	// limits on hint annotations; longer values are cut or ignored
 	maxTitleRunes       = 80
 	maxDescriptionRunes = 300
@@ -91,8 +96,12 @@ type Document struct {
 	Index     int    `json:"index"`
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
-	Region    string `json:"region,omitempty"`
-	Scope     string `json:"scope"`
+	// Regions are the regions the document is for, from its region
+	// annotation: one, or several separated by commas for a document
+	// deployed to each of them (a Kustomize base, say). Regions listed
+	// together share the document, so its value can't differ between them.
+	Regions []string `json:"regions,omitempty"`
+	Scope   string   `json:"scope"`
 	// Keys are the names in spec.encryptedData.
 	Keys []string `json:"keys"`
 	// Problem says why values cannot be sealed into this document; empty
@@ -106,6 +115,38 @@ type Document struct {
 	Description  string   `json:"description,omitempty"`
 	ExpectedKeys []string `json:"expected_keys,omitempty"`
 	Docs         string   `json:"docs,omitempty"`
+
+	// badRegions is set when the region annotation is not a region list.
+	badRegions bool
+}
+
+// InRegions reports whether a value limited to the named regions goes into
+// the document: it has regions and every one is named. A document listing
+// several regions is deployed to each, so naming only some of them must
+// not reach it.
+func (d Document) InRegions(named []string) bool {
+	if len(d.Regions) == 0 {
+		return false
+	}
+	for _, r := range d.Regions {
+		if !slices.Contains(named, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// RegionsOf returns the distinct regions of the documents, in order.
+func RegionsOf(docs []Document) []string {
+	var out []string
+	for _, d := range docs {
+		for _, r := range d.Regions {
+			if !slices.Contains(out, r) {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
 }
 
 // Sealable reports whether values can be sealed into the document.
@@ -153,7 +194,6 @@ func find(content []byte, ann Annotations, env string, withValues bool) ([]Docum
 			Index:     i,
 			Name:      scalar(mapValue(meta, "name")),
 			Namespace: scalar(mapValue(meta, "namespace")),
-			Region:    annotations[ann.Region],
 			Scope:     scope(annotations),
 			Keys:      mapKeys(mapValue(spec, "encryptedData")),
 
@@ -162,6 +202,7 @@ func find(content []byte, ann Annotations, env string, withValues bool) ([]Docum
 			ExpectedKeys: expectedKeys(annotations[ann.Hint("keys")]),
 			Docs:         docsURL(annotations[ann.Hint("docs")]),
 		}
+		doc.Regions, doc.badRegions = regionList(annotations[ann.Region])
 		doc.Problem = problem(root, spec, doc)
 		out = append(out, doc)
 		if withValues {
@@ -201,8 +242,8 @@ func problem(root, spec *yaml.Node, d Document) string {
 		return "metadata.namespace is missing; the decryption label needs it"
 	case len(validation.IsDNS1123Label(d.Namespace)) > 0:
 		return "metadata.namespace is not a valid namespace"
-	case d.Region != "" && !IsRegion(d.Region):
-		return "the region annotation is not a valid region: use a lowercase DNS label of at most 63 characters, such as use1"
+	case d.badRegions:
+		return fmt.Sprintf("the region annotation is not a valid region list: use at most %d lowercase DNS labels of at most 63 characters, separated by commas, such as use1 or use1, use2", MaxDocumentRegions)
 	case spec != nil && mapValue(spec, "data") != nil:
 		return "uses the legacy spec.data format"
 	case !isMappingOrEmpty(mapValue(spec, "encryptedData")):
@@ -368,6 +409,25 @@ func oneLine(v string, limit int) string {
 		v = strings.TrimSpace(string(r[:limit-1])) + "…"
 	}
 	return v
+}
+
+// regionList returns the distinct regions of a region annotation, separated
+// by commas or spaces, in the order given, and whether it is not a valid
+// list: a name that is not a region, or more than MaxDocumentRegions.
+func regionList(v string) ([]string, bool) {
+	var out []string
+	for _, r := range strings.FieldsFunc(v, func(c rune) bool { return c == ',' || unicode.IsSpace(c) }) {
+		if !IsRegion(r) {
+			return nil, true
+		}
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	if len(out) > MaxDocumentRegions {
+		return nil, true
+	}
+	return out, false
 }
 
 // expectedKeys returns the valid, distinct keys of a keys hint, separated

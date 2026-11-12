@@ -109,8 +109,14 @@ function Documents({
   regions: string[] | null;
 }) {
   if (docs.length === 0) return null;
+  // left out of a seal limited to some regions, unless all its regions
+  // are chosen
   const left = (d: SealedSecretDocument) =>
-    regions !== null && !regions.includes(d.region ?? "");
+    regions !== null &&
+    !(
+      (d.regions ?? []).length > 0 &&
+      (d.regions ?? []).every((r) => regions.includes(r))
+    );
   const count = docs.filter((d) => !left(d)).length;
   const note = !sealing
     ? null
@@ -171,8 +177,18 @@ function Documents({
                   </p>
                 )}
               </th>
-              <TableCell className="py-2.5 whitespace-nowrap">
-                {d.region ? <RegionTag region={d.region} /> : <Dash />}
+              <TableCell className="py-2.5">
+                {d.regions?.length ? (
+                  // a base deployed to several regions lists them all, on
+                  // one line
+                  <span className="flex gap-1">
+                    {d.regions.map((r) => (
+                      <RegionTag key={r} region={r} />
+                    ))}
+                  </span>
+                ) : (
+                  <Dash />
+                )}
               </TableCell>
               <TableCell className="py-2 text-right">
                 <ScopeBadge scope={d.scope} />

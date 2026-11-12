@@ -7,6 +7,8 @@ import type {
 import {
   NO_PENDING,
   fileRegions,
+  regionChoices,
+  sharesRegions,
   keyStatuses,
   missingKeys,
   pendingDocs,
@@ -19,13 +21,13 @@ function doc(
   namespace: string,
   keys: string[],
   expected_keys?: string[],
-  region?: string,
+  region?: string | string[],
 ): SealedSecretDocument {
   return {
     index: 0,
     name: "billing",
     namespace,
-    region,
+    regions: region === undefined ? undefined : ([] as string[]).concat(region),
     scope: "strict",
     keys,
     expected_keys,
@@ -60,7 +62,7 @@ function changes(
         namespace: d.namespace,
         name: d.name,
         scope: "strict",
-        region: d.region,
+        regions: d.regions,
       })),
     sealed_at: "",
     sealed_by: { id: "a" },
@@ -150,16 +152,16 @@ describe("keyStatuses", () => {
         (k) => k.key === "token",
       )?.regions,
     ).toEqual([
-      { region: "use1", state: "partial", docs: 2 },
-      { region: "use2", state: "pending", docs: 1 },
-      { region: "use3", state: "set", docs: 1 },
+      { region: "use1", state: "partial", docs: 2, choosable: true },
+      { region: "use2", state: "pending", docs: 1, choosable: true },
+      { region: "use3", state: "set", docs: 1, choosable: true },
     ]);
     expect(
       keyStatuses(f, NO_PENDING).find((k) => k.key === "url")?.regions,
     ).toEqual([
-      { region: "use1", state: "missing", docs: 2 },
-      { region: "use2", state: "missing", docs: 1 },
-      { region: "use3", state: "missing", docs: 1 },
+      { region: "use1", state: "missing", docs: 2, choosable: true },
+      { region: "use2", state: "missing", docs: 1, choosable: true },
+      { region: "use3", state: "missing", docs: 1, choosable: true },
     ]);
     // a region whose hints leave the key out doesn't miss it
     const regional = file(
@@ -170,14 +172,19 @@ describe("keyStatuses", () => {
       key: "endpoint",
       state: "missing",
       regions: [
-        { region: "use1", state: "missing", docs: 1 },
-        { region: "use2", state: "unneeded", docs: 1 },
+        { region: "use1", state: "missing", docs: 1, choosable: true },
+        { region: "use2", state: "unneeded", docs: 1, choosable: true },
       ],
     });
-    // one region: nothing to tell apart
+    // one region shows, as a file Kustomize keeps per region has, but there
+    // is nothing to choose between
     expect(
       keyStatuses(file(doc("a", ["k"], [], "use1")), NO_PENDING)[0]?.regions,
-    ).toEqual([]);
+    ).toEqual([{ region: "use1", state: "set", docs: 1, choosable: false }]);
+    // no region at all: no chips
+    expect(keyStatuses(file(doc("a", ["k"])), NO_PENDING)[0]?.regions).toEqual(
+      [],
+    );
   });
 
   it("has nothing to show for a file without documents", () => {
@@ -192,10 +199,68 @@ describe("fileRegions", () => {
         file(doc("a", [], [], "use2"), doc("b", []), doc("c", [], [], "use1")),
       ),
     ).toEqual(["use2", "", "use1"]);
-    // one region and documents without one: nothing to choose between
-    expect(fileRegions(file(doc("a", [], [], "use1"), doc("b", [])))).toEqual(
+    // one region shows too, and a document's list adds each of its regions
+    expect(fileRegions(file(doc("a", [], [], "use1"), doc("b", [])))).toEqual([
+      "use1",
+      "",
+    ]);
+    expect(
+      fileRegions(
+        file(doc("a", [], [], ["use1", "use2"]), doc("b", [], [], "use3")),
+      ),
+    ).toEqual(["use1", "use2", "use3"]);
+    // no document names a region: none to show
+    expect(fileRegions(file(doc("a", []), doc("b", [])))).toEqual([]);
+  });
+});
+
+describe("regionChoices", () => {
+  it("offers regions to limit a seal to only when each document has one", () => {
+    const perDocument = file(
+      doc("a", [], [], "use1"),
+      doc("b", [], [], "use2"),
+    );
+    expect(regionChoices(perDocument)).toEqual(["use1", "use2"]);
+    expect(sharesRegions(perDocument)).toBe(false);
+    // one region: nothing to choose between
+    expect(regionChoices(file(doc("a", [], [], "use1"), doc("b", [])))).toEqual(
       [],
     );
+    // a Kustomize base lists its regions in one document, which they share
+    const base = file(doc("a", [], [], ["use1", "use2"]));
+    expect(regionChoices(base)).toEqual([]);
+    expect(sharesRegions(base)).toBe(true);
+    // and a file with such a document is sealed for every document
+    const mixed = file(
+      doc("a", [], [], ["use1", "use2"]),
+      doc("b", [], [], "use3"),
+    );
+    expect(regionChoices(mixed)).toEqual([]);
+  });
+
+  it("shows a shared document's key in each of its regions, as chips that pick nothing", () => {
+    const base = file(
+      doc("apps", ["token"], ["token", "url"], ["use1", "use2"]),
+    );
+    expect(keyStatuses(base, NO_PENDING)).toMatchObject([
+      {
+        key: "token",
+        state: "set",
+        regions: [
+          { region: "use1", state: "set", docs: 1, choosable: false },
+          { region: "use2", state: "set", docs: 1, choosable: false },
+        ],
+      },
+      {
+        key: "url",
+        state: "missing",
+        lacking: ["apps/billing in use1 and use2"],
+        regions: [
+          { region: "use1", state: "missing", choosable: false },
+          { region: "use2", state: "missing", choosable: false },
+        ],
+      },
+    ]);
   });
 });
 
@@ -274,7 +339,7 @@ describe("documents with the same namespace and name in each region", () => {
           namespace: "apps",
           name: "billing",
           scope: "strict",
-          region: "use1",
+          regions: ["use1"],
         },
       ],
       sealed_at: "",
@@ -295,7 +360,12 @@ describe("documents with the same namespace and name in each region", () => {
       key: "token",
       regions: ["use2"],
       targets: [
-        { namespace: "apps", name: "billing", scope: "strict", region: "use2" },
+        {
+          namespace: "apps",
+          name: "billing",
+          scope: "strict",
+          regions: ["use2"],
+        },
       ],
       sealed_at: "",
       sealed_by: { id: "a" },

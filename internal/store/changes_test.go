@@ -2,6 +2,7 @@ package store
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -194,5 +195,25 @@ func TestEffective_SealWinsOverReseal(t *testing.T) {
 	// written in this order, the seal is written last
 	if CompareRank(seal, reseal) != 1 || CompareRank(reseal, seal) != -1 || CompareRank(covered, newer) != -1 {
 		t.Error("CompareRank does not put the change that wins last")
+	}
+}
+
+// Targets stored before documents could list several regions name one;
+// they read as a list of it, and match a document by name as before.
+func TestTargetRegionList(t *testing.T) {
+	old := Target{Namespace: "apps", Name: "billing", Region: "use1"}
+	if got := old.RegionList(); !slices.Equal(got, []string{"use1"}) {
+		t.Errorf("old target's regions = %q", got)
+	}
+	both := Target{Regions: []string{"use1", "use2"}}
+	if got := both.RegionList(); !slices.Equal(got, []string{"use1", "use2"}) {
+		t.Errorf("regions = %q", got)
+	}
+	if got := (Target{}).RegionList(); got != nil {
+		t.Errorf("no regions = %q", got)
+	}
+	c := Change{Path: "a.yaml", Key: "k"}
+	if byName(c, old) != byName(c, Target{Namespace: "apps", Name: "billing", Regions: []string{"use1"}}) {
+		t.Error("an old target and a new one for the same document differ")
 	}
 }

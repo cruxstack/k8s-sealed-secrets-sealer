@@ -76,7 +76,8 @@ type targetView struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	Scope     string `json:"scope"`
-	Region    string `json:"region,omitempty"`
+	// Regions are the document's regions, whenever the change was stored.
+	Regions []string `json:"regions,omitempty"`
 }
 
 // agentView names an agent for users.
@@ -149,7 +150,7 @@ func compareChanges(a, b store.Change) int {
 func viewTargets(ts []store.Target) []targetView {
 	out := make([]targetView, len(ts))
 	for i, t := range ts {
-		out[i] = targetView(t)
+		out[i] = targetView{Index: t.Index, Namespace: t.Namespace, Name: t.Name, Scope: t.Scope, Regions: t.RegionList()}
 	}
 	return out
 }

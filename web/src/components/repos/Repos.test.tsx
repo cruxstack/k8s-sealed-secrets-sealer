@@ -380,8 +380,15 @@ describe("repositories", () => {
     // each path on one line, read whole (the page's layout, which jsdom
     // lacks, puts the lines apart) and whole in its title
     expect(buttons[0]).toHaveAccessibleName(
-      "deploy/billing/sealed-secret.yaml2 documents · use1, use2",
+      /^deploy\/billing\/sealed-secret\.yaml2 documents\s*in\s*use1\s*use2$/,
     );
+    // its regions are tags, as on the keys
+    expect(
+      within(buttons[0]!)
+        .getAllByText(/^use\d$/)
+        .map((t) => t.textContent),
+    ).toEqual(["use1", "use2"]);
+    expect(within(buttons[0]!).getByText("use1")).toHaveClass("font-mono");
     expect(buttons[1]).toHaveAccessibleName(
       "deploy/legacy/sealed-secret.yaml1 document · Can't Seal",
     );

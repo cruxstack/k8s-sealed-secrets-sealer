@@ -464,9 +464,9 @@ cluster. Across versions:
    SealedSecret document in it whose env annotation equals this env. One seal
    updates all of them, so a file with documents for `use1` and `use2` is
    sealed once. A seal may name regions instead, for a value that differs by
-   region: it then updates only the documents whose region annotation names
-   one of them (see "Region-specific values" below). Each document sealed
-   for contributes a target: namespace, name, scope and region.
+   region: it then updates only the documents whose regions are all named
+   (see "Region-specific values" below). Each document sealed for
+   contributes a target: namespace, name, scope and regions.
 3. Scope comes from each document's own sealed-secrets scope annotations, the
    same place the controller reads it. `strict` and `namespace-wide` are
    allowed. `cluster-wide` is refused, because such ciphertext can be decrypted
@@ -597,14 +597,20 @@ v1.
 
 **Region-specific values.** Some values differ by region: a regional
 endpoint's credentials, a certificate per region. A seal can name the
-regions it is for, and goes only into the file's documents whose region
-annotation names one of them, so one file can hold a different value for
-each region:
+regions it is for, and goes only into the file's documents whose regions
+are all named, so one file can hold a different value for each region:
 
-- Each region named must be the region of a document in the file; naming
+- Each region named must be a region of a document in the file; naming
   every region is sealing for every document. Documents without a region
   annotation are sealed for only when no region is named.
-- The agent is chosen for the regions named (section 7).
+- A document can list several regions (a Kustomize base deployed to each
+  of them, section 13). Those regions share the document, so its value
+  cannot differ between them: a file with such a document is sealed for
+  every document, and a seal naming only some of its regions is refused
+  (422). Files Kustomize keeps per region, one region each, are sealed as
+  any other file.
+- The agent is chosen for the regions named, or the documents' regions
+  when none is named (section 7).
 - A key's pending changes may overlap, such as one for every document
   followed by one for `use1`. For each document, the newest seal wins:
   `use1` gets the second value and the rest keep the first. Removing the
@@ -617,12 +623,14 @@ each region:
 - The pull request names each change's regions and the documents it ends up
   setting.
 
-The UI shows, for a file whose documents are in more than one region, where
-each key stands per region, and lets a seal be limited to some regions or
-started from a region of a key. A key a region does not need is not marked
-missing there when that region's documents have the keys hint (section 13)
-and it leaves the key out: list a region-only key in only that region's
-documents' hint.
+The UI shows, for a file whose documents name regions, where each key stands per
+region, even with one region or one document listing several. When the documents
+are in more than one region and none lists several, it lets a seal be limited to
+some regions or started from a region of a key; otherwise it shows the regions
+without a choice, and says why. A key a region does not need is not marked
+missing there when that region's documents have the keys hint (section 13) and
+it leaves the key out: list a region-only key in only that region's documents'
+hint.
 
 **Routes.** Each env's API is under `/api/v1/envs/{env}`, written `{api}`
 below; with a single env it is also at `/api/v1` (section 12). Every route
@@ -1664,13 +1672,15 @@ name. The env annotation is how a fleet says which documents it manages:
 each env names its annotation (`APP_ENV_ANNOTATION`, the chart's
 `annotations.env`, or an env's own `envAnnotation` in `APP_ENVS`) and
 ignores every other document, so fleets can share a repository without
-touching each other's documents. The region annotation says which region a
-document is for: a seal can be limited to some regions' documents (section
-6, "Region-specific values"), the agent is preferably chosen in them, and
-the UI shows keys per region. A region is a lowercase DNS label of at most
-63 characters, like the registry's (`use1`). Files that
-already use other annotation names keep working by configuring the keys to
-match them.
+touching each other's documents. The region annotation says which regions
+a document is for: a seal can be limited to some regions' documents
+(section 6, "Region-specific values"), the agent is preferably chosen in
+them, and the UI shows keys per region. A region is a lowercase DNS label
+of at most 63 characters, like the registry's (`use1`). A document deployed
+to several regions, such as a Kustomize base its regional overlays share,
+lists them separated by commas or spaces (`use1, use2`, at most 32); they
+share the document, so a value goes to all of them. Files that already use
+other annotation names keep working by configuring the keys to match them.
 
 **Hints.** Four more annotations, under the env annotation's prefix (the
 part of its key before `/`), help people seal the right values. They are
@@ -1718,15 +1728,15 @@ one that matches but cannot be parsed is listed with the reason, and so is
 one GitHub failed to send. A seal into a file GitHub failed to send answers
 `502`; `422` is for files that cannot be sealed into.
 
-Each document's decryption label comes from its own metadata, the same place
-the controller reads it. A document cannot be sealed into when its scope is
-`cluster-wide`, it has no namespace or name, its region is not a valid
-region, it uses the legacy `spec.data` format or another `apiVersion`, or
-its `encryptedData` is not a mapping; the UI shows why. A file with a
-duplicate key in any mapping is refused as a whole, because tools may
+Each document's decryption label comes from its own metadata, the same place the
+controller reads it. A document cannot be sealed into when its scope is
+`cluster-wide`, it has no namespace or name, its region annotation is not a
+valid region list, it uses the legacy `spec.data` format or another
+`apiVersion`, or its `encryptedData` is not a mapping; the UI shows why. A file
+with a duplicate key in any mapping is refused as a whole, because tools may
 resolve the duplicate differently (a second `namespace:` read first here and
-last by another parser would change the label). Documents are numbered as
-the YAML parser sees them: empty documents are not counted.
+last by another parser would change the label). Documents are numbered as the
+YAML parser sees them: empty documents are not counted.
 
 ## 14. Local development
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 
 	"github.com/cruxstack/k8s-sealed-secrets-sealer/internal/githubapp"
@@ -199,7 +198,7 @@ func inRegions(docs []manifest.Document, regions []string) []manifest.Document {
 	}
 	var out []manifest.Document
 	for _, d := range docs {
-		if slices.Contains(regions, d.Region) {
+		if d.InRegions(regions) {
 			out = append(out, d)
 		}
 	}

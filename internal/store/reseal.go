@@ -20,8 +20,12 @@ type ResealFailure struct {
 	Path     string `dynamodbav:"path,omitempty" json:"path,omitempty"`
 	Key      string `dynamodbav:"key" json:"key"`
 	Document int    `dynamodbav:"document" json:"document"`
-	Region   string `dynamodbav:"region,omitempty" json:"region,omitempty"`
-	Error    string `dynamodbav:"error" json:"error"`
+	// Regions are the document's regions.
+	Regions []string `dynamodbav:"regions,omitempty" json:"regions,omitempty"`
+	// Region is the one region of a failure stored before documents could
+	// list several; the UI reads it when Regions is empty.
+	Region string `dynamodbav:"region,omitempty" json:"region,omitempty"`
+	Error  string `dynamodbav:"error" json:"error"`
 }
 
 // ResealCounts counts values by what resealing did with them.

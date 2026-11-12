@@ -27,12 +27,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Label } from "@/components/ui/label";
+import { RegionTag } from "@/components/ui/region-tag";
 import { Textarea } from "@/components/ui/textarea";
 import { useRememberSeal } from "@/lib/recent-repos";
 import { modKey } from "@/lib/shortcuts";
 import { cn, shortFingerprint } from "@/lib/utils";
 import { fileHints } from "./hints";
-import { fileRegions, isPending, regionList, type PendingDocs } from "./keys";
+import {
+  fileRegions,
+  isPending,
+  regionChoices,
+  regionList,
+  sharesRegions,
+  type PendingDocs,
+} from "./keys";
 
 /** How often a seal's progress is checked; tests shorten it. */
 export const sealPolling = { intervalMs: 1000 };
@@ -160,7 +168,9 @@ export function SealForm({
     }
   }
   // the regions to choose between, and those chosen: all of them at first
-  const choices = fileRegions(file).filter((r) => r !== "");
+  const choices = regionChoices(file);
+  // the regions the file's documents are for, shown when there is no choice
+  const listed = fileRegions(file).filter((r) => r !== "");
   const [chosen, setChosen] = useState<string[]>(choices);
   const everywhere = chosen.length === choices.length;
 
@@ -210,8 +220,12 @@ export function SealForm({
   // the documents this seal is for
   const targets = everywhere
     ? docs
-    : docs.filter((d) => chosen.includes(d.region ?? ""));
-  const unlabelled = docs.some((d) => !d.region);
+    : docs.filter(
+        (d) =>
+          (d.regions ?? []).length > 0 &&
+          (d.regions ?? []).every((r) => chosen.includes(r)),
+      );
+  const unlabelled = docs.some((d) => !d.regions?.length);
   const existing = [...new Set(docs.flatMap((d) => d.keys))];
   const { expected } = fileHints(file);
   // the keys the file expects first, then the rest it holds
@@ -407,7 +421,7 @@ export function SealForm({
           >
             {choices.map((r) => {
               const on = chosen.includes(r);
-              const n = docs.filter((d) => d.region === r).length;
+              const n = docs.filter((d) => d.regions?.includes(r)).length;
               return (
                 <button
                   key={r}
@@ -457,6 +471,37 @@ export function SealForm({
             {everywhere
               ? "Every document gets the value. For a value that differs by region, choose the regions it is for."
               : `Only the documents in ${regionList(chosen)} get the value${unlabelled ? "; documents without a region are left out" : ""}.`}
+          </p>
+        </div>
+      )}
+
+      {choices.length < 2 && listed.length > 0 && (
+        // the regions show, but there is nothing to choose: one region, or
+        // regions listed together in one document, which share it
+        <div className="space-y-1.5">
+          <span id={`${id}-regions`} className="text-sm font-medium">
+            Regions
+          </span>
+          <ul
+            aria-labelledby={`${id}-regions`}
+            aria-describedby={`${id}-regions-help`}
+            className="flex flex-wrap items-center gap-1.5"
+          >
+            {listed.map((r) => (
+              <li key={r}>
+                <RegionTag region={r} />
+              </li>
+            ))}
+          </ul>
+          <p
+            id={`${id}-regions-help`}
+            className="text-xs text-muted-foreground"
+          >
+            {listed.length === 1
+              ? `The value is for ${listed[0]}${unlabelled ? ", and the documents without a region" : ""}.`
+              : sharesRegions(file)
+                ? `The value goes to ${regionList(listed)}: regions listed in one document share it, so they can't be sealed apart.`
+                : `The value goes to ${regionList(listed)}.`}
           </p>
         </div>
       )}

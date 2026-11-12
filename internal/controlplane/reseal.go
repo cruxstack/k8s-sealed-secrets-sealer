@@ -174,7 +174,7 @@ func planReseal(file int, path string, docs []manifest.Document, values []map[st
 }
 
 func failure(path string, d manifest.Document, key, msg string) store.ResealFailure {
-	return store.ResealFailure{Path: path, Key: key, Document: d.Index, Region: d.Region, Error: msg}
+	return store.ResealFailure{Path: path, Key: key, Document: d.Index, Regions: d.Regions, Error: msg}
 }
 
 // packReseal packs groups into commands of at most protocol.MaxResealItems
@@ -340,12 +340,4 @@ func resealRefusal(err error) (string, bool) {
 }
 
 // regionsOf returns the documents' regions, for choosing an agent there.
-func regionsOf(docs []manifest.Document) []string {
-	var out []string
-	for _, d := range docs {
-		if d.Region != "" && !slices.Contains(out, d.Region) {
-			out = append(out, d.Region)
-		}
-	}
-	return out
-}
+func regionsOf(docs []manifest.Document) []string { return manifest.RegionsOf(docs) }
