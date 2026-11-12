@@ -145,6 +145,21 @@ function row(name: string) {
     .closest("tr") as HTMLElement;
 }
 
+/**
+ * What a row leaves to the hover of something in it (a badge, a count):
+ * the element whose description that is.
+ */
+function hoverOf(el: HTMLElement) {
+  return el.closest("[aria-describedby]") as HTMLElement;
+}
+
+/** The text a row shows, without what only its hovers say. */
+function shown(el: HTMLElement): string {
+  const copy = el.cloneNode(true) as HTMLElement;
+  copy.querySelectorAll("[hidden]").forEach((n) => n.remove());
+  return copy.textContent ?? "";
+}
+
 describe("FleetView", () => {
   const originalAdapter = apiClient.defaults.adapter;
   afterEach(() => {
@@ -412,20 +427,18 @@ describe("FleetView", () => {
     const env = keyRow(KEY_B.fingerprint);
     expect(within(env).getByText("Env Key")).toBeInTheDocument();
     expect(within(env).getByText("2 of 2")).toBeInTheDocument();
-    expect(within(env).getByText("2")).toHaveAttribute(
-      "title",
-      expect.stringMatching(/2 escrowed copies/),
+    expect(hoverOf(within(env).getByText("2"))).toHaveAccessibleDescription(
+      "2 escrowed copies, each from another agent.",
     );
     expect(
       within(keyRow(KEY_A.fingerprint)).getByText("Active"),
     ).toBeInTheDocument();
+    // who revoked it and when are in its badge's hover, not in the row
     const revoked = keyRow(KEY_C.fingerprint);
-    expect(within(revoked).getByText("Revoked")).toBeInTheDocument();
-    expect(revoked).toHaveTextContent("by alice 2h ago");
-    expect(within(revoked).getByText("2h ago")).toHaveAttribute(
-      "title",
-      expect.stringMatching(/^Revoked by alice, /),
-    );
+    expect(
+      hoverOf(within(revoked).getByText("Revoked")),
+    ).toHaveAccessibleDescription(/^Revoked by alice 2h ago, /);
+    expect(shown(revoked)).not.toMatch("alice");
     // a visible header over the icons, aligned with them
     const actions = screen.getByRole("columnheader", { name: "Actions" });
     expect(actions).not.toHaveClass("sr-only");
@@ -1121,11 +1134,11 @@ describe("FleetView key references and deletion", () => {
     expect(row.closest("table")).toHaveAccessibleName(
       "Deleted sealing keys in this env",
     );
-    expect(row).toHaveTextContent("by alice 2h ago");
-    expect(within(row).getByText("2h ago")).toHaveAttribute(
-      "title",
-      expect.stringMatching(/^Deleted by alice, /),
-    );
+    // when, with who in its hover, as a revoked key's badge
+    expect(shown(row)).not.toMatch("alice");
+    expect(
+      hoverOf(within(row).getByText("2h ago")),
+    ).toHaveAccessibleDescription(/^Deleted by alice 2h ago, /);
     expect(row).toHaveTextContent("purged in 29d");
     expect(within(row).getByText("in 29d")).toHaveAttribute(
       "title",
@@ -1133,10 +1146,9 @@ describe("FleetView key references and deletion", () => {
         /^Escrowed copies purged .*; it can be reinstated until then$/,
       ),
     );
-    expect(within(row).getByText("removing from 1 cluster")).toHaveAttribute(
-      "title",
-      "use2-blue",
-    );
+    expect(
+      hoverOf(within(row).getByText("removing from 1 cluster")),
+    ).toHaveAccessibleDescription("Still in use2-blue");
     expect(keyActions(KEY_C.fingerprint)).toEqual({ Reinstate: "enabled" });
 
     fireEvent.click(

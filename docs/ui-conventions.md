@@ -60,9 +60,10 @@ says so above the files, since seals would fail.
 Under its agents, the fleet lists the env's keys, newest first: how many
 clusters hold each, its escrowed copies, its references (the values sealed with
 it, as its clusters counted them), and its status as a badge (Env Key, Active,
-Revoked, Future-Dated). Deleted keys have a table of their own under it, so the
-keys in use stand out: who deleted each and when, when its escrowed copies are
-purged, and the clusters it is still being removed from. Nothing refers to a
+Revoked, Future-Dated), with who revoked it and when in its hover. Deleted keys
+have a table of their own under it, so the keys in use stand out: when each was
+deleted (who did, in its hover), when its escrowed copies are purged, and the
+clusters it is still being removed from. Nothing refers to a
 deleted key, so that table has no references. A reference count never shows a
 bare 0 when a cluster did not count: it is "Unknown" or "At least 12 values",
 naming the clusters left out, and opens the count per cluster in a row under the
@@ -138,13 +139,21 @@ the form's key and moves to the value. The documents come last because they
 rarely change and only need checking. A file nothing can be sealed into says
 why in a warning alert where the form would be.
 
-A file with many keys (12 or more; real ones hold 60) must not push the form
-out of sight. Its keys get a filter and a choice of all of them, those to
-seal (missing somewhere, or sealed with a revoked key) and those pending,
-each with its count, and they scroll in a box of their own, so the form
-stays close under them. The key in the form scrolls into view in that box
-without moving the page. Enter in the filter picks the first match, and a
-filter that names a key the file lacks offers to seal it as a new one.
+The key list looks the same for a file with no keys, two or sixty, so
+nothing changes as a file grows: a filter, a choice of the keys to seal
+(missing somewhere, or sealed with a revoked key), those pending and all of
+them, each with its count, and a box that scrolls on its own, so the form
+stays close under it. People mostly come to seal a new key, not to replace
+one, so the list opens on the keys to seal, never on every key the file
+holds. When none needs a value, the box says so in one line and offers to
+show them all, and the form sits right under it. Someone who can't seal
+comes to read the keys, so for them it opens on all of them. The key in the
+form scrolls into view in the box without moving the page. Typing in the
+filter looks for a key the file holds, wherever it stands, so starting a
+search shows all of them; the views narrow it again, and one that matches
+nothing offers the matches in the others. Enter in the filter picks the
+first match, and a filter that names a key the file lacks offers to seal it
+as a new one.
 
 When a file's documents name regions, each key row also shows a chip per
 region with where the key stands there, and the file carries its regions as
@@ -287,8 +296,11 @@ Only table column headers are uppercase (see Tables).
   Pair the color with a word; color alone carries no meaning.
 - Counts are right-aligned and tabular. A count that needs attention (missing
   keys) uses the amber text color.
-- Rows whose cells differ in height (a badge over a time) center their cells
-  vertically.
+- A row is one line, its cells centered on it. A status is its badge, and a
+  count its number: who revoked a key and when, what a count is made of, go
+  in its hover or the row's details (see Row details), never in a second
+  line under the badge or the number. A short word beside a badge on the
+  same line (an agent's last check-in) is fine.
 - Row actions are icon buttons (`IconButton`), the same ones in the same
   order on every row, grayed out with the reason when they do not apply, so
   nothing shifts when an action changes the row and every row says what can
@@ -324,7 +336,7 @@ the right (filters, refresh status, export). Keep a toolbar to one row on a
 desktop width; if a section needs more than three controls, it needs a
 different design.
 
-A choice between views of a list (a file's keys: All, To Seal, Pending) is
+A choice between views of a list (a file's keys: To Seal, Pending, All) is
 one joined group of buttons, as tall as the filter beside it, each with its
 count. The chosen one (`aria-pressed`) has the selected colors and its own
 primary edge, drawn on the group's outline rather than inset in it.
@@ -339,6 +351,13 @@ from the row. A table never gets a column of sentences: it squeezes them a
 word a line and widens the table past a laptop's width. A row that opens
 something shows it on hover and has a visible affordance; a row that opens
 nothing does not look pressable.
+
+A line or two about one cell (a status's who and when, what a count is made
+of, the list a summary stands for) is its hover, through `HoverDetail`: a
+tooltip on hover, keyboard focus and a tap, and the element's description
+for a screen reader. Anything that needs attention stays in the row (values
+no key decrypts, a count near the key limit in the warning color); the
+hover only says more about it.
 
 A breakdown of one cell (a key's references per cluster) is a button in
 that cell, with a chevron and `aria-expanded`, that opens a row under it

@@ -71,6 +71,14 @@ export function formatDateTime(iso: string): string {
 }
 
 /**
+ * A past time as a hover says it, at a glance and exactly: "52s ago, Nov
+ * 11, 2026, 8:10 PM".
+ */
+export function timeAgoAt(iso: string, now: Date = new Date()): string {
+  return `${timeAgo(iso, now)}, ${formatDateTime(iso)}`;
+}
+
+/**
  * Text from the server as a sentence: a capital first letter and a full
  * stop. A first word that is an identifier (a path, `metadata.name`) keeps
  * its case.

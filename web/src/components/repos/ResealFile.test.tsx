@@ -249,6 +249,7 @@ describe("Reseal All", () => {
     expect(within(sealed).queryByText("Resealed")).not.toBeInTheDocument();
     expect(within(sealed).getByTitle(/^Sealed by dev-use1-blue/)).toBeVisible();
     // the key list says the file's value moved, not that a new one waits
+    fireEvent.click(within(file).getByRole("button", { name: /^Pending \d/ }));
     const keys = within(file).getByRole("list", { name: "Keys" });
     expect(
       within(keys).getByRole("button", { name: /^api-key/ }),

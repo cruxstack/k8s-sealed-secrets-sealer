@@ -6,6 +6,7 @@ import { deleteKey, reinstateKey, revokeKey } from "@/api/queries/fleet";
 import type { FleetAgent, FleetKey } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { HoverDetail } from "@/components/ui/hover-detail";
 import { IconButton } from "@/components/ui/icon-button";
 import { RelativeTime } from "@/components/ui/relative-time";
 import {
@@ -16,7 +17,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { cn, formatDateTime, shortFingerprint } from "@/lib/utils";
+import {
+  cn,
+  formatDateTime,
+  shortFingerprint,
+  timeAgo,
+  timeAgoAt,
+} from "@/lib/utils";
+
 import { CopyButton } from "./CopyButton";
 import {
   DeleteKeyDialog,
@@ -30,31 +38,14 @@ import { noneCount, plural } from "./references";
 /** The columns of the key table, for the row under a key that spans them. */
 const COLUMNS = 7;
 
-/** Who changed a key's status and when, under its badge. */
-function StatusBy({
-  verb,
-  by,
-  at,
-  now,
-}: {
-  verb: string;
-  by?: string;
-  at?: string;
-  now: Date;
-}) {
-  if (!at) return null;
-  const who = by ? ` by ${by}` : "";
-  return (
-    <span className="text-xs whitespace-nowrap text-muted-foreground">
-      {who.trim() || verb.toLowerCase()}{" "}
-      <RelativeTime
-        iso={at}
-        now={now}
-        past
-        describe={(abs) => `${verb}${who}, ${abs}`}
-      />
-    </span>
-  );
+/** Who changed a key's status and when, as its hover says it. */
+function changedBy(
+  verb: string,
+  by: string | undefined,
+  at: string,
+  now: Date,
+) {
+  return `${verb}${by ? ` by ${by}` : ""} ${timeAgoAt(at, now)}`;
 }
 
 /**
@@ -92,12 +83,11 @@ function PurgeCell({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
 function RemovalCell({ fleetKey }: { fleetKey: FleetKey }) {
   const holders = fleetKey.holders ?? [];
   return holders.length > 0 ? (
-    <span
-      className="text-xs whitespace-nowrap text-info"
-      title={holders.join("\n")}
-    >
-      removing from {plural(holders.length, "cluster")}
-    </span>
+    <HoverDetail detail={`Still in ${holders.join(", ")}`}>
+      <span className="text-xs whitespace-nowrap text-info">
+        removing from {plural(holders.length, "cluster")}
+      </span>
+    </HoverDetail>
   ) : (
     <span className="text-xs whitespace-nowrap text-muted-foreground">
       removed from every cluster
@@ -105,39 +95,45 @@ function RemovalCell({ fleetKey }: { fleetKey: FleetKey }) {
   );
 }
 
-/** A key's status, as a badge with a word. */
+/**
+ * A key's status, as a badge with a word; who changed it and when, or
+ * what it means, is in its hover, so the row stays one line.
+ */
 function KeyStatusBadge({ fleetKey, now }: { fleetKey: FleetKey; now: Date }) {
   if (fleetKey.status === "deleted") {
     return <Badge variant="destructive">Deleted</Badge>;
   }
   if (fleetKey.status === "revoked") {
-    return (
-      <span className="flex flex-col items-start gap-0.5">
-        <Badge variant="destructive">Revoked</Badge>
-        <StatusBy
-          verb="Revoked"
-          by={fleetKey.revoked_by}
-          at={fleetKey.revoked_at}
-          now={now}
-        />
-      </span>
+    const badge = <Badge variant="destructive">Revoked</Badge>;
+    return fleetKey.revoked_at ? (
+      <HoverDetail
+        detail={changedBy(
+          "Revoked",
+          fleetKey.revoked_by,
+          fleetKey.revoked_at,
+          now,
+        )}
+      >
+        {badge}
+      </HoverDetail>
+    ) : (
+      badge
     );
   }
   if (fleetKey.future_dated) {
     return (
-      <Badge
-        variant="warning"
-        title={`Valid only from ${formatDateTime(fleetKey.not_before)}; not used or restored until then`}
+      <HoverDetail
+        detail={`Valid only from ${formatDateTime(fleetKey.not_before)}; not used or restored until then.`}
       >
-        Future-Dated
-      </Badge>
+        <Badge variant="warning">Future-Dated</Badge>
+      </HoverDetail>
     );
   }
   if (fleetKey.env_key) {
     return (
-      <Badge variant="success" title="Values are sealed with it">
-        Env Key
-      </Badge>
+      <HoverDetail detail="Values are sealed with it.">
+        <Badge variant="success">Env Key</Badge>
+      </HoverDetail>
     );
   }
   return <Badge variant="outline">Active</Badge>;
@@ -267,27 +263,28 @@ function KeyRow({
         </TableCell>
         <TableCell className="text-right whitespace-nowrap tabular-nums">
           {holders.length > 0 ? (
-            <span title={holders.join("\n")}>
+            <HoverDetail detail={`Held by ${holders.join(", ")}`}>
               {holders.length} of {agents.length}
-            </span>
+            </HoverDetail>
           ) : (
             <Dash />
           )}
         </TableCell>
         <TableCell className="text-right whitespace-nowrap tabular-nums">
           {fleetKey.escrow_copies > 0 ? (
-            <span
-              title={`${plural(fleetKey.escrow_copies, "escrowed copy", "escrowed copies")}, each from another agent`}
+            <HoverDetail
+              detail={`${plural(fleetKey.escrow_copies, "escrowed copy", "escrowed copies")}, each from another agent.`}
             >
               {fleetKey.escrow_copies}
-            </span>
+            </HoverDetail>
           ) : (
-            <span
-              className={inUse ? "font-semibold text-warning" : undefined}
-              title="No escrowed copy: clusters missing it cannot restore it"
-            >
-              0
-            </span>
+            <HoverDetail detail="No escrowed copy: clusters missing it cannot restore it.">
+              <span
+                className={inUse ? "font-semibold text-warning" : undefined}
+              >
+                0
+              </span>
+            </HoverDetail>
           )}
         </TableCell>
         <TableCell className="text-right">
@@ -527,13 +524,22 @@ export function DeletedKeyTable({
               <TableCell className="whitespace-nowrap">
                 <RelativeTime iso={k.not_before} now={now} />
               </TableCell>
-              <TableCell>
-                <StatusBy
-                  verb="Deleted"
-                  by={k.deleted_by}
-                  at={k.deleted_at}
-                  now={now}
-                />
+              <TableCell className="whitespace-nowrap">
+                {/* when, with who in its hover, as a revoked key's badge */}
+                {k.deleted_at ? (
+                  <HoverDetail
+                    detail={changedBy(
+                      "Deleted",
+                      k.deleted_by,
+                      k.deleted_at,
+                      now,
+                    )}
+                  >
+                    {timeAgo(k.deleted_at, now)}
+                  </HoverDetail>
+                ) : (
+                  <Dash />
+                )}
               </TableCell>
               <TableCell>
                 <PurgeCell fleetKey={k} now={now} />

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   ArrowRight,
   Check,
@@ -228,34 +228,53 @@ function RegionChips({
   );
 }
 
-/** From this many keys, the list gets a filter and scrolls on its own. */
-export const LONG_KEY_LIST = 12;
+type KeyView = "seal" | "pending" | "all";
 
-type KeyView = "all" | "seal" | "pending";
-
-/** The keys each view of a long list shows. */
+/** The keys each view shows. */
 const IN_VIEW: Record<KeyView, (k: KeyStatus) => boolean> = {
-  all: () => true,
   // missing somewhere, or sealed with a revoked key: both need a value
   seal: (k) =>
     k.state === "missing" || k.state === "partial" || k.state === "revoked",
   pending: (k) => k.state === "new" || k.state === "replaced",
+  all: () => true,
 };
 
+const VIEWS: KeyView[] = ["seal", "pending", "all"];
+
 const VIEW_LABEL: Record<KeyView, string> = {
-  all: "All",
   seal: "To Seal",
   pending: "Pending",
+  all: "All",
 };
+
+/** How a view names one of its keys in a sentence ("No key to seal…"). */
+const VIEW_NOUN: Record<KeyView, string> = {
+  seal: "key to seal",
+  pending: "pending key",
+  all: "key",
+};
+
+/** Says why the list's box is empty, with the way forward. */
+function EmptyBox({ children }: { children: ReactNode }) {
+  return (
+    <div className="space-y-2 px-4 py-5 text-center text-sm text-muted-foreground">
+      {children}
+    </div>
+  );
+}
 
 /**
  * A file's keys, one row each, with where each stands across the file's
  * documents and, when they are in more than one region, in each region.
  * When values can be sealed, picking a row fills the seal form's key, and
- * picking a region fills it for that region only. A long list (a file with
- * dozens of keys) gets a filter and a choice of the keys to seal or those
- * pending, and scrolls in a box of its own, so the form stays close under
- * it; the key in the form is scrolled into view there.
+ * picking a region fills it for that region only.
+ *
+ * It looks the same whether the file has no keys, two or sixty: a filter,
+ * a choice of the keys to seal, those pending or all of them, and a box
+ * that scrolls on its own, so the form stays close under it; the key in the
+ * form is scrolled into view there. People mostly come to seal a new key,
+ * so when values can be sealed it opens on the keys to seal, not on every
+ * key the file holds.
  */
 export function KeyList({
   keys,
@@ -279,25 +298,30 @@ export function KeyList({
 }) {
   const headingId = useId();
   const [filter, setFilter] = useState("");
-  const [view, setView] = useState<KeyView>("all");
+  // someone who can't seal comes to read the keys, not to seal one
+  const [view, setView] = useState<KeyView>(onPick ? "seal" : "all");
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
-  const long = keys.length >= LONG_KEY_LIST;
   const counts: Record<KeyView, number> = {
-    all: keys.length,
     seal: keys.filter(IN_VIEW.seal).length,
     pending: keys.filter(IN_VIEW.pending).length,
+    all: keys.length,
   };
-  // a view emptied by sealing falls back to every key
-  const active: KeyView = long && counts[view] > 0 ? view : "all";
-  const needle = long ? filter.trim().toLowerCase() : "";
-  const shown = keys.filter(
-    (k) => IN_VIEW[active](k) && k.key.toLowerCase().includes(needle),
-  );
+  const typed = filter.trim();
+  const needle = typed.toLowerCase();
+  const matches = (k: KeyStatus) => k.key.toLowerCase().includes(needle);
+  const shown = keys.filter((k) => IN_VIEW[view](k) && matches(k));
+  // a search looks for a key the file holds, wherever it stands: starting
+  // one shows every key, which the views can narrow again
+  const search = (value: string) => {
+    if (typed === "" && value.trim() !== "") setView("all");
+    setFilter(value);
+  };
+  // the keys the filter finds in every view, which it can switch to
+  const anywhere = view === "all" ? 0 : keys.filter(matches).length;
   // a region's chip picks the key for that region only, where it can be
   const regional = keys.some((k) => k.regions.some((r) => r.choosable));
   // a key the filter names that the file lacks can be sealed as a new one
-  const typed = filter.trim();
   const newKey =
     onPick &&
     typed !== "" &&
@@ -306,11 +330,11 @@ export function KeyList({
       ? typed
       : null;
 
-  // the key in the form stays in view in a long list, which scrolls on
-  // its own; the page itself never moves
+  // the key in the form stays in view in the box, which scrolls on its
+  // own; the page itself never moves
   useEffect(() => {
     const box = listRef.current;
-    if (!long || !box || !current) return;
+    if (!box || !current) return;
     const row = Array.from(box.children).find(
       (el): el is HTMLElement =>
         el instanceof HTMLElement && el.dataset.key === current,
@@ -324,7 +348,26 @@ export function KeyList({
     ) {
       box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight + 4;
     }
-  }, [long, current, active, needle]);
+  }, [current, view, needle]);
+
+  const showAll = (label: string) => (
+    <Button variant="outline" size="sm" onClick={() => setView("all")}>
+      {label}
+    </Button>
+  );
+  const sealNew = newKey && (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={disabled}
+      onClick={() => onPick?.(newKey)}
+    >
+      {/* one span: the button's flex box would drop the spaces */}
+      <span>
+        Seal <code className="font-mono">{newKey}</code> as a New Key
+      </span>
+    </Button>
+  );
 
   const rows = shown.map((k) => {
     const look = LOOK[k.state];
@@ -384,6 +427,63 @@ export function KeyList({
     );
   });
 
+  // with no row to show, the box says why and offers the way forward
+  let empty: ReactNode = null;
+  if (shown.length === 0 && keys.length === 0) {
+    empty = (
+      <EmptyBox>
+        <p>
+          No keys yet.
+          {onPick && " Seal the first one below."}
+        </p>
+        {sealNew && <div className="flex justify-center">{sealNew}</div>}
+      </EmptyBox>
+    );
+  } else if (shown.length === 0 && typed !== "") {
+    empty = (
+      <EmptyBox>
+        <p>
+          No {VIEW_NOUN[view]} matches “{typed}”.
+        </p>
+        <div className="flex flex-wrap justify-center gap-2">
+          {anywhere > 0 &&
+            showAll(
+              anywhere === 1 ? "Show the 1 Match" : `Show ${anywhere} Matches`,
+            )}
+          {sealNew}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setFilter("");
+              filterRef.current?.focus();
+            }}
+          >
+            Clear Filter
+          </Button>
+        </div>
+      </EmptyBox>
+    );
+  } else if (shown.length === 0) {
+    empty = (
+      <EmptyBox>
+        <p>
+          {view === "seal"
+            ? keys.length === 1
+              ? "Its one key is set."
+              : `All ${keys.length} keys are set.`
+            : "Nothing is pending in this file."}
+          {onPick && " Seal a new one below."}
+        </p>
+        <div className="flex justify-center">
+          {showAll(
+            keys.length === 1 ? "Show the Key" : `Show All ${keys.length} Keys`,
+          )}
+        </div>
+      </EmptyBox>
+    );
+  }
+
   return (
     <section aria-labelledby={headingId}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-2">
@@ -403,108 +503,68 @@ export function KeyList({
           </p>
         )}
       </div>
-      {long && (
-        <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
-          <FilterInput
-            inputRef={filterRef}
-            shortcut={false}
-            className="w-full sm:w-60"
-            inputClassName="h-8"
-            name="key-filter"
-            value={filter}
-            onValueChange={setFilter}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                setFilter("");
-              } else if (e.key === "Enter" && onPick && !disabled) {
-                // the first match, or a new key, goes to the form
-                const first = shown[0]?.key ?? newKey;
-                if (first) {
-                  e.preventDefault();
-                  onPick(first);
-                }
+      <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
+        <FilterInput
+          inputRef={filterRef}
+          shortcut={false}
+          className="w-full sm:w-60"
+          inputClassName="h-8"
+          name="key-filter"
+          value={filter}
+          onValueChange={search}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              setFilter("");
+            } else if (e.key === "Enter" && onPick && !disabled) {
+              // the first match, or a new key, goes to the form
+              const first = shown[0]?.key ?? newKey;
+              if (first) {
+                e.preventDefault();
+                onPick(first);
               }
-            }}
-            placeholder="Filter keys"
-            aria-label="Filter keys"
-          />
-          {(counts.seal > 0 || counts.pending > 0) && (
-            <div
-              role="group"
-              aria-label="Show keys"
-              // one joined group as tall as the filter: each segment owns
-              // its part of the outline, so the chosen one's edge is the
-              // group's edge, with nothing inset
-              className="inline-flex h-8 rounded-md shadow-xs dark:shadow-none"
+            }
+          }}
+          placeholder="Filter keys"
+          aria-label="Filter keys"
+        />
+        <div
+          role="group"
+          aria-label="Show keys"
+          // one joined group as tall as the filter: each segment owns its
+          // part of the outline, so the chosen one's edge is the group's
+          // edge, with nothing inset
+          className="inline-flex h-8 rounded-md shadow-xs dark:shadow-none"
+        >
+          {VIEWS.map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={view === v}
+              onClick={() => setView(v)}
+              className={cn(
+                "relative -ml-px inline-flex items-center gap-1.5 border px-3 text-xs font-medium transition-colors first:ml-0 first:rounded-l-md last:rounded-r-md focus-visible:z-20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                view === v
+                  ? // above its neighbours, so its whole edge shows
+                    "z-10 border-primary bg-selected text-primary"
+                  : "border-input bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
             >
-              {(["all", "seal", "pending"] as const)
-                .filter((v) => v === "all" || counts[v] > 0)
-                .map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    aria-pressed={active === v}
-                    onClick={() => setView(v)}
-                    className={cn(
-                      "relative -ml-px inline-flex items-center gap-1.5 border px-3 text-xs font-medium transition-colors first:ml-0 first:rounded-l-md last:rounded-r-md focus-visible:z-20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
-                      active === v
-                        ? // above its neighbours, so its whole edge shows
-                          "z-10 border-primary bg-selected text-primary"
-                        : "border-input bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    {VIEW_LABEL[v]}{" "}
-                    <span className="tabular-nums">{counts[v]}</span>
-                  </button>
-                ))}
-            </div>
-          )}
-          {shown.length < keys.length && shown.length > 0 && (
-            <span
-              className="text-xs text-muted-foreground tabular-nums sm:ml-auto"
-              role="status"
-            >
-              {shown.length} of {keys.length}
-            </span>
-          )}
+              {VIEW_LABEL[v]} <span className="tabular-nums">{counts[v]}</span>
+            </button>
+          ))}
         </div>
-      )}
-      {keys.length === 0 ? (
-        <p className="px-4 pb-4 text-sm text-muted-foreground">
-          No keys yet.{onPick && " Seal a value to add the first one."}
-        </p>
-      ) : shown.length === 0 ? (
-        <div className="mx-4 mb-4 space-y-2 rounded-lg border border-dashed px-4 py-5 text-center text-sm text-muted-foreground">
-          <p>No key matches “{typed}”.</p>
-          <div className="flex flex-wrap justify-center gap-2">
-            {newKey && (
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={disabled}
-                onClick={() => onPick?.(newKey)}
-              >
-                {/* one span: the button's flex box would drop the spaces */}
-                <span>
-                  Seal <code className="font-mono">{newKey}</code> as a New Key
-                </span>
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setFilter("");
-                filterRef.current?.focus();
-              }}
-            >
-              Clear Filter
-            </Button>
-          </div>
-        </div>
-      ) : long ? (
-        // the box scrolls on its own, so the form below stays close
-        <div className="mx-4 mb-4 overflow-hidden rounded-lg border border-border">
+        {typed !== "" && shown.length > 0 && (
+          <span
+            className="text-xs text-muted-foreground tabular-nums sm:ml-auto"
+            role="status"
+          >
+            {shown.length} of {counts[view]}
+          </span>
+        )}
+      </div>
+      {/* the same box for every file and view, so nothing jumps */}
+      <div className="mx-4 mb-4 overflow-hidden rounded-lg border border-border">
+        {empty ?? (
           <ul
             ref={listRef}
             aria-label="Keys"
@@ -512,12 +572,8 @@ export function KeyList({
           >
             {rows}
           </ul>
-        </div>
-      ) : (
-        <ul aria-label="Keys" className="px-1 pb-2">
-          {rows}
-        </ul>
-      )}
+        )}
+      </div>
     </section>
   );
 }
