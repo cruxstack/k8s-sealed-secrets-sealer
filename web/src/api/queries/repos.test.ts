@@ -17,6 +17,9 @@ describe("repository queries", () => {
   });
 
   it("does not fetch the repository list again on focus", () => {
-    expect(reposQueryOptions.refetchOnWindowFocus).toBe(false);
+    expect(reposQueryOptions(null).refetchOnWindowFocus).toBe(false);
+    expect(
+      reposQueryOptions({ user: 1, env: "dev" }).refetchOnWindowFocus,
+    ).toBe(false);
   });
 });

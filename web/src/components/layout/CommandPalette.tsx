@@ -21,7 +21,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useLogout } from "@/api/queries/auth";
-import { reposQueryOptions } from "@/api/queries/repos";
+import { useReposQueryOptions } from "@/api/queries/repos";
 import { sessionsQueryOptions } from "@/api/queries/sessions";
 import {
   Command,
@@ -119,7 +119,7 @@ function Palette({ onDone }: { onDone: () => void }) {
   const logout = useLogout();
   // repositories are listed for the env the page is in
   const repos = useQuery({
-    ...reposQueryOptions,
+    ...useReposQueryOptions(),
     enabled: env !== null,
     select: (list) => list.repositories,
   });

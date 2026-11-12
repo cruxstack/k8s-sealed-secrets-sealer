@@ -1527,6 +1527,22 @@ for a run's, who created its schedule.
   the repositories known to be readable, says it is incomplete, and the
   next list checks the rest. A repository whose permission is not known is
   never shown.
+- **The repository list in the browser.** So that it shows as soon as
+  someone signs in, the UI saves the last list it was sent in the
+  browser's local storage, per GitHub user ID (which a renamed login keeps)
+  and env, and shows it at once while it asks the control plane for the
+  current one, which replaces it on screen and in storage. The list is
+  saved when it arrives, whatever page is open by then. Only what the list
+  shows is kept (owner, name, visibility, default branch and the user's
+  access): no key, value or token. A saved list is validated field by field
+  when read, and dropped when malformed, of another format version, or
+  more than 14 days old; one the control plane refuses (403) is deleted.
+  It only saves a wait: every repository a user opens is checked against
+  their permission as above, so a repository they lost access to since
+  fails to open, and the next list leaves it out. Signing out deletes every
+  saved list and recent repository in the browser, for anyone. Like the
+  page itself, storage is read only by the app's own scripts, under the
+  Content Security Policy above.
 - **Least-privilege tokens.** The control plane mints each installation
   token with only the permissions its use needs: `contents: read` and
   `metadata: read` to list repositories, read files and look up permissions;

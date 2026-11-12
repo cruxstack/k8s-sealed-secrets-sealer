@@ -2,6 +2,7 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { Repository } from "@/api/types";
 import { useAuth } from "@/lib/auth";
 import { useEnv } from "@/lib/env";
+import { removeByPrefix } from "@/lib/storage";
 
 /**
  * A repository the user sealed a value into, as this browser remembers it.
@@ -22,8 +23,16 @@ export const MAX_RECENT = 12;
 /** Told when this tab remembers a seal; other tabs get a storage event. */
 const CHANGED = "sealer:recent-repos";
 
+const PREFIX = "sealer.recent-repos:";
+
 function storageKey(login: string, env: string): string {
-  return `sealer.recent-repos:${login}:${env}`;
+  return `${PREFIX}${login}:${env}`;
+}
+
+/** Forgets every user's recent repositories in this browser. */
+export function forgetRecentRepos(): void {
+  removeByPrefix(PREFIX);
+  window.dispatchEvent(new Event(CHANGED));
 }
 
 /** The remembered repositories in raw, newest first; bad entries dropped. */

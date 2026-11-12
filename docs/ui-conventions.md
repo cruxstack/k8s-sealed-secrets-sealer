@@ -20,8 +20,15 @@ pending changes, then those they sealed into from this browser, newest
 first, each opening the file a value last went into. The browser keeps
 these per user and env in its storage, names and times only, and a
 repository no longer in the list is left out; the palette lists them first
-too. The navigation holds what everyone uses, and Fleet for the env's
-admins; the current page's item is marked (`aria-current="page"`).
+too. The repository list itself shows at once from this browser (the last
+one it was sent, kept 14 days) while the server is asked for the current
+one, with "Checking for changes…" beside its heading; the current list
+replaces it where it stands. A check that fails leaves the saved list
+with a warning that says when it is from, and Try Again. Sign Out removes
+every list and recent repository this browser keeps.
+
+The navigation holds what everyone uses, and Fleet for the env's admins;
+the current page's item is marked (`aria-current="page"`).
 
 Every page but signing in is about one env, named first in its path, so a
 link keeps its env. Components read the env from `useEnv()`, never from the

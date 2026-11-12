@@ -13,6 +13,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import apiClient from "@/api/client";
+import { readRepoCache, writeRepoCache } from "@/lib/repo-cache";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { routeTree } from "@/routeTree.gen";
 import {
@@ -43,6 +44,30 @@ function renderAt(path: string, api: FakeApi) {
     </ThemeProvider>,
   );
   return router;
+}
+
+/** ME in dev, whose repository list this browser keeps. */
+const SAVED = { user: ME.user!.id, env: "dev" };
+
+/**
+ * The fake API, with the repository list held back until released, and
+ * the abort signal each list request was given.
+ */
+function holdingList(api: FakeApi) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const signals: unknown[] = [];
+  const held: FakeApi = {
+    ...api,
+    adapter: async (config) => {
+      if (config.url?.endsWith("/repos")) {
+        signals.push(config.signal);
+        await gate;
+      }
+      return api.adapter(config);
+    },
+  };
+  return { api: held, release, signals };
 }
 
 describe("repositories", () => {
@@ -189,6 +214,124 @@ describe("repositories", () => {
       target: { value: "provider" },
     });
     expect(within(files).getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("shows the list saved in this browser at once, then the server's, and saves it", async () => {
+    writeRepoCache(
+      SAVED,
+      { repositories: [REPO_PLATFORM] },
+      Date.now() - 3 * 60_000,
+    );
+    const held = holdingList(
+      fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] }),
+    );
+    renderAt("/secrets", held.api);
+
+    // at once, from this browser, while the server is asked
+    expect(
+      await screen.findByRole("rowheader", { name: "example-org/platform" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Loading repositories")).toBeNull();
+    expect(
+      screen.queryByRole("rowheader", { name: "example-org/apps" }),
+    ).toBeNull();
+    expect(screen.getByText("Checking for changes…")).toBeInTheDocument();
+
+    // the server's list replaces it where it stands, and is saved
+    held.release();
+    expect(
+      await screen.findByRole("rowheader", { name: "example-org/apps" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("Checking for changes…")).toBeNull(),
+    );
+    expect(
+      readRepoCache(SAVED)?.list.repositories.map((r) => r.full_name),
+    ).toEqual(["example-org/apps", "example-org/platform"]);
+  });
+
+  it("saves the server's list even when a repository is opened before it comes", async () => {
+    writeRepoCache(
+      SAVED,
+      { repositories: [REPO_APPS] },
+      Date.now() - 60 * 60_000,
+    );
+    const held = holdingList(
+      fakeApi({
+        me: ME,
+        repos: [REPO_APPS, REPO_PLATFORM],
+        files: { "example-org/apps": listing() },
+      }),
+    );
+    const router = renderAt("/secrets", held.api);
+    const apps = await screen.findByRole("rowheader", {
+      name: "example-org/apps",
+    });
+    fireEvent.click(within(apps).getByRole("link"));
+    await screen.findByRole("list", { name: "Files" });
+    expect(router.state.location.pathname).toBe(
+      "/dev/secrets/example-org/apps",
+    );
+
+    // the request had no signal to cancel it with when the page went
+    expect(held.signals).toEqual([undefined]);
+    held.release();
+    await waitFor(() =>
+      expect(readRepoCache(SAVED)?.list.repositories).toHaveLength(2),
+    );
+  });
+
+  it("keeps the saved list when it can't be checked, says so, and tries again", async () => {
+    writeRepoCache(
+      SAVED,
+      { repositories: [REPO_APPS] },
+      Date.now() - 2 * 3_600_000,
+    );
+    const failing = fakeApi({ me: ME, reposStatus: 502 });
+    const working = fakeApi({ me: ME, repos: [REPO_APPS, REPO_PLATFORM] });
+    let ok = false;
+    renderAt("/secrets", {
+      ...working,
+      adapter: (config) => (ok ? working : failing).adapter(config),
+    });
+
+    const note = await screen.findByRole("status", {
+      name: "List not checked",
+    });
+    expect(note).toHaveTextContent(
+      /^Couldn't check the list for changes: .+ It is as of 2h ago\./,
+    );
+    expect(
+      screen.getByRole("rowheader", { name: "example-org/apps" }),
+    ).toBeInTheDocument();
+    // a failed check leaves the saved list as it was
+    expect(readRepoCache(SAVED)?.list.repositories).toHaveLength(1);
+
+    ok = true;
+    fireEvent.click(within(note).getByRole("button", { name: "Try Again" }));
+    expect(
+      await screen.findByRole("rowheader", { name: "example-org/platform" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("status", { name: "List not checked" }),
+    ).toBeNull();
+    expect(readRepoCache(SAVED)?.list.repositories).toHaveLength(2);
+  });
+
+  it("forgets the saved list when the server refuses it", async () => {
+    writeRepoCache(
+      SAVED,
+      { repositories: [REPO_APPS] },
+      Date.now() - 3 * 60_000,
+    );
+    renderAt("/secrets", fakeApi({ me: ME, reposStatus: 403 }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not load repositories/i,
+    );
+    expect(
+      screen.queryByRole("rowheader", { name: "example-org/apps" }),
+    ).toBeNull();
+    expect(readRepoCache(SAVED)).toBeNull();
   });
 
   it("says when repositories may be missing from the list", async () => {
