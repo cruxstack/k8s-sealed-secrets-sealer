@@ -15,6 +15,7 @@ import { IconButton } from "./icon-button";
 import { ReasonButton } from "./reason-button";
 import { FilterInput } from "./filter-input";
 import { InfoTip } from "./info-tip";
+import { OneLine } from "./one-line";
 import { RegionTag } from "./region-tag";
 import { RelativeTime } from "./relative-time";
 import { Dash, Table } from "./table";
@@ -167,6 +168,72 @@ describe("InfoTip", () => {
     expect(screen.getByText("One agent sealed it.")).not.toBeVisible();
     fireEvent.focus(about);
     await waitFor(() => expect(tooltipShown()).toBe("One agent sealed it."));
+  });
+});
+
+describe("OneLine", () => {
+  const path = "deploy/notifications/overlays/dev/sealed-secret.yaml";
+  const line = () => (
+    <TooltipProvider>
+      <OneLine full={path}>
+        <span className="block truncate">{path}</span>
+      </OneLine>
+    </TooltipProvider>
+  );
+
+  // jsdom lays nothing out: a `truncate` element is as wide as it is told,
+  // by getters on HTMLElement that shadow Element's until they are deleted
+  function widths(scroll: number, client: number) {
+    const proto = HTMLElement.prototype;
+    const width = (n: number) => ({
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("truncate") ? n : 0;
+      },
+    });
+    Object.defineProperty(proto, "scrollWidth", width(scroll));
+    Object.defineProperty(proto, "clientWidth", width(client));
+    return () => {
+      Reflect.deleteProperty(proto, "scrollWidth");
+      Reflect.deleteProperty(proto, "clientWidth");
+    };
+  }
+
+  it("is plain text when it fits: no tooltip, no stop for the keyboard", async () => {
+    const restore = widths(200, 200);
+    try {
+      render(line());
+      const text = screen.getByText(path);
+      const wrapper = text.parentElement as HTMLElement;
+      expect(wrapper).not.toHaveAttribute("tabindex");
+      fireEvent.focus(wrapper);
+      fireEvent.click(wrapper);
+      // give a tooltip the chance to open
+      await new Promise((r) => setTimeout(r, 50));
+      expect(tooltipShown()).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it("when cut, shows the whole on focus and on a tap", async () => {
+    const restore = widths(400, 200);
+    try {
+      render(line());
+      const wrapper = screen.getByText(path).parentElement as HTMLElement;
+      expect(wrapper).toHaveAttribute("tabindex", "0");
+      // the content says it all; the tooltip adds no description
+      expect(wrapper).not.toHaveAttribute("aria-describedby");
+      fireEvent.focus(wrapper);
+      await waitFor(() => expect(tooltipShown()).toBe(path));
+      fireEvent.keyDown(wrapper, { key: "Escape" });
+      await waitFor(() => expect(tooltipShown()).toBeUndefined());
+      fireEvent.pointerDown(wrapper, { pointerType: "touch" });
+      fireEvent.click(wrapper);
+      await waitFor(() => expect(tooltipShown()).toBe(path));
+    } finally {
+      restore();
+    }
   });
 });
 

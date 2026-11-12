@@ -11,6 +11,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RegionTag } from "@/components/ui/region-tag";
+import { OneLine } from "@/components/ui/one-line";
 import { CardHeading } from "@/components/ui/section-heading";
 import {
   Dash,
@@ -25,7 +26,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { FilePath, fileStatus } from "./FileList";
+import { PathLine, fileStatus } from "./FileList";
 import { fileHints } from "./hints";
 import { KeyList } from "./KeyList";
 import {
@@ -201,21 +202,25 @@ function Documents({
   );
 }
 
+/**
+ * A file's panel: a header with its title, path and description, each on
+ * one line with the whole in a tooltip when it is cut, and its actions.
+ */
 function Panel({
   file,
-  aside,
   actions,
   children,
 }: {
   file: RepositoryFile;
-  aside?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
 }) {
-  const { title } = fileHints(file);
+  const { title, description } = fileHints(file);
   const path = (
     <>
-      <FilePath path={file.path} />
+      <OneLine full={file.path} tooltipClassName="font-mono break-all">
+        <PathLine path={file.path} quiet={Boolean(title)} hover={false} />
+      </OneLine>
       <CopyButton value={file.path} label="file path" />
     </>
   );
@@ -224,23 +229,42 @@ function Panel({
       aria-label={file.path}
       className="overflow-hidden rounded-xl border bg-card shadow-xs dark:shadow-none"
     >
-      {/* on a phone the actions go under the path, which needs the width */}
-      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      {/* the description runs under the actions, the header's whole
+          width; on a phone the actions go last, under it */}
+      <div className="grid gap-x-4 gap-y-1 border-b border-border px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0 space-y-1">
           {/* a file's title names it, with its path under it */}
           {title ? (
             <>
-              <h2 className="text-[15px] leading-6 font-semibold">{title}</h2>
-              <p className="flex items-center gap-1 text-[13px]">{path}</p>
+              <h2 className="text-[15px] leading-6 font-semibold">
+                <OneLine full={title}>
+                  <span className="block truncate">{title}</span>
+                </OneLine>
+              </h2>
+              <p className="flex min-w-0 items-center gap-1 text-[13px]">
+                {path}
+              </p>
             </>
           ) : (
-            <h2 className="flex items-center gap-1 text-[15px] leading-6">
+            <h2 className="flex min-w-0 items-center gap-1 text-[15px] leading-6">
               {path}
             </h2>
           )}
-          {aside}
         </div>
-        {actions && <div className="shrink-0">{actions}</div>}
+        {actions && (
+          <div className="order-last mt-2 self-start sm:order-none sm:mt-0">
+            {actions}
+          </div>
+        )}
+        {description && (
+          <div className="min-w-0 sm:col-span-2">
+            <OneLine full={description}>
+              <span className="block truncate text-sm text-muted-foreground italic">
+                {description}
+              </span>
+            </OneLine>
+          </div>
+        )}
       </div>
       {children}
     </section>
@@ -328,18 +352,6 @@ export function FilePanel({
   return (
     <Panel
       file={file}
-      aside={
-        <>
-          {hints.description && (
-            <p className="text-sm text-foreground">{hints.description}</p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            {docs.length === 1
-              ? `1 SealedSecret for the ${env} env`
-              : `${docs.length} SealedSecrets for the ${env} env`}
-          </p>
-        </>
-      }
       actions={
         (hints.docs || resealer) && (
           <div className="flex flex-wrap items-center gap-2">

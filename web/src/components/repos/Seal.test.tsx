@@ -743,9 +743,18 @@ describe("hints", () => {
     );
 
     const panel = await screen.findByRole("region", { name: BILLING });
-    expect(
-      within(panel).getByText("Credentials for the payment provider"),
-    ).toBeVisible();
+    // the description reads apart from the title and path, on one line
+    const description = within(panel).getByText(
+      "Credentials for the payment provider",
+    );
+    expect(description).toBeVisible();
+    expect(description).toHaveClass(
+      "truncate",
+      "italic",
+      "text-muted-foreground",
+    );
+    // the documents table counts the SealedSecrets; the header doesn't
+    expect(panel).not.toHaveTextContent(/SealedSecrets? for the dev env/);
     const docs = within(panel).getByRole("link", { name: /docs/i });
     expect(docs).toHaveAttribute(
       "href",
@@ -781,6 +790,9 @@ describe("hints", () => {
     const files = screen.getByRole("list", { name: "Files" });
     const item = within(files).getByRole("button", { name: /billing/ });
     expect(item).toHaveTextContent("Credentials for the payment provider");
+    expect(
+      within(item).getByText("Credentials for the payment provider"),
+    ).toHaveClass("italic", "text-muted-foreground");
     expect(item).toHaveTextContent("2 Missing");
     fireEvent.change(screen.getByLabelText("Filter files"), {
       target: { value: "payment" },
