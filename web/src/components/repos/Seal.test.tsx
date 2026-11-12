@@ -145,9 +145,10 @@ describe("sealing", () => {
     expect(item.getByRole("button", { name: BILLING })).toBeInTheDocument();
     expect(item.getByText("2 documents")).toBeInTheDocument();
     expect(item.getByTitle(/^Sealed by dev-use1-blue with/)).toBeVisible();
-    const keys = within(
-      screen.getByRole("region", { name: BILLING }),
-    ).getByRole("list", { name: "Keys" });
+    // sealed, it leaves the keys to seal for those pending
+    const panel = within(screen.getByRole("region", { name: BILLING }));
+    fireEvent.click(panel.getByRole("button", { name: "Pending 1" }));
+    const keys = panel.getByRole("list", { name: "Keys" });
     const row = within(keys).getByRole("button", { name: /^api-token/ });
     expect(row).toHaveTextContent("api-tokenNew, in your pending changes");
     // "Seal Again" is only for values sealed with a revoked key
@@ -909,8 +910,13 @@ describe("regions", () => {
     renderAt(`${PAGE}?file=${encodeURIComponent(BASE)}`, api);
     const { form, key, value } = await openForm(BASE);
 
-    // the key's regions show as chips, which pick nothing
+    // its one key is set, so the list opens saying so; shown, the key's
+    // regions are chips, which pick nothing
     const panel = screen.getByRole("region", { name: BASE });
+    expect(panel).toHaveTextContent("Its one key is set.");
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Show the Key" }),
+    );
     const chips = within(panel).getByRole("list", { name: "token by region" });
     expect(within(chips).getAllByRole("listitem")).toHaveLength(2);
     expect(within(chips).queryByRole("button")).toBeNull();
@@ -980,6 +986,9 @@ describe("regions", () => {
     );
     const { form } = await openForm(USE1);
     const panel = screen.getByRole("region", { name: USE1 });
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Show the Key" }),
+    );
     const chips = within(panel).getByRole("list", { name: "token by region" });
     expect(within(chips).getByLabelText("use1: set")).toBeInTheDocument();
     expect(within(chips).queryByRole("button")).toBeNull();
