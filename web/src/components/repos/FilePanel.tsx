@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useRef, useState, type ReactNode } from "react";
 import { BookOpen, ExternalLink, Info, ShieldAlert } from "lucide-react";
 import type {
   RepositoryFile,
@@ -219,7 +219,16 @@ function Panel({
   const { title, description } = fileHints(file);
   const path = (
     <>
-      <OneLine full={file.path} tooltipClassName="font-mono break-all">
+      <OneLine
+        // whole, breaking only after a slash when it is wider than the tip
+        full={file.path.split(/(?<=\/)/).map((part, i) => (
+          <Fragment key={i}>
+            {part}
+            <wbr />
+          </Fragment>
+        ))}
+        tooltipClassName="max-w-[min(48rem,calc(100vw-2rem))] font-mono [overflow-wrap:anywhere]"
+      >
         <PathLine path={file.path} quiet={Boolean(title)} hover={false} />
       </OneLine>
       <CopyButton value={file.path} label="file path" />

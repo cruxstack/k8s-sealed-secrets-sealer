@@ -39,11 +39,21 @@ export function OneLine({
     if (!el) return;
     const check = () => setCut(isCut(el));
     check();
-    // the space it has changes with the window and what sits beside it
-    const observer = new ResizeObserver(check);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [full]);
+    // the space it has changes with the window and what sits beside it,
+    // and what it holds with the file shown
+    const resized = new ResizeObserver(check);
+    resized.observe(el);
+    const changed = new MutationObserver(check);
+    changed.observe(el, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    return () => {
+      resized.disconnect();
+      changed.disconnect();
+    };
+  }, []);
   return (
     <Tooltip open={cut && open} onOpenChange={setOpen}>
       <TooltipTrigger asChild>
