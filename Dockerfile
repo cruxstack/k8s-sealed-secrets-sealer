@@ -4,7 +4,7 @@
 
 # The web UI is plain static files, so it builds once on the build machine's
 # platform. Install scripts stay disabled.
-FROM --platform=$BUILDPLATFORM node:26.13.0-alpine3.24@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS web
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -15,7 +15,7 @@ RUN npm run build
 # the target platform, so multi-platform builds need no emulation. Each image
 # compiles only its own binary; the build cache mount lets a second image
 # built on the same machine reuse the packages they share.
-FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 
 WORKDIR /src
 
@@ -46,13 +46,13 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         -o /out/agent ./cmd/agent
 
 # static, CA certificates, no shell; runs as uid 65532
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS control-plane
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS control-plane
 COPY --from=build-control-plane /out/server /server
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/server"]
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS agent
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS agent
 COPY --from=build-agent /out/agent /agent
 USER 65532:65532
 EXPOSE 8081
